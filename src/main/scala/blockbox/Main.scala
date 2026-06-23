@@ -1189,6 +1189,7 @@ final class Blockbox:
   private var enterCustomSeed = false
   private var saveDirectory: String = ""
   private var settingsReturnTo: Screen = Screen.MainMenu
+  private var pauseEscReturnsToGame = true
   private var chatOpen = false
   private var chatInput = ""
   private var suppressNextChatChar = false
@@ -1430,6 +1431,7 @@ final class Blockbox:
         else if key == GLFW_KEY_LEFT || key == GLFW_KEY_MINUS then changeRenderDistance(-8)
         else if key == GLFW_KEY_RIGHT || key == GLFW_KEY_EQUAL then changeRenderDistance(8)
         else if key == GLFW_KEY_M then toggleGameMode()
+        else if key == GLFW_KEY_P then pauseEscReturnsToGame = !pauseEscReturnsToGame
       case Screen.Playing =>
         if chatOpen then
           if key == GLFW_KEY_ENTER then
@@ -1485,7 +1487,8 @@ final class Blockbox:
         else if key == GLFW_KEY_BACKSPACE && playerName.nonEmpty then playerName = playerName.init
       case Screen.Paused =>
         if key == GLFW_KEY_ENTER then enterGame()
-        else if key == GLFW_KEY_ESCAPE then leaveGame(Screen.MainMenu)
+        else if key == GLFW_KEY_ESCAPE then
+          if pauseEscReturnsToGame then enterGame() else leaveGame(Screen.MainMenu)
         else if key == GLFW_KEY_S then
           settingsReturnTo = Screen.Paused
           screen = Screen.Settings
@@ -1674,7 +1677,7 @@ final class Blockbox:
 
   private def handleSettingsClick(mx: Float, my: Float): Unit =
     val h = framebufferHeight.toFloat; val s = uiScale
-    val pH = 540f * s; val pY = h / 2f - pH / 2f
+    val pH = 590f * s; val pY = (h / 2f - pH / 2f).max(12f * s)
     val cx = framebufferWidth / 2f; val settingX = cx - 220f * s
     if inRect(mx, my, settingX, pY + 118 * uiScale, 440 * uiScale, 30 * uiScale) then
       updateSlider(mx); sliderActive = "rd"
@@ -1688,9 +1691,10 @@ final class Blockbox:
     else if inRect(mx, my, settingX, pY + 365 * s, 440 * s, 28 * s) then toggleGameMode()
     else if inRect(mx, my, settingX, pY + 405 * s, 440 * s, 28 * s) then soundEnabled = !soundEnabled
     else if inRect(mx, my, settingX, pY + 445 * s, 440 * s, 28 * s) then toggleFullscreen()
+    else if inRect(mx, my, settingX, pY + 485 * s, 440 * s, 28 * s) then pauseEscReturnsToGame = !pauseEscReturnsToGame
     else
       val buttonW = 300f * s; val buttonX = cx - buttonW / 2f
-      if inRect(mx, my, buttonX, pY + 495 * s, buttonW, 44f * s) then
+      if inRect(mx, my, buttonX, pY + 535 * s, buttonW, 44f * s) then
         sliderActive = null
         screen = settingsReturnTo
         if settingsReturnTo == Screen.Playing then
@@ -2058,6 +2062,10 @@ final class Blockbox:
 
   private def canUseLocalChunkSaves: Boolean = !isClientOnlyMultiplayer
 
+  private def worldsRootDir: java.io.File = new java.io.File("worlds")
+  private def currentWorldDir: java.io.File = new java.io.File(worldsRootDir, worldName)
+  private def currentChunksDir: java.io.File = new java.io.File(currentWorldDir, "chunks")
+
   private def snapshotWorldEditsForNetwork(): Seq[(Int, Int, Int, Byte)] =
     chunks.values.toSeq.flatMap { chunk =>
       val bx = chunk.baseX
@@ -2070,7 +2078,7 @@ final class Blockbox:
   private def saveLoadedChunks(): Unit =
     if !canUseLocalChunkSaves then return
     try
-      val chunksDir = new java.io.File(s"worlds/$worldName/chunks")
+      val chunksDir = currentChunksDir
       chunksDir.mkdirs()
       chunks.values.foreach(_.save(chunksDir))
     catch case e: Exception => System.err.println(s"Chunk save failed: $e")
@@ -2084,7 +2092,7 @@ final class Blockbox:
   private def saveWorld(): Unit =
     if !canUseLocalChunkSaves then return
     try
-      val dir = new java.io.File(s"worlds/$worldName")
+      val dir = currentWorldDir
       dir.mkdirs()
       val chunksDir = new java.io.File(dir, "chunks")
       chunksDir.mkdirs()
@@ -2486,13 +2494,14 @@ final class Blockbox:
     breakingProgress = 0f
 
   private def triggerSandFallAbove(x: Int, y: Int, z: Int): Unit =
-    val above = activeBlockAt(x, y + 1, z)
-    if above == Block.Sand then sandFallQueue.enqueue((x, y + 1, z))
+    // Falling sand is disabled for now: sand behaves as a normal solid block until
+    // its visuals and physics are rebuilt to a higher standard.
+    ()
 
   private def triggerSandFallBelow(x: Int, y: Int, z: Int): Unit =
-    val below = activeBlockAt(x, y - 1, z)
-    if below == Block.Air || below == Block.Water then
-      sandFallQueue.enqueue((x, y, z))
+    // Falling sand is disabled for now: sand behaves as a normal solid block until
+    // its visuals and physics are rebuilt to a higher standard.
+    ()
 
   private def wl(x: Int, y: Int, z: Int): Int = waterLevels.get((x, y, z)) match
     case Some(b) => b.toInt & 0xFF
@@ -2591,37 +2600,13 @@ final class Blockbox:
     for key <- toRemove do waterLevels.remove(key)
 
   private def updateSandFalling(): Unit =
-    var processed = 0
-    while sandFallQueue.nonEmpty && processed < maxSandUpdatesPerFrame do
-      val (x, y, z) = sandFallQueue.dequeue()
-      if activeBlockAt(x, y, z) == Block.Sand then
-        val below = activeBlockAt(x, y - 1, z)
-        if below == Block.Air || below == Block.Water then
-          setActiveBlock(x, y, z, Block.Air)
-          visibleSandFall(x.toFloat, y.toFloat, z.toFloat, y.toFloat)
-          dirtyChunkAt(x, z)
-          sandFallQueue.enqueue((x, y + 1, z))
-          processed += 1
+    sandFallQueue.clear()
 
   private def visibleSandFall(x: Float, y: Float, z: Float, startY: Float): Unit =
-    fallingSandParticles += ((x, y, z, startY))
+    ()
 
   private def updateSandParticles(dt: Float): Unit =
-    val speed = 5f
-    val updated = ArrayBuffer.empty[(Float, Float, Float, Float)]
-    for (x, y, z, startY) <- fallingSandParticles do
-      val ny = y - speed * dt
-      val bx = floor(x + 0.5f).toInt; val by = floor(ny).toInt; val bz = floor(z + 0.5f).toInt
-      val blockBelow = if by >= 0 && by < Terrain.worldHeight then activeBlockAt(bx, by, bz) else Block.Air
-      if ny > startY - 64f && !blockBelow.solid && blockBelow != Block.Sand && blockBelow != Block.Water then
-        updated += ((x, ny, z, startY))
-      else
-        val landingY = (if by < 0 then 0 else by).max(0).min(Terrain.worldHeight - 1)
-        if activeBlockAt(bx, landingY, bz) == Block.Air then
-          setActiveBlock(bx, landingY, bz, Block.Sand)
-          dirtyChunkAt(bx, bz)
     fallingSandParticles.clear()
-    fallingSandParticles ++= updated
 
   private def blockHardness(block: Block): Float = block match
     case Block.Leaves | Block.Snow => 0.18f
@@ -3517,28 +3502,8 @@ final class Blockbox:
     glEnable(GL_FOG)
 
   private def renderFallingSand(): Unit =
-    if fallingSandParticles.isEmpty then return
-    glDisable(GL_FOG)
-    glEnable(GL_TEXTURE_2D)
-    activeAtlas.bind()
-    for (x, y, z, startY) <- fallingSandParticles do
-      val (u0, v0) = activeAtlas.uv(Block.Sand, FaceKind.Top, 0f, 0f)
-      val (u1, v1) = activeAtlas.uv(Block.Sand, FaceKind.Top, 1f, 1f)
-      val alpha = 0.90f
-      glColor4f(1f, 1f, 1f, alpha)
-      glBegin(GL_QUADS)
-      glTexCoord2f(u0, v0); glVertex3f(x, y, z)
-      glTexCoord2f(u1, v0); glVertex3f(x + 1, y, z)
-      glTexCoord2f(u1, v1); glVertex3f(x + 1, y + 1, z)
-      glTexCoord2f(u0, v1); glVertex3f(x, y + 1, z)
-      glTexCoord2f(u0, v0); glVertex3f(x, y, z + 1)
-      glTexCoord2f(u1, v0); glVertex3f(x + 1, y, z + 1)
-      glTexCoord2f(u1, v1); glVertex3f(x + 1, y + 1, z + 1)
-      glTexCoord2f(u0, v1); glVertex3f(x, y + 1, z + 1)
-      glEnd()
-    glBindTexture(GL_TEXTURE_2D, 0)
-    glDisable(GL_TEXTURE_2D)
-    glEnable(GL_FOG)
+    // Falling sand rendering is disabled with the physics toggle above.
+    ()
 
   private def renderChat(): Unit =
     glDisable(GL_DEPTH_TEST); glDisable(GL_CULL_FACE); setupOrtho()
@@ -3830,7 +3795,7 @@ final class Blockbox:
     rect(0, h * 0.62f, w, h * 0.38f, 0.06f, 0.18f, 0.06f, 0.85f)
     rect(0, h * 0.76f, w, h * 0.24f, 0.22f, 0.16f, 0.08f, 0.80f)
     val cx = w / 2f; val s = uiScale
-    val pW = (520f * s).min(w * 0.92f); val pH = (540f * s).min(h * 0.92f); val pX = cx - pW / 2f; val pY = (h / 2f - pH / 2f).max(12f * s)
+    val pW = (520f * s).min(w * 0.92f); val pH = (590f * s).min(h * 0.92f); val pX = cx - pW / 2f; val pY = (h / 2f - pH / 2f).max(12f * s)
     drawPanel(pX, pY, pW, pH)
     centeredText(cx, pY + 36 * s, "OPTIONS", 1f, 0.95f, 0.55f, 2.6f * s)
     rect(pX + 40 * s, pY + 68 * s, pW - 80 * s, 1, 0.30f, 0.30f, 0.35f, 0.30f)
@@ -3852,9 +3817,10 @@ final class Blockbox:
     clickRow(pY + 365 * s, s"Game mode: ${gameMode}")
     clickRow(pY + 405 * s, s"Sound effects: ${onOff(soundEnabled)}")
     clickRow(pY + 445 * s, s"Fullscreen: ${onOff(fullscreen)}")
-    rect(pX + 40 * s, pY + 485 * s, pW - 80 * s, 1, 0.30f, 0.30f, 0.35f, 0.20f)
+    clickRow(pY + 485 * s, s"Pause ESC: ${if pauseEscReturnsToGame then "Resume game" else "Quit to title"}")
+    rect(pX + 40 * s, pY + 525 * s, pW - 80 * s, 1, 0.30f, 0.30f, 0.35f, 0.20f)
     val buttonW = 300f * s; val buttonH = 44f * s; val buttonX = cx - buttonW / 2f
-    drawButton(buttonX, pY + 495 * s, buttonW, buttonH, "Done")
+    drawButton(buttonX, pY + 535 * s, buttonW, buttonH, "Done")
 
   private def renderPauseMenu(): Unit =
     glDisable(GL_DEPTH_TEST); glDisable(GL_CULL_FACE); setupOrtho()
@@ -4487,7 +4453,7 @@ final class Blockbox:
             if !chunk.hasMesh && !chunk.meshReady then
               queueChunkMesh(chunk)
     val toRemove = chunks.keys.filterNot(wanted.contains).toList
-    val chunksDir = new java.io.File(s"worlds/$worldName/chunks")
+    val chunksDir = currentChunksDir
     if canUseLocalChunkSaves then chunksDir.mkdirs()
     toRemove.foreach { key =>
       chunks.get(key).foreach { chunk =>
@@ -4656,8 +4622,7 @@ final class Blockbox:
           setActiveBlock(x, y, z, block)
           if gameMode == GameMode.Survival then inventory(block.ordinal) -= 1
           dirtyChunkAt(x, z)
-          if block == Block.Sand then triggerSandFallBelow(x, y, z)
-          triggerSandFallAbove(x, y, z)
+          // Sand currently behaves like a normal block.
           playPlaceSound()
           sendBlockNetwork(x, y, z, block.ordinal.toByte)
     }
@@ -4740,11 +4705,11 @@ final class Blockbox:
   private def saveChunk(cx: Int, cz: Int): Unit =
     if !canUseLocalChunkSaves then return
     val chunk = chunks.get((cx, cz))
-    chunk.foreach(_.save(new java.io.File(s"worlds/$worldName/chunks")))
+    chunk.foreach(_.save(currentChunksDir))
 
   private def loadChunkIfSaved(cx: Int, cz: Int): Boolean =
     if !canUseLocalChunkSaves then return false
-    val chunksDir = new java.io.File(s"worlds/$worldName/chunks")
+    val chunksDir = currentChunksDir
     val file = new java.io.File(chunksDir, s"chunk_${cx}_${cz}.dat")
     if file.exists() then
       val chunk = Chunk(cx, cz, activeAtlas, terrainGen)
