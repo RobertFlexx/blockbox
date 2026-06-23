@@ -1,0 +1,10 @@
+.scala-build/
+.bsp/
+.metals/
+.bloop/
+target/
+out/
+*.class
+*.log
+*.hprof
+.DS_Store
