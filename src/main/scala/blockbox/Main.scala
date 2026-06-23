@@ -823,7 +823,16 @@ final class Chunk(val cx: Int, val cz: Int, atlas: TextureAtlas, gen: TerrainGen
       glDrawArrays(GL_TRIANGLES, 0, count)
 
 // Multiplayer networking
-final class GameServer(port: Int, worldSeed: Long, spawn: Vec3, hostName: String, hostColorId: Int, onBlockChange: (Int, Int, Int, Byte) => Unit):
+final class GameServer(
+  port: Int,
+  worldSeed: Long,
+  spawn: Vec3,
+  hostName: String,
+  hostColorId: Int,
+  onBlockChange: (Int, Int, Int, Byte) => Unit,
+  worldSnapshot: () => Seq[(Int, Int, Int, Byte)],
+  hostPosition: () => Vec3
+):
   import GameServer.*
   private val serverSocket =
     val s = ServerSocket()
@@ -898,6 +907,24 @@ final class GameServer(port: Int, worldSeed: Long, spawn: Vec3, hostName: String
       clients -= client
     }
 
+  private def blockIntersectsPlayer(wx: Int, wy: Int, wz: Int, pos: Vec3): Boolean =
+    val half = 0.38f
+    val minX = floor(pos.x - half).toInt; val maxX = floor(pos.x + half).toInt
+    val minY = floor(pos.y - 1.70f).toInt; val maxY = floor(pos.y + 0.22f).toInt
+    val minZ = floor(pos.z - half).toInt; val maxZ = floor(pos.z + half).toInt
+    wx >= minX && wx <= maxX && wy >= minY && wy <= maxY && wz >= minZ && wz <= maxZ
+
+  private def canAcceptBlockChange(wx: Int, wy: Int, wz: Int, blockId: Byte): Boolean =
+    val id = blockId.toInt & 0xFF
+    if id == 0 then true
+    else
+      val hostBlocked = blockIntersectsPlayer(wx, wy, wz, hostPosition())
+      if hostBlocked then false
+      else
+        clients.synchronized {
+          !clients.exists(c => c.active && c.registered && c.hasPosition && blockIntersectsPlayer(wx, wy, wz, c.lastPos))
+        }
+
   private class ClientHandler(sock: Socket) extends Thread("blockbox-client-handler"):
     private val out = PrintWriter(BufferedWriter(OutputStreamWriter(sock.getOutputStream)), true)
     private val in = BufferedReader(InputStreamReader(sock.getInputStream))
@@ -905,6 +932,8 @@ final class GameServer(port: Int, worldSeed: Long, spawn: Vec3, hostName: String
     @volatile var registered = false
     @volatile var onlineName = "Player"
     @volatile var colorId = 0
+    @volatile var hasPosition = false
+    @volatile var lastPos: Vec3 = spawn
 
     override def run(): Unit =
       try
@@ -924,6 +953,12 @@ final class GameServer(port: Int, worldSeed: Long, spawn: Vec3, hostName: String
             val worldMsg = "WORLD|" + worldSeed.toString + "|" + f"${spawn.x}%.3f" + "|" + f"${spawn.y}%.3f" + "|" + f"${spawn.z}%.3f" + "|" + colorId.toString + "|" + safeHostName + "|" + safeHostColor.toString
             send(worldMsg)
             send("PLAYERS|" + activePlayerTokensSnapshot.mkString("|"))
+            val snapshot =
+              try worldSnapshot().take(50000)
+              catch case _: Exception => Seq.empty[(Int, Int, Int, Byte)]
+            send("SNAPBEGIN|" + snapshot.length.toString)
+            snapshot.foreach { case (sx, sy, sz, sid) => send("BLOC|" + sx + "|" + sy + "|" + sz + "|" + sid.toString) }
+            send("SNAPEND")
             registered = true
             registerClient(this)
             val joinMsg = s"JOIN|$onlineName|$colorId"
@@ -933,11 +968,16 @@ final class GameServer(port: Int, worldSeed: Long, spawn: Vec3, hostName: String
             if parts.length >= 5 then
               val x = parts(1).toInt; val y = parts(2).toInt; val z = parts(3).toInt
               val blockId = parts(4).toByte
-              onBlockChange(x, y, z, blockId)
-              serverEvents.put(line)
-              broadcast(line)
+              if canAcceptBlockChange(x, y, z, blockId) then
+                val clean = "BLOC|" + x + "|" + y + "|" + z + "|" + blockId.toString
+                onBlockChange(x, y, z, blockId)
+                serverEvents.put(clean)
+                broadcast(clean)
           else if registered && line.startsWith("POS|") then
             if parts.length >= 7 then
+              val px = parts(2).toFloat; val py = parts(3).toFloat; val pz = parts(4).toFloat
+              lastPos = Vec3(px, py, pz)
+              hasPosition = true
               val clean = "POS|" + onlineName + "|" + parts(2) + "|" + parts(3) + "|" + parts(4) + "|" + parts(5) + "|" + parts(6) + "|" + colorId.toString
               serverEvents.put(clean)
               broadcast(clean)
@@ -1102,6 +1142,11 @@ final class Blockbox:
   private var gameClient: GameClient = null
   private var playerName = "Player"
   private val remotePlayers = scala.collection.mutable.HashMap.empty[String, RemotePlayer]
+  // Multiplayer clients must not load local chunk files for the host seed. BLOC packets can
+  // arrive before the matching chunk has streamed in, so keep them here and apply them when
+  // that chunk is created. This prevents seed-correct clients from looking different just
+  // because old local chunk saves or early packets were used/lost.
+  private val pendingNetworkBlocks = scala.collection.mutable.HashMap.empty[(Int, Int, Int), Block]
   private val knownPlayerNames = scala.collection.mutable.HashSet.empty[String]
   private val playerColors = scala.collection.mutable.HashMap.empty[String, Int]
   private var localColorId = 0
@@ -1883,10 +1928,19 @@ final class Blockbox:
       localColorId = chooseRandomLocalColor()
       playerColors.clear()
       rememberPlayerColor(playerName, localColorId)
-      val server = GameServer(serverPort, worldSeed, camera, playerName, localColorId, (x, y, z, blockId) =>
-        val block = Block.fromId(blockId)
-        setActiveBlock(x, y, z, block)
-        dirtyChunkAt(x, z)
+      val server = GameServer(
+        serverPort,
+        worldSeed,
+        camera,
+        playerName,
+        localColorId,
+        (x, y, z, blockId) =>
+          val block = Block.fromId(blockId)
+          if block == Block.Air || canPlaceBlockAt(x, y, z) then
+            setActiveBlock(x, y, z, block)
+            dirtyChunkAt(x, z),
+        () => snapshotWorldEditsForNetwork(),
+        () => camera
       )
       gameServer = server
       verifyLocalServer(server.localPort) match
@@ -1973,6 +2027,7 @@ final class Blockbox:
     remotePlayers.clear()
     knownPlayerNames.clear()
     playerColors.clear()
+    pendingNetworkBlocks.clear()
     multiplayerMode = false
 
   private def startGame(): Unit =
@@ -1998,7 +2053,22 @@ final class Blockbox:
     screen = next
     glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL)
 
+  private def isClientOnlyMultiplayer: Boolean =
+    multiplayerMode && gameClient != null && gameServer == null
+
+  private def canUseLocalChunkSaves: Boolean = !isClientOnlyMultiplayer
+
+  private def snapshotWorldEditsForNetwork(): Seq[(Int, Int, Int, Byte)] =
+    chunks.values.toSeq.flatMap { chunk =>
+      val bx = chunk.baseX
+      val bz = chunk.baseZ
+      chunk.edits.synchronized {
+        chunk.edits.toList.map { case ((lx, ly, lz), block) => (bx + lx, ly, bz + lz, block.id) }
+      }
+    }.distinct
+
   private def saveLoadedChunks(): Unit =
+    if !canUseLocalChunkSaves then return
     try
       val chunksDir = new java.io.File(s"worlds/$worldName/chunks")
       chunksDir.mkdirs()
@@ -2012,6 +2082,7 @@ final class Blockbox:
     chunks.clear()
 
   private def saveWorld(): Unit =
+    if !canUseLocalChunkSaves then return
     try
       val dir = new java.io.File(s"worlds/$worldName")
       dir.mkdirs()
@@ -2696,8 +2767,11 @@ final class Blockbox:
               rememberPlayerColor(hostOnlineName, hostColor)
             if seed != worldSeed then
               worldSeed = seed
+              worldName = "Multiplayer-" + java.lang.Long.toUnsignedString(worldSeed, 36).toUpperCase
               terrainGen = TerrainGenerator(worldSeed)
               terrainHeightCache.clear()
+              pendingNetworkBlocks.clear()
+              waterLevels.clear()
               clearLoadedChunks(saveFirst = false)
             camera = Vec3(sx, sy, sz)
             velocity = Vec3(0f, 0f, 0f); onGround = false
@@ -2711,8 +2785,14 @@ final class Blockbox:
             val x = parts(1).toInt; val y = parts(2).toInt; val z = parts(3).toInt
             val blockId = parts(4).toByte
             val block = Block.fromId(blockId)
-            setActiveBlock(x, y, z, block)
-            dirtyChunkAt(x, z)
+            val cx = chunkCoordBlock(x); val cz = chunkCoordBlock(z)
+            if chunks.contains((cx, cz)) then
+              setActiveBlock(x, y, z, block)
+              dirtyChunkAt(x, z)
+            else
+              pendingNetworkBlocks((x, y, z)) = block
+        else if line.startsWith("SNAPBEGIN|") || line.startsWith("SNAPEND") then
+          ()
         else if line.startsWith("POS|") then
           if parts.length >= 7 then
             val name = networkSafeName(parts(1))
@@ -4356,6 +4436,24 @@ final class Blockbox:
       }
     }
 
+  private def applyPendingNetworkBlocksToChunk(cx: Int, cz: Int): Unit =
+    val chunkOpt = chunks.get((cx, cz))
+    if chunkOpt.isEmpty || pendingNetworkBlocks.isEmpty then return
+    val chunk = chunkOpt.get
+    var changed = false
+    val keys = pendingNetworkBlocks.keys.filter { case (wx, _, wz) => chunkCoordBlock(wx) == cx && chunkCoordBlock(wz) == cz }.toList
+    keys.foreach { case (wx, wy, wz) =>
+      pendingNetworkBlocks.remove((wx, wy, wz)).foreach { block =>
+        val lx = wx - cx * Terrain.chunkSize
+        val lz = wz - cz * Terrain.chunkSize
+        chunk.setBlock(lx, wy, lz, block)
+        if block == Block.Water then waterLevels((wx, wy, wz)) = 7.toByte
+        else waterLevels.remove((wx, wy, wz))
+        changed = true
+      }
+    }
+    if changed then chunk.markDirtyMesh()
+
   private def loadChunks(ccx: Int, ccz: Int): Unit =
     val worldRadius = renderDistance + 16
     val radiusSq = worldRadius * worldRadius
@@ -4371,7 +4469,9 @@ final class Blockbox:
         if dxb * dxb + dzb * dzb <= radiusSq then
           wanted += ((cx, cz))
           if !chunks.contains((cx, cz)) && loaded < maxPerFrame then
-            if loadChunkIfSaved(cx, cz) then
+            val loadedFromDisk = canUseLocalChunkSaves && loadChunkIfSaved(cx, cz)
+            if loadedFromDisk then
+              applyPendingNetworkBlocksToChunk(cx, cz)
               // Current/adjacent chunks should be ready immediately; far chunks can stream.
               if ring == 0 then chunks.get((cx, cz)).foreach(_.buildNowAndUpload()) else chunks.get((cx, cz)).foreach(queueChunkMesh)
               loaded += 1
@@ -4379,6 +4479,7 @@ final class Blockbox:
               val chunk = Chunk(cx, cz, activeAtlas, terrainGen)
               chunks((cx, cz)) = chunk
               initChunkWaterLevels(cx, cz)
+              applyPendingNetworkBlocksToChunk(cx, cz)
               if ring == 0 then chunk.buildNowAndUpload() else queueChunkMesh(chunk)
               loaded += 1
           else if chunks.contains((cx, cz)) then
@@ -4387,10 +4488,10 @@ final class Blockbox:
               queueChunkMesh(chunk)
     val toRemove = chunks.keys.filterNot(wanted.contains).toList
     val chunksDir = new java.io.File(s"worlds/$worldName/chunks")
-    chunksDir.mkdirs()
+    if canUseLocalChunkSaves then chunksDir.mkdirs()
     toRemove.foreach { key =>
       chunks.get(key).foreach { chunk =>
-        chunk.save(chunksDir)
+        if canUseLocalChunkSaves then chunk.save(chunksDir)
         chunk.dispose()
       }
       chunks -= key
@@ -4553,8 +4654,7 @@ final class Blockbox:
         val hasBlock = gameMode == GameMode.Creative || inventory(block.ordinal) > 0
         if hasBlock && canPlaceBlockAt(x, y, z) then
           setActiveBlock(x, y, z, block)
-          if gameMode == GameMode.Survival && collidesPlayer(camera) then setActiveBlock(x, y, z, Block.Air)
-          else if gameMode == GameMode.Survival then inventory(block.ordinal) -= 1
+          if gameMode == GameMode.Survival then inventory(block.ordinal) -= 1
           dirtyChunkAt(x, z)
           if block == Block.Sand then triggerSandFallBelow(x, y, z)
           triggerSandFallAbove(x, y, z)
@@ -4562,13 +4662,19 @@ final class Blockbox:
           sendBlockNetwork(x, y, z, block.ordinal.toByte)
     }
 
+  private def blockIntersectsPlayerBody(x: Int, y: Int, z: Int, pos: Vec3): Boolean =
+    val half = 0.36f
+    val minX = floor(pos.x - half).toInt; val maxX = floor(pos.x + half).toInt
+    val minY = floor(pos.y - 1.70f).toInt; val maxY = floor(pos.y + 0.22f).toInt
+    val minZ = floor(pos.z - half).toInt; val maxZ = floor(pos.z + half).toInt
+    x >= minX && x <= maxX && y >= minY && y <= maxY && z >= minZ && z <= maxZ
+
+  private def placementBlockedByAnyPlayer(x: Int, y: Int, z: Int): Boolean =
+    blockIntersectsPlayerBody(x, y, z, camera) ||
+      remotePlayers.values.exists(rp => glfwGetTime() - rp.lastSeen <= 8.0 && blockIntersectsPlayerBody(x, y, z, rp.pos))
+
   private def canPlaceBlockAt(x: Int, y: Int, z: Int): Boolean =
-    val blockedByPlayer =
-      val half = 0.36f; val minX = floor(camera.x - half).toInt; val maxX = floor(camera.x + half).toInt
-      val minY = floor(camera.y - 1.70f).toInt; val maxY = floor(camera.y + 0.20f).toInt
-      val minZ = floor(camera.z - half).toInt; val maxZ = floor(camera.z + half).toInt
-      gameMode == GameMode.Survival && x >= minX && x <= maxX && y >= minY && y <= maxY && z >= minZ && z <= maxZ
-    !activeBlockAt(x, y, z).solid && !blockedByPlayer
+    !activeBlockAt(x, y, z).solid && !placementBlockedByAnyPlayer(x, y, z)
 
   private def renderRayLine(): Unit =
     val dir = viewDirection; val end = camera + dir * 8f
@@ -4632,10 +4738,12 @@ final class Blockbox:
         y += 1
 
   private def saveChunk(cx: Int, cz: Int): Unit =
+    if !canUseLocalChunkSaves then return
     val chunk = chunks.get((cx, cz))
     chunk.foreach(_.save(new java.io.File(s"worlds/$worldName/chunks")))
 
   private def loadChunkIfSaved(cx: Int, cz: Int): Boolean =
+    if !canUseLocalChunkSaves then return false
     val chunksDir = new java.io.File(s"worlds/$worldName/chunks")
     val file = new java.io.File(chunksDir, s"chunk_${cx}_${cz}.dat")
     if file.exists() then
