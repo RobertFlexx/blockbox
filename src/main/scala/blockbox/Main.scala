@@ -374,25 +374,23 @@ final class TerrainGenerator(val seed: Long):
     total / norm
 
   private def caveNoise(x: Int, y: Int, z: Int, h: Int): Boolean =
-    if y <= 2 || y >= Terrain.worldHeight - 3 then return false
-    // Do not carve caves right under the surface. Previous builds could expose
-    // huge ore-speckled vertical slices on beaches/cliffs that looked like chunk
-    // corruption. Caves still exist deeper down, just not as accidental surface wounds.
-    if y >= h - 18 then return false
+    if y <= 3 || y >= Terrain.worldHeight - 4 then return false
+    // Keep cave mouths from shredding beaches and hillsides, then carve deeper
+    // with larger overlapping 3D fields. This gives more minecraft-like chambers
+    // and tunnels instead of random pinholes everywhere.
+    if y >= h - 16 then return false
     val depth = (h - y).max(0).toFloat
-    val depthBoost = (depth / 40f).min(1f) * 0.20f
-    val n3d = valueNoise3D(x * 0.020f, y * 0.015f, z * 0.020f, 99)
-    val n3d2 = valueNoise3D(x * 0.035f, y * 0.025f, z * 0.035f, 199)
-    val combined = n3d * 0.35f + n3d2 * 0.25f + depthBoost
-    val blob = combined > 0.50f && combined < 0.72f
-    val tunnel = abs(valueNoise2D(x * 0.012f, z * 0.012f, 333))
-    val tunnelY = abs(valueNoise2D(x * 0.008f, z * 0.008f, 444))
-    val tunnelCarve = tunnel < 0.030f && tunnelY > 0.10f && tunnelY < 0.90f && y > 6 && y < Terrain.seaLevel + 40 && depth > 20f
-    val tunnel2 = abs(valueNoise2D((x + 50) * 0.020f, (z - 30) * 0.020f, 555))
-    val tunnelY2 = abs(valueNoise2D(x * 0.015f, z * 0.015f, 666))
-    val tunnelCarve2 = tunnel2 < 0.020f && tunnelY2 > 0.15f && tunnelY2 < 0.85f && y > 10 && y < Terrain.seaLevel + 30 && depth > 24f
-    val deepPocket = depth > 25f && valueNoise3D(x * 0.014f, y * 0.010f, z * 0.014f, 777) > 0.60f
-    blob || tunnelCarve || tunnelCarve2 || deepPocket
+    val lowEnough = y > 7 && depth > 18f
+    val chamberA = valueNoise3D(x * 0.018f, y * 0.012f, z * 0.018f, 99)
+    val chamberB = valueNoise3D((x + 700) * 0.026f, y * 0.018f, (z - 500) * 0.026f, 199)
+    val chamberC = valueNoise3D((x - 230) * 0.010f, y * 0.008f, (z + 830) * 0.010f, 777)
+    val cavern = lowEnough && depth > 26f && chamberA > 0.46f && chamberB > -0.18f && chamberC > 0.10f
+    val bigRoom = lowEnough && depth > 38f && chamberA > 0.56f && chamberB > 0.05f
+    val tunnelA = abs(valueNoise2D(x * 0.011f, z * 0.011f, 333))
+    val tunnelB = abs(valueNoise2D((x + 120) * 0.014f, (z - 90) * 0.014f, 444))
+    val tunnelHeight = valueNoise3D(x * 0.010f, y * 0.020f, z * 0.010f, 555)
+    val tunnel = lowEnough && depth > 22f && y < Terrain.seaLevel + 42 && ((tunnelA < 0.026f && tunnelHeight > -0.36f) || (tunnelB < 0.022f && tunnelHeight > -0.22f))
+    cavern || bigRoom || tunnel
 
   def heightAt(x: Int, z: Int): Int =
     val fx = x.toFloat; val fz = z.toFloat
@@ -433,16 +431,17 @@ final class TerrainGenerator(val seed: Long):
     else Block.Stone
 
   def furnaceAt(x: Int, z: Int, h: Int, surface: Block): Option[(Int, Int, Int)] =
-    if h <= Terrain.seaLevel + 1 || surface == Block.Sand then return None
-    val chance = h > 55 && hash(x, z, 0, 1001) > 0.998f
-    if chance then Some((x, h + 1, z))
-    else None
+    // Furnaces should be player-made utility blocks, not random world decoration.
+    None
 
   def treeAt(x: Int, z: Int, h: Int, surface: Block): Option[(Int, Int, Int, Int)] =
     if h <= Terrain.seaLevel + 2 || surface == Block.Sand then return None
+    val forestNoise = fbm2D((x + 840) * 0.010f, (z - 310) * 0.010f, 3, 612)
+    val localSpacing = hash(Math.floorDiv(x, 4), Math.floorDiv(z, 4), 0, 913)
     val treeChance = hash(x, z, 0, 19)
+    val threshold = if surface == Block.Snow then 0.992f else if forestNoise > 0.18f then 0.985f else 0.994f
     val height = if surface == Block.Snow then 6 else 4 + (hash(x, z, 0, 41) * 4).toInt
-    if treeChance > 0.975f then Some((x, h + 1, z, height))
+    if localSpacing > 0.58f && treeChance > threshold then Some((x, h + 1, z, height))
     else None
 
   private def smooth01(v: Float): Float =
@@ -495,11 +494,6 @@ final class TerrainGenerator(val seed: Long):
       val surface = surfaceBlock(wx, h, wz, h)
       treeAt(wx, wz, h, surface).foreach { case (tx, ty, tz, th) =>
         placeTreeWorld(blocks, baseX, baseZ, tx, ty, tz, th)
-      }
-      furnaceAt(wx, wz, h, surface).foreach { case (fx, fy, fz) =>
-        val lx = fx - baseX; val lz = fz - baseZ
-        if lx >= 0 && lx < Terrain.chunkSize && lz >= 0 && lz < Terrain.chunkSize && fy >= 0 && fy < Terrain.worldHeight then
-          blocks(idx(lx, fy, lz)) = Block.Furnace.id
       }
     // Do not do chunk-local "floating cleanup" here. Treating outside-of-chunk
     // as air made edge columns disagree with their neighbors and caused visible
@@ -1222,6 +1216,9 @@ final class Blockbox:
   private var enterCustomSeed = false
   private var loadWorldSelection = 0
   private var loadWorldScroll = 0
+  private var hostUseSavedWorld = false
+  private var hostWorldSelection = 0
+  private var hostWorldScroll = 0
   private var saveDirectory: String = ""
   private var settingsReturnTo: Screen = Screen.MainMenu
   private var pauseEscReturnsToGame = true
@@ -1558,8 +1555,12 @@ final class Blockbox:
           if joinNameFocused && playerName.nonEmpty then playerName = playerName.init
           else if !joinNameFocused && joinIpInput.nonEmpty then joinIpInput = joinIpInput.init
       case Screen.HostGame =>
+        val saves = worldSaveDirs
         if key == GLFW_KEY_ENTER then hostGame()
         else if key == GLFW_KEY_ESCAPE then screen = Screen.MainMenu
+        else if key == GLFW_KEY_L then hostUseSavedWorld = !hostUseSavedWorld
+        else if key == GLFW_KEY_UP then hostWorldSelection = (hostWorldSelection - 1).max(0)
+        else if key == GLFW_KEY_DOWN then hostWorldSelection = (hostWorldSelection + 1).min((saves.length - 1).max(0))
         else if key == GLFW_KEY_BACKSPACE && playerName.nonEmpty then playerName = playerName.init
       case Screen.Paused =>
         if key == GLFW_KEY_ENTER then enterGame()
@@ -1694,30 +1695,65 @@ final class Blockbox:
     glColor4f(0.12f, 0.20f, 0.34f, 1f); glVertex2f(w, h); glVertex2f(0, h)
     glEnd()
     rect(0, h * 0.62f, w, h * 0.38f, 0.06f, 0.18f, 0.06f, 0.88f)
-    val pW = (500f * s).min(w * 0.90f); val pH = (285f * s).min(h * 0.82f)
+    val pW = (620f * s).min(w * 0.92f); val pH = (470f * s).min(h * 0.88f)
     val pX = cx - pW / 2f; val pY = h / 2f - pH / 2f
     drawPanel(pX, pY, pW, pH)
     centeredTextFit(cx, pY + 34f * s, "HOST LAN GAME", 1f, 0.90f, 0.55f, 1.95f * s, pW - 60f * s)
     rect(pX + 40f * s, pY + 64f * s, pW - 80f * s, 1f, 0.30f, 0.30f, 0.35f, 0.30f)
-    val fieldW = pW - 96f * s; val fieldH = 36f * s; val fieldX = pX + 48f * s
-    renderNameField(fieldX, pY + 112f * s, fieldW, fieldH, "Online name", playerName, hostNameFocused)
+    val fieldW = pW - 96f * s; val fieldH = 34f * s; val fieldX = pX + 48f * s
+    renderNameField(fieldX, pY + 102f * s, fieldW, fieldH, "Online name", playerName, hostNameFocused)
+    val saves = worldSaveDirs
+    val sourceY = pY + 166f * s
+    val sourceLabel = if hostUseSavedWorld then "World source: saved world" else "World source: new world"
+    val (mx, my) = mouseFramebufferPos()
+    val sourceHover = inRect(mx, my, fieldX, sourceY, fieldW, 30f * s)
+    rect(fieldX, sourceY, fieldW, 30f * s, if sourceHover then 0.16f else 0.09f, if sourceHover then 0.18f else 0.10f, if sourceHover then 0.23f else 0.15f, 0.82f)
+    renderTextShadow(fieldX + 12f * s, sourceY + 7f * s, sourceLabel, 0.88f, 0.92f, 1f, 0.58f * s)
+    centeredTextFit(fieldX + fieldW - 54f * s, sourceY + 7f * s, "L", 1f, 0.86f, 0.42f, 0.56f * s, 40f * s)
+    if hostUseSavedWorld then
+      val listY = pY + 208f * s
+      val rowH = (34f * s).max(27f)
+      val visible = 4
+      if saves.isEmpty then centeredTextFit(cx, listY + 34f * s, "No saved worlds in worlds/", 0.70f, 0.78f, 0.92f, 0.62f * s, fieldW)
+      else
+        if hostWorldSelection < hostWorldScroll then hostWorldScroll = hostWorldSelection
+        if hostWorldSelection >= hostWorldScroll + visible then hostWorldScroll = hostWorldSelection - visible + 1
+        hostWorldScroll = hostWorldScroll.max(0).min((saves.length - visible).max(0))
+        saves.zipWithIndex.drop(hostWorldScroll).take(visible).foreach { case (dir, idx) =>
+          val y = listY + (idx - hostWorldScroll) * rowH
+          val selected = idx == hostWorldSelection
+          rect(fieldX, y, fieldW, rowH - 4f * s, if selected then 0.22f else 0.075f, if selected then 0.19f else 0.085f, if selected then 0.11f else 0.12f, 0.84f)
+          if selected then rect(fieldX, y, 4f * s, rowH - 4f * s, 1f, 0.82f, 0.30f, 0.80f)
+          renderTextShadow(fieldX + 12f * s, y + 7f * s, dir.getName, 0.90f, 0.94f, 1f, 0.55f * s)
+        }
     val hsr = if hostStatusError then 1.0f else 0.52f
     val hsg = if hostStatusError then 0.36f else 0.70f
     val hsb = if hostStatusError then 0.30f else 0.82f
-    centeredTextFit(cx, pY + 170f * s, hostStatusMessage, hsr, hsg, hsb, 0.58f * s, pW - 72f * s)
-    val bw = (210f * s).min(pW - 90f * s); val bh = (40f * s).min(42f).max(30f)
-    drawButton(cx - bw / 2f, pY + pH - 92f * s, bw, bh, "Start Hosted World", accent = true)
-    drawButton(cx - bw / 2f, pY + pH - 44f * s, bw, bh, "Back")
+    centeredTextFit(cx, pY + pH - 118f * s, hostStatusMessage, hsr, hsg, hsb, 0.54f * s, pW - 72f * s)
+    val bw = (230f * s).min(pW - 90f * s); val bh = (38f * s).min(42f).max(30f)
+    drawButton(cx - bw / 2f, pY + pH - 86f * s, bw, bh, if hostUseSavedWorld then "Host Selected World" else "Start Hosted World", accent = true)
+    drawButton(cx - bw / 2f, pY + pH - 42f * s, bw, bh, "Back")
 
   private def handleHostClick(mx: Float, my: Float): Unit =
     val w = framebufferWidth.toFloat; val h = framebufferHeight.toFloat; val cx = w / 2f; val s = uiScale
-    val pW = (500f * s).min(w * 0.90f); val pH = (285f * s).min(h * 0.82f)
+    val pW = (620f * s).min(w * 0.92f); val pH = (470f * s).min(h * 0.88f)
     val pX = cx - pW / 2f; val pY = h / 2f - pH / 2f
-    val fieldW = pW - 96f * s; val fieldH = 36f * s; val fieldX = pX + 48f * s
-    val bw = (210f * s).min(pW - 90f * s); val bh = (40f * s).min(42f).max(30f)
-    if inRect(mx, my, fieldX, pY + 112f * s, fieldW, fieldH) then hostNameFocused = true
-    else if inRect(mx, my, cx - bw / 2f, pY + pH - 92f * s, bw, bh) then hostGame()
-    else if inRect(mx, my, cx - bw / 2f, pY + pH - 44f * s, bw, bh) then screen = Screen.MainMenu
+    val fieldW = pW - 96f * s; val fieldH = 34f * s; val fieldX = pX + 48f * s
+    val bw = (230f * s).min(pW - 90f * s); val bh = (38f * s).min(42f).max(30f)
+    if inRect(mx, my, fieldX, pY + 102f * s, fieldW, fieldH) then hostNameFocused = true
+    else if inRect(mx, my, fieldX, pY + 166f * s, fieldW, 30f * s) then hostUseSavedWorld = !hostUseSavedWorld
+    else if hostUseSavedWorld then
+      val saves = worldSaveDirs
+      val listY = pY + 208f * s
+      val rowH = (34f * s).max(27f)
+      saves.zipWithIndex.drop(hostWorldScroll).take(4).foreach { case (_, idx) =>
+        val y = listY + (idx - hostWorldScroll) * rowH
+        if inRect(mx, my, fieldX, y, fieldW, rowH - 4f * s) then hostWorldSelection = idx
+      }
+      if inRect(mx, my, cx - bw / 2f, pY + pH - 86f * s, bw, bh) then hostGame()
+      else if inRect(mx, my, cx - bw / 2f, pY + pH - 42f * s, bw, bh) then screen = Screen.MainMenu
+    else if inRect(mx, my, cx - bw / 2f, pY + pH - 86f * s, bw, bh) then hostGame()
+    else if inRect(mx, my, cx - bw / 2f, pY + pH - 42f * s, bw, bh) then screen = Screen.MainMenu
 
   private def renderJoinGame(): Unit =
     glDisable(GL_DEPTH_TEST); glDisable(GL_CULL_FACE); setupOrtho()
@@ -1841,8 +1877,7 @@ final class Blockbox:
       if inRect(mx, my, sx, hotbarY, hotSlot, hotSlot) then
         if heldInventoryBlock != Block.Air then
           if gameMode == GameMode.Creative then inventory(heldInventoryBlock.ordinal) = inventory(heldInventoryBlock.ordinal).max(64)
-          hotbarBlocks(i) = heldInventoryBlock
-          selectedBlock = i
+          assignBlockToHotbar(heldInventoryBlock, i)
           heldInventoryBlock = Block.Air
         else
           selectedBlock = i
@@ -1911,7 +1946,7 @@ final class Blockbox:
         val block = items(i)
         if gameMode == GameMode.Creative then inventory(block.ordinal) = inventory(block.ordinal).max(64)
         heldInventoryBlock = block
-        hotbarBlocks(selectedBlock.max(0).min(hotbarBlocks.length - 1)) = block
+        assignBlockToHotbar(block, selectedBlock.max(0).min(hotbarBlocks.length - 1))
         return
     val scrollUp = inRect(mx, my, panelX + panelW - 18f * s, panelY + 50f * s, 14f * s, 20f * s)
     val scrollDown = inRect(mx, my, panelX + panelW - 18f * s, panelY + panelH - 55f * s, 14f * s, 20f * s)
@@ -2019,17 +2054,26 @@ final class Blockbox:
     catch case _: NumberFormatException => Left("Invalid port number.")
 
   private def prepareWorldForHost(): Unit =
-    applyWorldSeed(chooseCreateSeed(), freshWorldName = false)
-    worldName = uniqueWorldFolderName(if worldNameInput.trim.nonEmpty then worldNameInput else "Hosted World")
-    clearLoadedChunks(saveFirst = false)
-    camera = findSpawn()
+    val saves = worldSaveDirs
+    if hostUseSavedWorld && saves.nonEmpty then
+      val chosen = saves(hostWorldSelection.max(0).min(saves.length - 1))
+      if !loadWorldDataFromDir(chosen) then
+        addChatMessage(s"Could not host saved world: ${chosen.getName}")
+        hostUseSavedWorld = false
+        prepareWorldForHost()
+        return
+    else
+      applyWorldSeed(chooseCreateSeed(), freshWorldName = false)
+      worldName = uniqueWorldFolderName(if worldNameInput.trim.nonEmpty then worldNameInput else "Hosted World")
+      clearLoadedChunks(saveFirst = false)
+      camera = findSpawn()
+      yaw = 0f
+      pitch = 0f
+      gameMode = createWorldMode
+      worldCheatsEnabled = createWorldCheats
+      resetInventory()
     velocity = Vec3(0f, 0f, 0f)
     onGround = false
-    yaw = 0f
-    pitch = 0f
-    gameMode = createWorldMode
-    worldCheatsEnabled = createWorldCheats
-    resetInventory()
     enterCustomSeed = false
 
   private def verifyLocalServer(port: Int): Either[String, Unit] =
@@ -2216,6 +2260,7 @@ final class Blockbox:
     catch case e: Exception => System.err.println(s"World index save failed: $e")
 
   private def writeWorldExtras(out: java.io.DataOutputStream): Unit =
+    compactHotbarAssignments()
     out.writeInt(worldExtraMagic)
     out.writeInt(worldExtraVersion)
     out.writeInt(inventory.length)
@@ -2334,7 +2379,7 @@ final class Blockbox:
     else
       loadWorldFromDir(saves(loadWorldSelection.max(0).min(saves.length - 1)))
 
-  private def loadWorldFromDir(worldDir: java.io.File): Unit =
+  private def loadWorldDataFromDir(worldDir: java.io.File): Boolean =
     try
       worldName = worldDir.getName
       val meta = new java.io.DataInputStream(new java.io.BufferedInputStream(new java.io.FileInputStream(new java.io.File(worldDir, "world.dat"))))
@@ -2356,13 +2401,19 @@ final class Blockbox:
           loadChunkIfSaved(cx, cz)
         readWorldExtras(meta)
       finally meta.close()
-      addChatMessage(s"Loaded world: $worldName")
-      enterGame()
+      true
     catch
       case e: Exception =>
         System.err.println(s"Load failed for ${worldDir.getName}: $e")
-        addChatMessage(s"Could not load world: ${worldDir.getName}")
-        screen = Screen.LoadWorld
+        false
+
+  private def loadWorldFromDir(worldDir: java.io.File): Unit =
+    if loadWorldDataFromDir(worldDir) then
+      addChatMessage(s"Loaded world: $worldName")
+      enterGame()
+    else
+      addChatMessage(s"Could not load world: ${worldDir.getName}")
+      screen = Screen.LoadWorld
 
   private def resetHotbarDefaults(): Unit =
     var i = 0
@@ -2385,6 +2436,44 @@ final class Blockbox:
     furnaceOutput = Block.Air
     furnaceOutputCount = 0
 
+  private def compactHotbarAssignments(): Unit =
+    if gameMode == GameMode.Survival then
+      val seen = scala.collection.mutable.HashSet.empty[Block]
+      var i = 0
+      while i < hotbarBlocks.length do
+        val b = hotbarBlocks(i)
+        if b == Block.Air || inventory(b.ordinal) <= 0 || seen.contains(b) then hotbarBlocks(i) = Block.Air
+        else seen += b
+        i += 1
+      if heldInventoryBlock != Block.Air && inventory(heldInventoryBlock.ordinal) <= 0 then heldInventoryBlock = Block.Air
+
+  private def assignBlockToHotbar(block: Block, preferredSlot: Int): Unit =
+    if block != Block.Air && block != Block.Water then
+      var i = 0
+      while i < hotbarBlocks.length do
+        if hotbarBlocks(i) == block then hotbarBlocks(i) = Block.Air
+        i += 1
+      val preferred = preferredSlot.max(0).min(hotbarBlocks.length - 1)
+      val empty = hotbarBlocks.indexWhere(_ == Block.Air)
+      val slot = if hotbarBlocks(preferred) == Block.Air then preferred else if empty >= 0 then empty else preferred
+      hotbarBlocks(slot) = block
+      selectedBlock = slot
+
+  private def gainItem(block: Block, amount: Int): Unit =
+    if block != Block.Air && block != Block.Water && amount > 0 then
+      inventory(block.ordinal) = (inventory(block.ordinal) + amount).min(999)
+      if gameMode == GameMode.Survival && !hotbarBlocks.contains(block) then assignBlockToHotbar(block, selectedBlock)
+      compactHotbarAssignments()
+
+  private def consumeInventory(block: Block, amount: Int): Boolean =
+    if amount <= 0 then true
+    else if gameMode == GameMode.Creative then true
+    else if block == Block.Air || block == Block.Water || inventory(block.ordinal) < amount then false
+    else
+      inventory(block.ordinal) -= amount
+      compactHotbarAssignments()
+      true
+
   private type Recipe = (Block, Int, Block, Int, String)
   private val craftingRecipes: Array[Recipe] = Array(
     (Block.Wood, 1, Block.Planks, 4, "Wood -> 4 Planks"),
@@ -2399,8 +2488,8 @@ final class Blockbox:
     if index >= 0 && index < craftingRecipes.length then
       val (input, inputCount, output, outputCount, _) = craftingRecipes(index)
       if inventory(input.ordinal) >= inputCount then
-        inventory(input.ordinal) -= inputCount
-        inventory(output.ordinal) += outputCount
+        consumeInventory(input, inputCount)
+        gainItem(output, outputCount)
         playPlaceSound()
 
   private def submitChat(): Unit =
@@ -3568,6 +3657,7 @@ final class Blockbox:
     glEnable(GL_DEPTH_TEST)
 
   private def renderHotbar(): Unit =
+    compactHotbarAssignments()
     glDisable(GL_DEPTH_TEST); glDisable(GL_CULL_FACE); setupOrtho()
     val s = uiScale; val total = hotbarBlocks.length
     val maxSlotByWidth = ((framebufferWidth.toFloat - 36f * s) / total.toFloat - 5f * s).max(24f)
@@ -3729,7 +3819,7 @@ final class Blockbox:
   private def renderSky(): Unit =
     generateStars()
     resetGlArraysAndBuffers()
-    val walk = gameTime * 0.018f
+    val walk = dayPhase * 2f * Pi.toFloat
     glDisable(GL_FOG)
     glDisable(GL_DEPTH_TEST)
     glDepthMask(false)
@@ -3737,9 +3827,9 @@ final class Blockbox:
     glDisable(GL_CULL_FACE)
     glEnable(GL_BLEND)
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
-    val phase = ((walk % (2f * Pi.toFloat)) / (2f * Pi.toFloat))
-    val daylight = (0.5f + 0.5f * cos(phase * 2.0 * Pi).toFloat).max(0.18f).min(1f)
-    val starVis = (1f - (daylight - 0.18f) / 0.82f).max(0f).min(1f)
+    val phase = dayPhase
+    val daylight = daylightFactor
+    val starVis = smooth01((0.74f - daylight) / 0.44f)
 
     // Stars rotate with the sky dome
     glPushMatrix()
@@ -4270,6 +4360,7 @@ final class Blockbox:
     drawButton(bx, by0 + (bh + gap) * 2f, bw, bh, if multiplayerMode then "Disconnect to Title" else "Save and Quit to Title")
 
   private def renderSurvivalInventory(): Unit =
+    compactHotbarAssignments()
     glDisable(GL_DEPTH_TEST); glDisable(GL_CULL_FACE); setupOrtho()
     dimBackground()
     val cx = framebufferWidth / 2f; val cy = framebufferHeight / 2f; val s = uiScale
@@ -4440,6 +4531,7 @@ final class Blockbox:
       val selected = i == selectedBlock
       val hover = inRect(mx, my, sx, panelY, slot, slot)
       val block = hotbarBlocks(i)
+      val hasItem = block != Block.Air && (gameMode == GameMode.Creative || inventory(block.ordinal) > 0)
       val base = if hover then 0.14f else 0.085f
       rect(sx - 1f * s, panelY - 1f * s, slot + 2f * s, slot + 2f * s, 0.015f, 0.017f, 0.022f, 0.78f)
       rect(sx, panelY, slot, slot, base, base + 0.01f, base + 0.035f, 0.92f)
@@ -4448,7 +4540,7 @@ final class Blockbox:
         rect(sx - 2f * s, panelY + slot, slot + 4f * s, 2f * s, 1f, 0.92f, 0.42f, 0.55f)
         rect(sx - 2f * s, panelY - 2f * s, 2f * s, slot + 4f * s, 1f, 0.92f, 0.42f, 0.55f)
         rect(sx + slot, panelY - 2f * s, 2f * s, slot + 4f * s, 1f, 0.92f, 0.42f, 0.55f)
-      if block != Block.Air then
+      if hasItem then
         val icon = (slot * 0.58f).min(26f * s).max(16f)
         renderBlockIcon(block, sx + (slot - icon) / 2f, panelY + (slot - icon) / 2f, icon)
       centeredTextFit(sx + slot / 2f, panelY + 3f * s, hotbarLabel(i), 0.96f, 0.96f, 0.98f, 0.54f * s, slot - 6f * s)
@@ -4565,15 +4657,12 @@ final class Blockbox:
     val buttonY = py + ph - 52f * s
     val buttonGap = 8f * s
     val totalButtonW = workW - 16f * s
-    val smeltW = totalButtonW * 0.30f
-    val allW = totalButtonW * 0.25f
-    val takeW = totalButtonW * 0.20f
-    val closeW = totalButtonW - smeltW - allW - takeW - buttonGap * 3f
+    val btnW = ((totalButtonW - buttonGap * 3f) / 4f).max(72f * s)
     val b0 = workX + 8f * s
-    drawButton(b0, buttonY, smeltW, bh, "Smelt One", accent = true)
-    drawButton(b0 + smeltW + buttonGap, buttonY, allW, bh, "Smelt All")
-    drawButton(b0 + smeltW + allW + buttonGap * 2f, buttonY, takeW, bh, "Take")
-    drawButton(b0 + smeltW + allW + takeW + buttonGap * 3f, buttonY, closeW.max(70f * s), bh, "Close")
+    drawButton(b0, buttonY, btnW, bh, "Smelt One", accent = true)
+    drawButton(b0 + (btnW + buttonGap), buttonY, btnW, bh, "Smelt All")
+    drawButton(b0 + (btnW + buttonGap) * 2f, buttonY, btnW, bh, "Take")
+    drawButton(b0 + (btnW + buttonGap) * 3f, buttonY, btnW, bh, "Close")
 
   private def handleFurnaceClick(mx: Float, my: Float): Unit =
     val cx = framebufferWidth / 2f; val cy = framebufferHeight / 2f; val s = uiScale
@@ -4618,15 +4707,12 @@ final class Blockbox:
     val buttonY = py + ph - 52f * s
     val buttonGap = 8f * s
     val totalButtonW = workW - 16f * s
-    val smeltW = totalButtonW * 0.30f
-    val allW = totalButtonW * 0.25f
-    val takeW = totalButtonW * 0.20f
-    val closeW = totalButtonW - smeltW - allW - takeW - buttonGap * 3f
+    val btnW = ((totalButtonW - buttonGap * 3f) / 4f).max(72f * s)
     val b0 = workX + 8f * s
-    if inRect(mx, my, b0, buttonY, smeltW, bh) then smeltFurnace()
-    else if inRect(mx, my, b0 + smeltW + buttonGap, buttonY, allW, bh) then smeltAllFurnace()
-    else if inRect(mx, my, b0 + smeltW + allW + buttonGap * 2f, buttonY, takeW, bh) then takeFurnaceOutput()
-    else if inRect(mx, my, b0 + smeltW + allW + takeW + buttonGap * 3f, buttonY, closeW.max(70f * s), bh) then enterGame()
+    if inRect(mx, my, b0, buttonY, btnW, bh) then smeltFurnace()
+    else if inRect(mx, my, b0 + (btnW + buttonGap), buttonY, btnW, bh) then smeltAllFurnace()
+    else if inRect(mx, my, b0 + (btnW + buttonGap) * 2f, buttonY, btnW, bh) then takeFurnaceOutput()
+    else if inRect(mx, my, b0 + (btnW + buttonGap) * 3f, buttonY, btnW, bh) then enterGame()
 
   private def pickFurnaceInput(): Unit =
     val picked: Option[Block] = smeltableInputs.find(b => inventory(b.ordinal) > 0)
@@ -4649,12 +4735,12 @@ final class Blockbox:
   private def consumeFuelFor(input: Block): Boolean =
     if furnaceFuelRemaining > 0f then true
     else if inventory(Block.Coal.ordinal) > 0 then
-      inventory(Block.Coal.ordinal) -= 1
+      consumeInventory(Block.Coal, 1)
       furnaceFuel = Block.Coal
       furnaceFuelRemaining = 8f
       true
     else if inventory(Block.Wood.ordinal) > (if input == Block.Wood then 1 else 0) then
-      inventory(Block.Wood.ordinal) -= 1
+      consumeInventory(Block.Wood, 1)
       furnaceFuel = Block.Wood
       furnaceFuelRemaining = 4f
       true
@@ -4665,7 +4751,7 @@ final class Blockbox:
       val room = (999 - inventory(furnaceOutput.ordinal)).max(0)
       val moved = math.min(room, furnaceOutputCount)
       if moved > 0 then
-        inventory(furnaceOutput.ordinal) += moved
+        gainItem(furnaceOutput, moved)
         furnaceOutputCount -= moved
         playPlaceSound()
       if furnaceOutputCount <= 0 then
@@ -4696,7 +4782,7 @@ final class Blockbox:
     if !consumeFuelFor(furnaceInput) then
       if showMessages then addChatMessage("Need fuel: Coal or Wood")
       return false
-    inventory(furnaceInput.ordinal) -= 1
+    consumeInventory(furnaceInput, 1)
     furnaceFuelRemaining -= 1f
     furnaceProgress = 4f
     furnaceOutput = out
@@ -5108,7 +5194,7 @@ final class Blockbox:
     raycast().foreach { hit =>
       val (x, y, z) = hit.block
       val block = activeBlockAt(x, y, z)
-      if dropItem && block != Block.Air && block != Block.Water then inventory(block.ordinal) += 1
+      if dropItem && block != Block.Air && block != Block.Water then gainItem(block, 1)
       setActiveBlock(x, y, z, Block.Air)
       dirtyChunkAt(x, z)
       triggerSandFallAbove(x, y, z)
@@ -5128,7 +5214,7 @@ final class Blockbox:
         val hasBlock = block != Block.Air && (gameMode == GameMode.Creative || inventory(block.ordinal) > 0)
         if hasBlock && canPlaceBlockAt(x, y, z) then
           setActiveBlock(x, y, z, block)
-          if gameMode == GameMode.Survival then inventory(block.ordinal) -= 1
+          if gameMode == GameMode.Survival then consumeInventory(block, 1)
           dirtyChunkAt(x, z)
           // Sand currently behaves like a normal block.
           playPlaceSound()
