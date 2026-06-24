@@ -59,7 +59,7 @@ it is not finished, but it is real and it runs.
 
 i wanted to make a block game that feels handmade.
 
-not a polished corporate thing. not a template. not a fake project that only has a screenshot and nothing else. and no paid bullshit, fully free and fucking open source and auditable.
+not a polished corporate thing. not a template. not a fake project that only has a screenshot and nothing else. and no paid bullshit, fully free and fucking open source and auditable. if you dont like somethin, patch it. im all open.
 
 i wanted something that actually has code, terrain, saving, ui, bugs, fixes, multiplayer attempts, weird experiments, and all the stuff that happens when one person is trying to build a game for real.
 
