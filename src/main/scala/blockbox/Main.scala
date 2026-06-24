@@ -40,7 +40,7 @@ final case class Vec3(x: Float, y: Float, z: Float):
     if len <= 0.0001f then Vec3(0, 0, 0) else Vec3(x / len, y / len, z / len)
 
 enum Screen:
-  case MainMenu, CreateWorld, Settings, Playing, Paused, Inventory, Catalog, FurnaceUI, JoinGame, HostGame
+  case MainMenu, CreateWorld, LoadWorld, Settings, Playing, Paused, Inventory, Catalog, FurnaceUI, JoinGame, HostGame
 
 enum GameMode:
   case Survival, Creative
@@ -584,8 +584,9 @@ final class Chunk(val cx: Int, val cz: Int, atlas: TextureAtlas, gen: TerrainGen
     destroy()
 
   def getBlock(lx: Int, y: Int, lz: Int): Block =
-    edits.synchronized { edits.get((lx, y, lz)) } match
-      case Some(b) => b
+    val found: Option[Block] = edits.synchronized { edits.get((lx, y, lz)) }
+    found match
+      case Some(b: Block) => b
       case None =>
         if lx >= 0 && lx < Terrain.chunkSize && y >= 0 && y < Terrain.worldHeight && lz >= 0 && lz < Terrain.chunkSize then
           Block.fromId(blocks((y * Terrain.chunkSize + lz) * Terrain.chunkSize + lx))
@@ -617,10 +618,12 @@ final class Chunk(val cx: Int, val cz: Int, atlas: TextureAtlas, gen: TerrainGen
     // half-built meshes: the dark-blue empty world / missing terrain effect. Snapshotting
     // makes every mesh build deterministic for one revision.
     val blocksSnapshot = blocks.clone()
-    val editsSnapshot = edits.synchronized { edits.clone() }
+    val editsSnapshot: scala.collection.mutable.HashMap[(Int, Int, Int), Block] =
+      edits.synchronized { edits.clone() }
     def snapshotBlock(lx: Int, y: Int, lz: Int): Block =
-      editsSnapshot.get((lx, y, lz)) match
-        case Some(b) => b
+      val found: Option[Block] = editsSnapshot.get((lx, y, lz))
+      found match
+        case Some(b: Block) => b
         case None =>
           if lx >= 0 && lx < Terrain.chunkSize && y >= 0 && y < Terrain.worldHeight && lz >= 0 && lz < Terrain.chunkSize then
             Block.fromId(blocksSnapshot((y * Terrain.chunkSize + lz) * Terrain.chunkSize + lx))
@@ -765,7 +768,8 @@ final class Chunk(val cx: Int, val cz: Int, atlas: TextureAtlas, gen: TerrainGen
   def save(dir: java.io.File): Unit =
     dir.mkdirs()
     val file = new java.io.File(dir, s"chunk_${cx}_${cz}.dat")
-    val out = new java.io.DataOutputStream(new java.io.BufferedOutputStream(new java.io.FileOutputStream(file)))
+    val tmp = new java.io.File(dir, s"chunk_${cx}_${cz}.dat.tmp")
+    val out = new java.io.DataOutputStream(new java.io.BufferedOutputStream(new java.io.FileOutputStream(tmp)))
     try
       out.write(blocks)
       val editCopy = edits.synchronized { edits.toList }
@@ -775,6 +779,11 @@ final class Chunk(val cx: Int, val cz: Int, atlas: TextureAtlas, gen: TerrainGen
         out.writeByte(block.id)
       }
     finally out.close()
+    try
+      java.nio.file.Files.move(tmp.toPath, file.toPath, java.nio.file.StandardCopyOption.REPLACE_EXISTING, java.nio.file.StandardCopyOption.ATOMIC_MOVE)
+    catch
+      case _: Exception =>
+        java.nio.file.Files.move(tmp.toPath, file.toPath, java.nio.file.StandardCopyOption.REPLACE_EXISTING)
 
   def load(dir: java.io.File): Unit =
     val file = new java.io.File(dir, s"chunk_${cx}_${cz}.dat")
@@ -1124,7 +1133,9 @@ final class Blockbox:
   private var breakingProgress = 0f
   private val placeableBlocks = Array(Block.Grass, Block.Dirt, Block.Stone, Block.Sand, Block.Wood, Block.Planks, Block.Leaves, Block.Brick, Block.Glass, Block.Snow, Block.Clay, Block.Coal, Block.Copper, Block.IronOre, Block.GoldOre, Block.Diamond, Block.Furnace)
   private val inventory = Array.fill(Block.values.length)(0)
+  private val hotbarBlocks: Array[Block] = Array.tabulate(10)(i => if i < placeableBlocks.length then placeableBlocks(i) else Block.Air)
   private var selectedBlock = 0
+  private var heldInventoryBlock: Block = Block.Air
   private var catalogScroll = 0
   private var craftingScroll = 0
   private var furnaceInput: Block = Block.Air
@@ -1133,8 +1144,8 @@ final class Blockbox:
   private var furnaceFuelRemaining = 0f
   private var furnaceOutput: Block = Block.Air
   private var furnaceOutputCount = 0
-  private val smeltableInputs = Array(Block.Sand, Block.Clay, Block.Stone, Block.Wood, Block.IronOre, Block.GoldOre)
-  private val fuelBlocks = Array(Block.Coal, Block.Wood)
+  private val smeltableInputs: Array[Block] = Array(Block.Sand, Block.Clay, Block.Stone, Block.Wood, Block.IronOre, Block.GoldOre)
+  private val fuelBlocks: Array[Block] = Array(Block.Coal, Block.Wood)
   private var debugMode = false
   private var wireframeMode = false
   private var showChunkBorders = false
@@ -1147,6 +1158,12 @@ final class Blockbox:
   // that chunk is created. This prevents seed-correct clients from looking different just
   // because old local chunk saves or early packets were used/lost.
   private val pendingNetworkBlocks = scala.collection.mutable.HashMap.empty[(Int, Int, Int), Block]
+  // Every BLOC packet seen during a multiplayer session is kept here, even after the
+  // target chunk unloads. Without this, client-only worlds regenerated from seed and
+  // lost remote edits when walking away and returning.
+  private val networkBlockOverrides = scala.collection.mutable.HashMap.empty[(Int, Int, Int), Block]
+  private val worldExtraMagic = 0x42425831 // "BBX1": optional tail after old world.dat fields
+  private val worldExtraVersion = 1
   private val knownPlayerNames = scala.collection.mutable.HashSet.empty[String]
   private val playerColors = scala.collection.mutable.HashMap.empty[String, Int]
   private var localColorId = 0
@@ -1185,8 +1202,12 @@ final class Blockbox:
   private var playerFood = 20f
   private var errorCallback: GLFWErrorCallback | Null = null
   private var worldName = "World"
+  private var worldNameInput = "New World"
+  private var createWorldNameFocused = true
   private var customSeedInput = ""
   private var enterCustomSeed = false
+  private var loadWorldSelection = 0
+  private var loadWorldScroll = 0
   private var saveDirectory: String = ""
   private var settingsReturnTo: Screen = Screen.MainMenu
   private var pauseEscReturnsToGame = true
@@ -1196,6 +1217,7 @@ final class Blockbox:
   private val chatMessages = ArrayBuffer.empty[(String, Float)]
   private val chatHistory = ArrayBuffer.empty[String]
   private var chatHistoryIndex = -1
+  private var commandSuggestionIndex = 0
   private val sandFallQueue = Queue.empty[(Int, Int, Int)]
   private val maxSandUpdatesPerFrame = 6
   private val waterLevels = scala.collection.mutable.HashMap.empty[(Int, Int, Int), Byte]
@@ -1281,6 +1303,23 @@ final class Blockbox:
   private def previewRandomSeed(): Unit =
     customSeedInput = ""
     applyWorldSeed(freshWorldSeed(), freshWorldName = false)
+
+  private def sanitizeWorldName(raw: String): String =
+    val cleaned = Option(raw).getOrElse("").trim
+      .map(ch => if ch.isLetterOrDigit || ch == ' ' || ch == '_' || ch == '-' then ch else '_')
+      .mkString
+      .replaceAll("\\s+", " ")
+      .take(40)
+    if cleaned.nonEmpty then cleaned else "New World"
+
+  private def uniqueWorldFolderName(raw: String): String =
+    val base = sanitizeWorldName(raw)
+    var candidate = base
+    var n = 2
+    while new java.io.File(worldsRootDir, candidate).exists() do
+      candidate = s"$base ($n)"
+      n += 1
+    candidate
 
   def run(): Unit =
     try
@@ -1387,15 +1426,18 @@ final class Blockbox:
         suppressNextChatChar = false
       else if codepoint >= 32 && codepoint <= 126 then
         chatInput += codepoint.toChar
+        commandSuggestionIndex = 0
+    else if screen == Screen.CreateWorld then
+      if codepoint >= 32 && codepoint <= 126 then
+        val ch = codepoint.toChar
+        if createWorldNameFocused then worldNameInput = (worldNameInput + ch).take(40)
+        else if enterCustomSeed then customSeedInput = (customSeedInput + ch).take(64)
     else if screen == Screen.JoinGame then
       if codepoint >= 32 && codepoint <= 126 then
         val ch = codepoint.toChar
         if joinNameFocused then appendPlayerNameChar(ch) else joinIpInput = (joinIpInput + ch).take(64)
     else if screen == Screen.HostGame then
       if codepoint >= 32 && codepoint <= 126 then appendPlayerNameChar(codepoint.toChar)
-    else if enterCustomSeed then
-      if codepoint >= 32 && codepoint <= 126 then
-        customSeedInput += codepoint.toChar
 
   private def onKey(key: Int): Unit =
     if key == GLFW_KEY_F11 then toggleFullscreen()
@@ -1403,7 +1445,7 @@ final class Blockbox:
       case Screen.MainMenu =>
         if key == GLFW_KEY_ENTER then screen = Screen.CreateWorld
         else if key == GLFW_KEY_S then screen = Screen.Settings
-        else if key == GLFW_KEY_L then loadWorld()
+        else if key == GLFW_KEY_L then openLoadWorldMenu()
         else if key == GLFW_KEY_ESCAPE then glfwSetWindowShouldClose(window, true)
       case Screen.CreateWorld =>
         if key == GLFW_KEY_ENTER then startNewWorld()
@@ -1412,11 +1454,24 @@ final class Blockbox:
         else if key == GLFW_KEY_ESCAPE then
           enterCustomSeed = false
           screen = Screen.MainMenu
-        else if key == GLFW_KEY_C then enterCustomSeed = !enterCustomSeed
+        else if key == GLFW_KEY_TAB then
+          createWorldNameFocused = !createWorldNameFocused
+          if !createWorldNameFocused then enterCustomSeed = true
+        else if key == GLFW_KEY_N then createWorldNameFocused = true
+        else if key == GLFW_KEY_C then
+          enterCustomSeed = true
+          createWorldNameFocused = false
         else if key == GLFW_KEY_M then createWorldMode = if createWorldMode == GameMode.Survival then GameMode.Creative else GameMode.Survival
         else if key == GLFW_KEY_H then createWorldCheats = !createWorldCheats
-        else if key == GLFW_KEY_BACKSPACE && enterCustomSeed && customSeedInput.nonEmpty then
-          customSeedInput = customSeedInput.init
+        else if key == GLFW_KEY_BACKSPACE then
+          if createWorldNameFocused && worldNameInput.nonEmpty then worldNameInput = worldNameInput.init
+          else if !createWorldNameFocused && customSeedInput.nonEmpty then customSeedInput = customSeedInput.init
+      case Screen.LoadWorld =>
+        val saves = worldSaveDirs
+        if key == GLFW_KEY_ESCAPE then screen = Screen.MainMenu
+        else if key == GLFW_KEY_ENTER then loadSelectedWorld()
+        else if key == GLFW_KEY_UP then loadWorldSelection = (loadWorldSelection - 1).max(0)
+        else if key == GLFW_KEY_DOWN then loadWorldSelection = (loadWorldSelection + 1).min((saves.length - 1).max(0))
       case Screen.Settings =>
         if key == GLFW_KEY_ESCAPE then
           sliderActive = null
@@ -1430,7 +1485,7 @@ final class Blockbox:
           glfwSwapInterval(if vsync then 1 else 0)
         else if key == GLFW_KEY_LEFT || key == GLFW_KEY_MINUS then changeRenderDistance(-8)
         else if key == GLFW_KEY_RIGHT || key == GLFW_KEY_EQUAL then changeRenderDistance(8)
-        else if key == GLFW_KEY_M then toggleGameMode()
+        else if key == GLFW_KEY_M && canUseCheatAuthority && worldCheatsEnabled then toggleGameMode()
         else if key == GLFW_KEY_P then pauseEscReturnsToGame = !pauseEscReturnsToGame
       case Screen.Playing =>
         if chatOpen then
@@ -1440,12 +1495,19 @@ final class Blockbox:
             chatOpen = false; chatInput = ""; chatHistoryIndex = -1
           else if key == GLFW_KEY_BACKSPACE && chatInput.nonEmpty then
             chatInput = chatInput.init
+            commandSuggestionIndex = 0
+          else if key == GLFW_KEY_TAB then
+            applyCommandSuggestion()
           else if key == GLFW_KEY_UP then
-            if chatHistory.nonEmpty then
+            val suggestions = commandSuggestions(chatInput)
+            if suggestions.nonEmpty then commandSuggestionIndex = (commandSuggestionIndex - 1 + suggestions.length) % suggestions.length
+            else if chatHistory.nonEmpty then
               chatHistoryIndex = (chatHistoryIndex - 1).max(0)
               chatInput = chatHistory(chatHistory.length - 1 - chatHistoryIndex)
           else if key == GLFW_KEY_DOWN then
-            if chatHistoryIndex > 0 then
+            val suggestions = commandSuggestions(chatInput)
+            if suggestions.nonEmpty then commandSuggestionIndex = (commandSuggestionIndex + 1) % suggestions.length
+            else if chatHistoryIndex > 0 then
               chatHistoryIndex -= 1
               chatInput = chatHistory(chatHistory.length - 1 - chatHistoryIndex)
             else
@@ -1459,8 +1521,8 @@ final class Blockbox:
           chatHistoryIndex = -1
           suppressNextChatChar = true
         else if key >= GLFW_KEY_1 && key <= GLFW_KEY_9 then selectedBlock = key - GLFW_KEY_1
-        else if key == GLFW_KEY_0 && placeableBlocks.length >= 10 then selectedBlock = 9
-        else if key == GLFW_KEY_M then toggleGameMode()
+        else if key == GLFW_KEY_0 then selectedBlock = 9
+        else if key == GLFW_KEY_M && canUseCheatAuthority && worldCheatsEnabled then toggleGameMode()
         else if key == GLFW_KEY_F3 then debugMode = !debugMode
         else if key == GLFW_KEY_F4 then
           wireframeMode = !wireframeMode
@@ -1502,6 +1564,7 @@ final class Blockbox:
       screen match
         case Screen.MainMenu => handleMainMenuClick(mx, my)
         case Screen.CreateWorld => handleCreateWorldClick(mx, my)
+        case Screen.LoadWorld => handleLoadWorldClick(mx, my)
         case Screen.Settings => handleSettingsClick(mx, my)
         case Screen.Paused => handlePauseClick(mx, my)
         case Screen.Inventory => handleInventoryClick(mx, my)
@@ -1553,7 +1616,7 @@ final class Blockbox:
       joinStatusError = false
       joinStatusMessage = "Enter host IP. You can use IP:port; default port is 25565."
       screen = Screen.JoinGame
-    else if inRect(mx, my, bx, ys(3), bw, bh) then loadWorld()
+    else if inRect(mx, my, bx, ys(3), bw, bh) then openLoadWorldMenu()
     else if inRect(mx, my, bx, ys(4), bw, bh) then
       screen = Screen.Settings
       settingsReturnTo = Screen.MainMenu
@@ -1572,9 +1635,16 @@ final class Blockbox:
     val settingW = (pW - 80f * s).max(260f.min(pW - 32f * s))
     val settingH = (36f * s).min(38f).max(28f)
     val settingX = cx - settingW / 2f
-    val modeY = pY + 142f * s
-    val cheatsY = pY + 188f * s
-    if inRect(mx, my, settingX, modeY, settingW, settingH) then
+    val nameY = pY + 104f * s
+    val seedY = pY + 166f * s
+    val modeY = pY + 236f * s
+    val cheatsY = pY + 282f * s
+    if inRect(mx, my, settingX, nameY, settingW, 34f * s) then
+      createWorldNameFocused = true
+    else if inRect(mx, my, settingX, seedY, settingW, 34f * s) then
+      enterCustomSeed = true
+      createWorldNameFocused = false
+    else if inRect(mx, my, settingX, modeY, settingW, settingH) then
       createWorldMode = if createWorldMode == GameMode.Survival then GameMode.Creative else GameMode.Survival
     else if inRect(mx, my, settingX, cheatsY, settingW, settingH) then
       createWorldCheats = !createWorldCheats
@@ -1685,21 +1755,35 @@ final class Blockbox:
       updateSlider(mx); sliderActive = "fog"
     else if inRect(mx, my, settingX, pY + 253 * uiScale, 440 * uiScale, 30 * uiScale) then
       updateSlider(mx); sliderActive = "fov"
-    else if inRect(mx, my, settingX, pY + 285 * s, 440 * s, 28 * s) then fastMove = !fastMove
-    else if inRect(mx, my, settingX, pY + 325 * s, 440 * s, 28 * s) then
-      vsync = !vsync; glfwSwapInterval(if vsync then 1 else 0)
-    else if inRect(mx, my, settingX, pY + 365 * s, 440 * s, 28 * s) then toggleGameMode()
-    else if inRect(mx, my, settingX, pY + 405 * s, 440 * s, 28 * s) then soundEnabled = !soundEnabled
-    else if inRect(mx, my, settingX, pY + 445 * s, 440 * s, 28 * s) then toggleFullscreen()
-    else if inRect(mx, my, settingX, pY + 485 * s, 440 * s, 28 * s) then pauseEscReturnsToGame = !pauseEscReturnsToGame
     else
-      val buttonW = 300f * s; val buttonX = cx - buttonW / 2f
-      if inRect(mx, my, buttonX, pY + 535 * s, buttonW, 44f * s) then
-        sliderActive = null
-        screen = settingsReturnTo
-        if settingsReturnTo == Screen.Playing then
-          glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED)
-          firstMouse = true
+      var optY = pY + 285 * s
+      if inRect(mx, my, settingX, optY, 440 * s, 28 * s) then fastMove = !fastMove
+      else
+        optY += 40 * s
+        if inRect(mx, my, settingX, optY, 440 * s, 28 * s) then
+          vsync = !vsync
+          glfwSwapInterval(if vsync then 1 else 0)
+        else
+          optY += 40 * s
+          val canHostMode = settingsReturnTo == Screen.Playing && gameServer != null && worldCheatsEnabled
+          if canHostMode && inRect(mx, my, settingX, optY, 440 * s, 28 * s) then toggleGameMode()
+          else
+            if canHostMode then optY += 40 * s
+            if inRect(mx, my, settingX, optY, 440 * s, 28 * s) then soundEnabled = !soundEnabled
+            else
+              optY += 40 * s
+              if inRect(mx, my, settingX, optY, 440 * s, 28 * s) then toggleFullscreen()
+              else
+                optY += 40 * s
+                if inRect(mx, my, settingX, optY, 440 * s, 28 * s) then pauseEscReturnsToGame = !pauseEscReturnsToGame
+                else
+                  val buttonW = 300f * s; val buttonX = cx - buttonW / 2f
+                  if inRect(mx, my, buttonX, pY + 535 * s, buttonW, 44f * s) then
+                    sliderActive = null
+                    screen = settingsReturnTo
+                    if settingsReturnTo == Screen.Playing then
+                      glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED)
+                      firstMouse = true
 
   private def handlePauseClick(mx: Float, my: Float): Unit =
     val cx = framebufferWidth / 2f; val h = framebufferHeight.toFloat; val s = uiScale
@@ -1720,6 +1804,36 @@ final class Blockbox:
     val ph = (500f * s).min(framebufferHeight * 0.88f)
     val px = cx - pw / 2f
     val py = cy - ph / 2f
+
+    val bottomH = (34f * s).min(ph * 0.08f).max(28f)
+    if inRect(mx, my, px + 22f * s, py + ph - 46f * s, 130f * s, bottomH) then
+      heldInventoryBlock = Block.Air
+      openFurnace()
+      return
+    else if inRect(mx, my, px + pw - 104f * s, py + ph - 46f * s, 82f * s, bottomH) then
+      heldInventoryBlock = Block.Air
+      enterGame()
+      return
+
+    val hotbarY = py + ph - 104f * s
+    val hotbarPanelW = pw - 56f * s
+    val hotbarX = px + 28f * s
+    val hotGap = (5f * s).max(4f)
+    val hotSlot = ((hotbarPanelW - hotGap * (hotbarBlocks.length - 1)) / hotbarBlocks.length).min(44f * s).max(28f)
+    val hotBarW = hotSlot * hotbarBlocks.length + hotGap * (hotbarBlocks.length - 1)
+    val hotStartX = hotbarX + (hotbarPanelW - hotBarW) / 2f
+    for i <- 0 until hotbarBlocks.length do
+      val sx = hotStartX + i * (hotSlot + hotGap)
+      if inRect(mx, my, sx, hotbarY, hotSlot, hotSlot) then
+        if heldInventoryBlock != Block.Air then
+          if gameMode == GameMode.Creative then inventory(heldInventoryBlock.ordinal) = inventory(heldInventoryBlock.ordinal).max(64)
+          hotbarBlocks(i) = heldInventoryBlock
+          selectedBlock = i
+          heldInventoryBlock = Block.Air
+        else
+          selectedBlock = i
+        return
+
     val gridW = pw * 0.56f
     val cols = 6
     val gap = (6f * s).max(4f)
@@ -1733,8 +1847,12 @@ final class Blockbox:
       val sx = invX + col * (slot + gap)
       val sy = invY + row * (slot + gap)
       if inRect(mx, my, sx, sy, slot, slot) then
-        val hotbarIndex = placeableBlocks.indexOf(items(i))
-        if hotbarIndex >= 0 then selectedBlock = hotbarIndex
+        val block = items(i)
+        if gameMode == GameMode.Creative then inventory(block.ordinal) = inventory(block.ordinal).max(64)
+        if gameMode == GameMode.Creative || inventory(block.ordinal) > 0 then
+          heldInventoryBlock = block
+        else
+          heldInventoryBlock = Block.Air
         return
 
     val craftPanelW = (pw - gridW - 78f * s).max(210f * s)
@@ -1747,10 +1865,6 @@ final class Blockbox:
       if inRect(mx, my, craftX, by, craftPanelW, craftSlotH - 5f * s) then
         tryCraft(i)
         return
-
-    val bottomH = (34f * s).min(ph * 0.08f).max(28f)
-    if inRect(mx, my, px + 22f * s, py + ph - 46f * s, 130f * s, bottomH) then openFurnace()
-    else if inRect(mx, my, px + pw - 104f * s, py + ph - 46f * s, 82f * s, bottomH) then enterGame()
 
   private def handleCatalogClick(mx: Float, my: Float): Unit =
     val cx = framebufferWidth / 2f
@@ -1781,9 +1895,10 @@ final class Blockbox:
       val sx = gridX + col * slotSize
       val sy = gridY + row * slotSize
       if inRect(mx, my, sx, sy, slotSize, slotSize) then
-        if gameMode == GameMode.Creative then inventory(items(i).ordinal) += 64
-        val hotbarIndex = placeableBlocks.indexOf(items(i))
-        if hotbarIndex >= 0 then selectedBlock = hotbarIndex
+        val block = items(i)
+        if gameMode == GameMode.Creative then inventory(block.ordinal) = inventory(block.ordinal).max(64)
+        heldInventoryBlock = block
+        hotbarBlocks(selectedBlock.max(0).min(hotbarBlocks.length - 1)) = block
         return
     val scrollUp = inRect(mx, my, panelX + panelW - 18f * s, panelY + 50f * s, 14f * s, 20f * s)
     val scrollDown = inRect(mx, my, panelX + panelW - 18f * s, panelY + panelH - 55f * s, 14f * s, 20f * s)
@@ -1804,7 +1919,8 @@ final class Blockbox:
     ((mx.get(0).toFloat * sx), (my.get(0).toFloat * sy))
 
   private def startNewWorld(): Unit =
-    applyWorldSeed(chooseCreateSeed(), freshWorldName = true)
+    applyWorldSeed(chooseCreateSeed(), freshWorldName = false)
+    worldName = uniqueWorldFolderName(worldNameInput)
     clearLoadedChunks(saveFirst = false)
     camera = findSpawn()
     velocity = Vec3(0f, 0f, 0f)
@@ -1890,7 +2006,8 @@ final class Blockbox:
     catch case _: NumberFormatException => Left("Invalid port number.")
 
   private def prepareWorldForHost(): Unit =
-    applyWorldSeed(chooseCreateSeed(), freshWorldName = true)
+    applyWorldSeed(chooseCreateSeed(), freshWorldName = false)
+    worldName = uniqueWorldFolderName(if worldNameInput.trim.nonEmpty then worldNameInput else "Hosted World")
     clearLoadedChunks(saveFirst = false)
     camera = findSpawn()
     velocity = Vec3(0f, 0f, 0f)
@@ -1941,6 +2058,7 @@ final class Blockbox:
         (x, y, z, blockId) =>
           val block = Block.fromId(blockId)
           if block == Block.Air || canPlaceBlockAt(x, y, z) then
+            networkBlockOverrides((x, y, z)) = block
             setActiveBlock(x, y, z, block)
             dirtyChunkAt(x, z),
         () => snapshotWorldEditsForNetwork(),
@@ -1961,7 +2079,7 @@ final class Blockbox:
         case Left(error) =>
           stopNetworking()
           hostStatusError = true
-          hostStatusMessage = error
+          hostStatusMessage = error.toString
           screen = Screen.HostGame
           glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL)
     catch
@@ -1985,7 +2103,7 @@ final class Blockbox:
     parseServerAddress(ip) match
       case Left(error) =>
         joinStatusError = true
-        joinStatusMessage = error
+        joinStatusMessage = error.toString
         gameClient = null
         screen = Screen.JoinGame
         glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL)
@@ -2032,6 +2150,7 @@ final class Blockbox:
     knownPlayerNames.clear()
     playerColors.clear()
     pendingNetworkBlocks.clear()
+    networkBlockOverrides.clear()
     multiplayerMode = false
 
   private def startGame(): Unit =
@@ -2066,14 +2185,79 @@ final class Blockbox:
   private def currentWorldDir: java.io.File = new java.io.File(worldsRootDir, worldName)
   private def currentChunksDir: java.io.File = new java.io.File(currentWorldDir, "chunks")
 
+  private def worldSaveDirs: List[java.io.File] =
+    val root = worldsRootDir
+    val files = Option(root.listFiles()).getOrElse(Array.empty[java.io.File])
+    files.filter(d => d.isDirectory && new java.io.File(d, "world.dat").isFile).toList.sortWith((a, b) => a.lastModified() > b.lastModified())
+
+  private def writeWorldIndex(): Unit =
+    try
+      val root = worldsRootDir
+      root.mkdirs()
+      val out = new java.io.PrintWriter(new java.io.BufferedWriter(new java.io.FileWriter(new java.io.File(root, "index.txt"))))
+      try
+        worldSaveDirs.foreach { d =>
+          out.println(d.getName + "|" + new java.io.File(d, "world.dat").lastModified().toString)
+        }
+      finally out.close()
+    catch case e: Exception => System.err.println(s"World index save failed: $e")
+
+  private def writeWorldExtras(out: java.io.DataOutputStream): Unit =
+    out.writeInt(worldExtraMagic)
+    out.writeInt(worldExtraVersion)
+    out.writeInt(inventory.length)
+    inventory.foreach(v => out.writeInt(v.max(0)))
+    out.writeInt(hotbarBlocks.length)
+    hotbarBlocks.foreach(b => out.writeByte(b.ordinal.toByte))
+    out.writeInt(selectedBlock.max(0).min(hotbarBlocks.length - 1))
+    out.writeInt(playerHealth.round)
+    out.writeInt(playerFood.round)
+    out.writeByte(furnaceInput.ordinal.toByte)
+    out.writeByte(furnaceFuel.ordinal.toByte)
+    out.writeFloat(furnaceProgress)
+    out.writeFloat(furnaceFuelRemaining)
+    out.writeByte(furnaceOutput.ordinal.toByte)
+    out.writeInt(furnaceOutputCount)
+
+  private def readWorldExtras(in: java.io.DataInputStream): Unit =
+    try
+      if in.available() >= 8 then
+        val magic = in.readInt()
+        val version = in.readInt()
+        if magic == worldExtraMagic && version >= 1 then
+          val invLen = in.readInt().max(0).min(4096)
+          var i = 0
+          while i < invLen do
+            val value = in.readInt().max(0)
+            if i < inventory.length then inventory(i) = value
+            i += 1
+          val hotLen = in.readInt().max(0).min(64)
+          i = 0
+          while i < hotLen do
+            val block = Block.fromId(in.readByte())
+            if i < hotbarBlocks.length && block != Block.Water then hotbarBlocks(i) = block
+            i += 1
+          selectedBlock = in.readInt().max(0).min(hotbarBlocks.length - 1)
+          playerHealth = in.readInt().max(0).min(20).toFloat
+          playerFood = in.readInt().max(0).min(20).toFloat
+          furnaceInput = Block.fromId(in.readByte())
+          furnaceFuel = Block.fromId(in.readByte())
+          furnaceProgress = in.readFloat().max(0f)
+          furnaceFuelRemaining = in.readFloat().max(0f)
+          furnaceOutput = Block.fromId(in.readByte())
+          furnaceOutputCount = in.readInt().max(0)
+    catch case e: Exception => System.err.println(s"World extras load skipped: $e")
+
   private def snapshotWorldEditsForNetwork(): Seq[(Int, Int, Int, Byte)] =
-    chunks.values.toSeq.flatMap { chunk =>
+    val loadedEdits = chunks.values.toSeq.flatMap { chunk =>
       val bx = chunk.baseX
       val bz = chunk.baseZ
       chunk.edits.synchronized {
         chunk.edits.toList.map { case ((lx, ly, lz), block) => (bx + lx, ly, bz + lz, block.id) }
       }
-    }.distinct
+    }
+    val rememberedEdits = networkBlockOverrides.toSeq.map { case ((x, y, z), block) => (x, y, z, block.id) }
+    (loadedEdits ++ rememberedEdits).reverse.distinctBy(t => (t._1, t._2, t._3)).reverse
 
   private def saveLoadedChunks(): Unit =
     if !canUseLocalChunkSaves then return
@@ -2096,27 +2280,52 @@ final class Blockbox:
       dir.mkdirs()
       val chunksDir = new java.io.File(dir, "chunks")
       chunksDir.mkdirs()
-      val meta = new java.io.DataOutputStream(new java.io.FileOutputStream(new java.io.File(dir, "world.dat")))
-      meta.writeLong(worldSeed)
-      meta.writeFloat(camera.x); meta.writeFloat(camera.y); meta.writeFloat(camera.z)
-      meta.writeFloat(yaw); meta.writeFloat(pitch)
-      meta.writeByte(gameMode.ordinal.toByte)
-      meta.writeBoolean(worldCheatsEnabled)
-      meta.writeInt(chunks.size)
-      chunks.foreach { case ((cx, cz), _) =>
-        meta.writeInt(cx); meta.writeInt(cz)
-        saveChunk(cx, cz)
-      }
-      meta.close()
+      val file = new java.io.File(dir, "world.dat")
+      val tmp = new java.io.File(dir, "world.dat.tmp")
+      val meta = new java.io.DataOutputStream(new java.io.BufferedOutputStream(new java.io.FileOutputStream(tmp)))
+      try
+        meta.writeLong(worldSeed)
+        meta.writeFloat(camera.x); meta.writeFloat(camera.y); meta.writeFloat(camera.z)
+        meta.writeFloat(yaw); meta.writeFloat(pitch)
+        meta.writeByte(gameMode.ordinal.toByte)
+        meta.writeBoolean(worldCheatsEnabled)
+        meta.writeInt(chunks.size)
+        chunks.foreach { case ((cx, cz), _) =>
+          meta.writeInt(cx); meta.writeInt(cz)
+          saveChunk(cx, cz)
+        }
+        writeWorldExtras(meta)
+      finally meta.close()
+      try
+        java.nio.file.Files.move(tmp.toPath, file.toPath, java.nio.file.StandardCopyOption.REPLACE_EXISTING, java.nio.file.StandardCopyOption.ATOMIC_MOVE)
+      catch
+        case _: Exception =>
+          java.nio.file.Files.move(tmp.toPath, file.toPath, java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+      writeWorldIndex()
     catch case e: Exception => System.err.println(s"Save failed: $e")
 
+  private def openLoadWorldMenu(): Unit =
+    loadWorldSelection = loadWorldSelection.max(0).min((worldSaveDirs.length - 1).max(0))
+    loadWorldScroll = loadWorldSelection.max(0)
+    screen = Screen.LoadWorld
+    glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL)
+
   private def loadWorld(): Unit =
+    openLoadWorldMenu()
+
+  private def loadSelectedWorld(): Unit =
+    val saves = worldSaveDirs
+    if saves.isEmpty then
+      addChatMessage("No saved worlds found")
+      screen = Screen.MainMenu
+    else
+      loadWorldFromDir(saves(loadWorldSelection.max(0).min(saves.length - 1)))
+
+  private def loadWorldFromDir(worldDir: java.io.File): Unit =
     try
-      val dir = new java.io.File("worlds")
-      val worlds = dir.listFiles().filter(_.isDirectory).toList
-      worlds.headOption.foreach { worldDir =>
-        worldName = worldDir.getName
-        val meta = new java.io.DataInputStream(new java.io.FileInputStream(new java.io.File(worldDir, "world.dat")))
+      worldName = worldDir.getName
+      val meta = new java.io.DataInputStream(new java.io.BufferedInputStream(new java.io.FileInputStream(new java.io.File(worldDir, "world.dat"))))
+      try
         worldSeed = meta.readLong()
         val x = meta.readFloat(); val y = meta.readFloat(); val z = meta.readFloat()
         camera = Vec3(x, y, z)
@@ -2127,18 +2336,32 @@ final class Blockbox:
         terrainHeightCache.clear()
         clearLoadedChunks(saveFirst = false)
         resetInventory()
-        val chunksDir = new java.io.File(worldDir, "chunks")
-        val chunkCount = meta.readInt()
+        networkBlockOverrides.clear()
+        val chunkCount = meta.readInt().max(0).min(200000)
         for _ <- 0 until chunkCount do
           val cx = meta.readInt(); val cz = meta.readInt()
           loadChunkIfSaved(cx, cz)
-        meta.close()
-        enterGame()
-      }
-    catch case e: Exception => System.err.println(s"Load failed: $e")
+        readWorldExtras(meta)
+      finally meta.close()
+      addChatMessage(s"Loaded world: $worldName")
+      enterGame()
+    catch
+      case e: Exception =>
+        System.err.println(s"Load failed for ${worldDir.getName}: $e")
+        addChatMessage(s"Could not load world: ${worldDir.getName}")
+        screen = Screen.LoadWorld
+
+  private def resetHotbarDefaults(): Unit =
+    var i = 0
+    while i < hotbarBlocks.length do
+      hotbarBlocks(i) = if i < placeableBlocks.length then placeableBlocks(i) else Block.Air
+      i += 1
+    selectedBlock = selectedBlock.max(0).min(hotbarBlocks.length - 1)
+    heldInventoryBlock = Block.Air
 
   private def resetInventory(): Unit =
     java.util.Arrays.fill(inventory, 0)
+    resetHotbarDefaults()
     if gameMode == GameMode.Creative then
       for b <- placeableBlocks do inventory(b.ordinal) = 64
       inventory(Block.Coal.ordinal) = inventory(Block.Coal.ordinal).max(64)
@@ -2188,62 +2411,163 @@ final class Blockbox:
     chatMessages += ((msg, 8f))
     if chatMessages.length > 100 then chatMessages.remove(0, chatMessages.length - 100)
 
+  private def allPlayerNames: Seq[String] =
+    (Seq(playerName) ++ knownPlayerNames.toSeq ++ remotePlayers.keys.toSeq).map(networkSafeName).filter(_.nonEmpty).distinct
+
+  private def canUseCheatAuthority: Boolean =
+    !multiplayerMode || gameServer != null
+
+  private def commandSuggestions(input: String): Seq[String] =
+    if input == null || !input.startsWith("/") then Seq.empty
+    else
+      val raw = input.drop(1)
+      val parts = raw.split("\\s+", -1)
+      val commands = Seq("/help", "/enablecheats", "/gamemode", "/gm", "/timeset", "/fly", "/tp", "/teleport")
+      if !raw.contains(" ") then
+        val prefix = "/" + raw.toLowerCase
+        commands.filter(_.startsWith(prefix)).take(8)
+      else
+        parts.headOption.map(_.toLowerCase).getOrElse("") match
+          case "gamemode" | "gm" =>
+            val prefix = parts.lastOption.getOrElse("").toLowerCase
+            Seq("survival", "creative").filter(_.startsWith(prefix)).map(m => "/" + parts.head + " " + m)
+          case "timeset" =>
+            val prefix = parts.lastOption.getOrElse("").toLowerCase
+            Seq("day", "night", "reset").filter(_.startsWith(prefix)).map(v => "/" + parts.head + " " + v)
+          case "tp" | "teleport" =>
+            val last = parts.lastOption.getOrElse("")
+            val prefix = last.toLowerCase
+            allPlayerNames.filter(_.toLowerCase.startsWith(prefix)).take(8).map(name => "/" + raw.dropRight(last.length) + name)
+          case _ => Seq.empty
+
+  private def applyCommandSuggestion(): Unit =
+    val suggestions = commandSuggestions(chatInput)
+    if suggestions.nonEmpty then
+      val picked = suggestions(commandSuggestionIndex.max(0).min(suggestions.length - 1))
+      chatInput = picked + (if picked.count(_ == ' ') == 0 then " " else "")
+      commandSuggestionIndex = 0
+
+  private def findPlayerName(query: String): Option[String] =
+    val q = Option(query).getOrElse("").trim.toLowerCase
+    if q.isEmpty then None
+    else allPlayerNames.find(_.toLowerCase == q).orElse(allPlayerNames.find(_.toLowerCase.startsWith(q)))
+
+  private def positionOfPlayer(name: String): Option[Vec3] =
+    val clean = networkSafeName(name)
+    if clean.equalsIgnoreCase(playerName) then Some(camera)
+    else remotePlayers.collectFirst { case (n, rp) if n.equalsIgnoreCase(clean) => rp.pos }
+
+  private def teleportPlayer(target: String, dest: Vec3): Unit =
+    val clean = networkSafeName(target)
+    if clean.equalsIgnoreCase(playerName) then
+      camera = dest
+      velocity = Vec3(0f, 0f, 0f)
+      addChatMessage(s"Teleported $clean")
+    else if gameServer != null then
+      val msg = "TPOS|" + networkEscape(clean) + "|" + f"${dest.x}%.3f" + "|" + f"${dest.y}%.3f" + "|" + f"${dest.z}%.3f"
+      gameServer.broadcast(msg)
+      addChatMessage(s"Teleported $clean")
+    else addChatMessage("Only the host can teleport other players")
+
+  private def parseCoord(text: String, current: Float): Option[Float] =
+    try
+      if text == "~" then Some(current)
+      else if text.startsWith("~") then Some(current + text.drop(1).toFloat)
+      else Some(text.toFloat)
+    catch case _: Exception => None
+
   private def parseCommand(cmd: String): Unit =
     val trimmed = cmd.trim
-    if trimmed.startsWith("/") then
-      val parts = trimmed.drop(1).split("\\s+", 2)
-      val command = parts(0).toLowerCase
-      val isCheat = command == "gamemode" || command == "gm" || command == "timeset" || command == "fly"
-      if isCheat && !worldCheatsEnabled then
-        addChatMessage("Cheats are not enabled for this world")
-        return
-      command match
-        case "gamemode" | "gm" =>
-          val mode = if parts.length > 1 then parts(1).toLowerCase else ""
-          mode match
-            case "survival" | "s" | "0" => toggleTo(GameMode.Survival)
-            case "creative" | "c" | "1" => toggleTo(GameMode.Creative)
-            case _ => addChatMessage(s"Usage: /gamemode <survival|creative>")
-        case "timeset" =>
-          val when = if parts.length > 1 then parts(1).toLowerCase else ""
-          val currentTime = gameTime
-          val currentPhase = ((currentTime * 0.018f) % (2f * Pi.toFloat)) / (2f * Pi.toFloat)
-          when match
-            case "day" =>
-              val targetPhase = 0.50f
-              val diff = (targetPhase - currentPhase + 1f) % 1f
-              timeOverride = Some(currentTime + diff / 0.018f * Pi.toFloat)
-              addChatMessage("Set time to day")
-            case "night" =>
-              val targetPhase = 0.0f
-              val diff = (targetPhase - currentPhase + 1f) % 1f
-              timeOverride = Some(currentTime + diff / 0.018f * Pi.toFloat)
-              addChatMessage("Set time to night")
-            case "reset" =>
-              timeOverride = None
-              addChatMessage("Time override cleared")
-            case _ => addChatMessage(s"Usage: /timeset <day|night|reset>")
-        case "fly" =>
-          if gameMode == GameMode.Survival then
-            addChatMessage("Flight is only available in Creative mode")
-          else
-            flyEnabled = !flyEnabled
-            if flyEnabled then
-              velocity = Vec3(0f, 0f, 0f)
-              addChatMessage("Flight enabled")
-            else
-              onGround = true
-              velocity = Vec3(0f, 0f, 0f)
-              addChatMessage("Flight disabled")
-        case "help" =>
-          addChatMessage("Commands: /gamemode, /gm, /timeset <day|night|reset>, /fly, /cheats, /help")
-        case "cheats" =>
-          worldCheatsEnabled = !worldCheatsEnabled
-          addChatMessage(s"Cheats: ${onOff(worldCheatsEnabled)}")
-        case _ =>
-          addChatMessage(s"Unknown command: /${parts(0)}")
-    else
+    if !trimmed.startsWith("/") then
       sendChatMessage(trimmed)
+      return
+
+    val args = trimmed.drop(1).split("\\s+").filter(_.nonEmpty)
+    if args.isEmpty then return
+    val command = args(0).toLowerCase
+    val isCheat = Set("gamemode", "gm", "timeset", "fly", "tp", "teleport").contains(command)
+    if command == "enablecheats" || command == "cheats" then
+      if canUseCheatAuthority then
+        worldCheatsEnabled = true
+        addChatMessage("Cheats enabled")
+      else addChatMessage("Only the host can enable cheats")
+      return
+    if isCheat && !canUseCheatAuthority then
+      addChatMessage("Only the host can use cheat commands in multiplayer")
+      return
+    if isCheat && !worldCheatsEnabled then
+      addChatMessage("Cheats are not enabled. Host can run /enablecheats")
+      return
+
+    command match
+      case "gamemode" | "gm" =>
+        val mode = if args.length > 1 then args(1).toLowerCase else ""
+        mode match
+          case "survival" | "s" | "0" => toggleTo(GameMode.Survival)
+          case "creative" | "c" | "1" => toggleTo(GameMode.Creative)
+          case _ => addChatMessage("Usage: /gamemode <survival|creative>")
+      case "timeset" =>
+        val when = if args.length > 1 then args(1).toLowerCase else ""
+        val currentTime = gameTime
+        val currentPhase = ((currentTime * 0.018f) % (2f * Pi.toFloat)) / (2f * Pi.toFloat)
+        when match
+          case "day" =>
+            val targetPhase = 0.50f
+            val diff = (targetPhase - currentPhase + 1f) % 1f
+            timeOverride = Some(currentTime + diff / 0.018f * Pi.toFloat)
+            addChatMessage("Set time to day")
+          case "night" =>
+            val targetPhase = 0.0f
+            val diff = (targetPhase - currentPhase + 1f) % 1f
+            timeOverride = Some(currentTime + diff / 0.018f * Pi.toFloat)
+            addChatMessage("Set time to night")
+          case "reset" =>
+            timeOverride = None
+            addChatMessage("Time override cleared")
+          case _ => addChatMessage("Usage: /timeset <day|night|reset>")
+      case "fly" =>
+        if gameMode == GameMode.Survival then addChatMessage("Flight is only available in Creative mode")
+        else
+          flyEnabled = !flyEnabled
+          if flyEnabled then
+            velocity = Vec3(0f, 0f, 0f)
+            addChatMessage("Flight enabled")
+          else
+            onGround = true
+            velocity = Vec3(0f, 0f, 0f)
+            addChatMessage("Flight disabled")
+      case "tp" | "teleport" =>
+        if args.length == 2 then
+          findPlayerName(args(1)).flatMap(positionOfPlayer) match
+            case Some(dest) => teleportPlayer(playerName, dest)
+            case None => addChatMessage("Usage: /tp <player> OR /tp <target> <destination> OR /tp <x> <y> <z>")
+        else if args.length == 3 then
+          val targetOpt = findPlayerName(args(1))
+          val destOpt = findPlayerName(args(2)).flatMap(positionOfPlayer)
+          (targetOpt, destOpt) match
+            case (Some(target), Some(dest)) => teleportPlayer(target, dest)
+            case _ => addChatMessage("Usage: /tp <target> <destination>")
+        else if args.length == 4 then
+          val x = parseCoord(args(1), camera.x)
+          val y = parseCoord(args(2), camera.y)
+          val z = parseCoord(args(3), camera.z)
+          (x, y, z) match
+            case (Some(px), Some(py), Some(pz)) => teleportPlayer(playerName, Vec3(px, py, pz))
+            case _ => addChatMessage("Usage: /tp <x> <y> <z>")
+        else if args.length == 5 then
+          val targetOpt = findPlayerName(args(1))
+          val base = targetOpt.flatMap(positionOfPlayer).getOrElse(camera)
+          val x = parseCoord(args(2), base.x)
+          val y = parseCoord(args(3), base.y)
+          val z = parseCoord(args(4), base.z)
+          (targetOpt, x, y, z) match
+            case (Some(target), Some(px), Some(py), Some(pz)) => teleportPlayer(target, Vec3(px, py, pz))
+            case _ => addChatMessage("Usage: /tp <target> <x> <y> <z>")
+        else addChatMessage("Usage: /tp <player> | /tp <target> <destination> | /tp <x> <y> <z>")
+      case "help" =>
+        addChatMessage("Commands: /help, /enablecheats, /gamemode, /timeset, /fly, /tp")
+      case _ =>
+        addChatMessage(s"Unknown command: /${args(0)}")
 
   private def toggleTo(mode: GameMode): Unit =
     gameMode = mode
@@ -2756,6 +3080,7 @@ final class Blockbox:
               terrainGen = TerrainGenerator(worldSeed)
               terrainHeightCache.clear()
               pendingNetworkBlocks.clear()
+              networkBlockOverrides.clear()
               waterLevels.clear()
               clearLoadedChunks(saveFirst = false)
             camera = Vec3(sx, sy, sz)
@@ -2770,6 +3095,7 @@ final class Blockbox:
             val x = parts(1).toInt; val y = parts(2).toInt; val z = parts(3).toInt
             val blockId = parts(4).toByte
             val block = Block.fromId(blockId)
+            networkBlockOverrides((x, y, z)) = block
             val cx = chunkCoordBlock(x); val cz = chunkCoordBlock(z)
             if chunks.contains((cx, cz)) then
               setActiveBlock(x, y, z, block)
@@ -2787,10 +3113,19 @@ final class Blockbox:
               val pyaw = parts(5).toFloat; val ppitch = parts(6).toFloat
               val colorId = if parts.length >= 8 then normalizeColorId(parts(7).toInt) else colorForPlayer(name)
               rememberPlayerColor(name, colorId)
-              remotePlayers.get(name) match
-                case Some(rp) =>
-                  rp.pos = Vec3(x, y, z); rp.yaw = pyaw; rp.pitch = ppitch; rp.lastSeen = glfwGetTime(); rp.colorId = colorId
-                case None => remotePlayers(name) = RemotePlayer(name, Vec3(x, y, z), pyaw, ppitch, glfwGetTime(), colorId)
+              remotePlayers(name) = RemotePlayer(name, Vec3(x, y, z), pyaw, ppitch, glfwGetTime(), colorId)
+        else if line.startsWith("TPOS|") then
+          if parts.length >= 5 then
+            val name = networkSafeName(parts(1))
+            val x = parts(2).toFloat; val y = parts(3).toFloat; val z = parts(4).toFloat
+            if name.equalsIgnoreCase(playerName) then
+              camera = Vec3(x, y, z)
+              velocity = Vec3(0f, 0f, 0f)
+              addChatMessage("Teleported")
+            else
+              remotePlayers.get(name).foreach { rp =>
+                remotePlayers(name) = RemotePlayer(name, Vec3(x, y, z), rp.yaw, rp.pitch, glfwGetTime(), rp.colorId)
+              }
         else if line.startsWith("CHAT|") then
           if parts.length >= 3 then
             val name = networkSafeName(parts(1))
@@ -2842,7 +3177,11 @@ final class Blockbox:
   private def cleanupRemotePlayers(): Unit =
     val now = glfwGetTime()
     val stale = remotePlayers.collect { case (name, rp) if now - rp.lastSeen > 8.0 => name }.toList
-    stale.foreach(remotePlayers.remove)
+    stale.foreach { name =>
+      remotePlayers.remove(name)
+      knownPlayerNames -= name
+      if multiplayerMode && name != playerName then addChatMessage(s"$name left the game")
+    }
 
   private def render(): Unit =
     updateFramebufferSize()
@@ -2873,6 +3212,7 @@ final class Blockbox:
         if debugMode then renderDebugOverlay()
       case Screen.MainMenu => renderMainMenu()
       case Screen.CreateWorld => renderCreateWorld()
+      case Screen.LoadWorld => renderLoadWorldMenu()
       case Screen.Settings => renderSettings()
       case Screen.Paused =>
         renderWorld()
@@ -3220,7 +3560,7 @@ final class Blockbox:
 
   private def renderHotbar(): Unit =
     glDisable(GL_DEPTH_TEST); glDisable(GL_CULL_FACE); setupOrtho()
-    val s = uiScale; val total = 10
+    val s = uiScale; val total = hotbarBlocks.length
     val maxSlotByWidth = ((framebufferWidth.toFloat - 36f * s) / total.toFloat - 5f * s).max(24f)
     val slotSize = (52f * s).min(maxSlotByWidth).max(34f)
     val gap = (5f * s).min(8f).max(3f)
@@ -3232,7 +3572,8 @@ final class Blockbox:
     for i <- 0 until total do
       val sx = startX + i * (slotSize + gap)
       val selected = i == selectedBlock
-      val hasItem = i < placeableBlocks.length && inventory(placeableBlocks(i).ordinal) > 0
+      val block = hotbarBlocks(i)
+      val hasItem = block != Block.Air && (gameMode == GameMode.Creative || inventory(block.ordinal) > 0)
       rect(sx - 2f * s, y - 2f * s, slotSize + 4f * s, slotSize + 4f * s, 0f, 0f, 0f, 0.45f)
       rect(sx, y, slotSize, slotSize, if selected then 0.16f else 0.07f, if selected then 0.17f else 0.075f, if selected then 0.20f else 0.09f, if selected then 0.96f else 0.72f)
       rect(sx + 1f * s, y + 1f * s, slotSize - 2f * s, labelBandH, 0.28f, 0.30f, 0.35f, if selected then 0.42f else 0.20f)
@@ -3242,12 +3583,12 @@ final class Blockbox:
         rect(sx - 3f * s, y + slotSize + 1f * s, slotSize + 6f * s, 2f * s, 1f, 0.92f, 0.45f, 0.75f)
         rect(sx - 3f * s, y - 3f * s, 2f * s, slotSize + 6f * s, 1f, 0.92f, 0.45f, 0.75f)
         rect(sx + slotSize + 1f * s, y - 3f * s, 2f * s, slotSize + 6f * s, 1f, 0.92f, 0.45f, 0.75f)
-      if i < placeableBlocks.length && hasItem then
+      if hasItem then
         val icon = (slotSize * 0.50f).min(24f * s).max(16f)
         val iconY = y + labelBandH + ((slotSize - labelBandH) - icon) / 2f + 2f * s
-        renderBlockIcon(placeableBlocks(i), sx + (slotSize - icon) / 2f, iconY, icon)
+        renderBlockIcon(block, sx + (slotSize - icon) / 2f, iconY, icon)
         if gameMode == GameMode.Survival then
-          val count = inventory(placeableBlocks(i).ordinal)
+          val count = inventory(block.ordinal)
           if count > 0 then
             val ns = count.toString
             val countScale = (1.12f * s).max(0.94f).min(slotSize / 16f)
@@ -3256,6 +3597,8 @@ final class Blockbox:
             val ny = y + slotSize - 12f * countScale - 2f * s
             rect(nx - 2f * s, ny - 1f * s, tw + 4f * s, 11f * countScale + 3f * s, 0f, 0f, 0f, 0.64f)
             renderTextShadow(nx, ny, ns, 1f, 1f, 1f, countScale)
+      else
+        centeredTextFit(sx + slotSize / 2f, y + slotSize * 0.56f, "empty", 0.30f, 0.34f, 0.42f, 0.42f * s, slotSize - 6f * s)
       val label = hotbarLabel(i)
       centeredTextBox(sx + 1f * s, y + 1f * s, slotSize - 2f * s, labelBandH, label, 0.97f, 0.97f, 0.99f, (1.14f * s).max(0.96f).min(slotSize / 12.8f))
 
@@ -3527,6 +3870,16 @@ final class Blockbox:
       rect(12, inputY + 2, chatWidth - 14, 2, 0.30f, 0.30f, 0.35f, 0.25f)
       val display = s"> $chatInput${if (glfwGetTime() * 2).toInt % 2 == 0 then "_" else " "}"
       renderTextShadow(18, inputY + 5, display, 1f, 1f, 1f, (1.34f * uiScale).max(1.14f))
+      val suggestions = commandSuggestions(chatInput)
+      if suggestions.nonEmpty then
+        val boxY = inputY - (suggestions.length * 22f * uiScale + 8f)
+        rect(10, boxY, chatWidth - 10, inputY - boxY - 4f, 0f, 0f, 0f, 0.50f)
+        suggestions.zipWithIndex.foreach { case (sug, idx) =>
+          val selected = idx == commandSuggestionIndex.max(0).min(suggestions.length - 1)
+          val y = boxY + 6f + idx * 22f * uiScale
+          if selected then rect(14, y - 2f, chatWidth - 22f, 18f * uiScale, 0.20f, 0.22f, 0.28f, 0.72f)
+          renderTextShadow(20, y, sug, if selected then 1f else 0.78f, if selected then 0.92f else 0.84f, if selected then 0.55f else 0.96f, (1.0f * uiScale).max(0.88f))
+        }
 
   private def mainMenuLayout(): (Float, Float, Float, Array[Float], Float, Float, Float, Float, Float) =
     val w = framebufferWidth.toFloat
@@ -3748,20 +4101,16 @@ final class Blockbox:
 
     val leftX = pX + 40f * s
     val contentW = pW - 80f * s
-    val seedText = if enterCustomSeed && customSeedInput.nonEmpty then s"Seed: $customSeedInput" else s"Seed: $worldSeed"
-    renderTextShadow(leftX, pY + 92f * s, seedText, 0.85f, 0.90f, 1f, (0.72f * s).min(contentW / 190f).max(0.48f))
-    if enterCustomSeed then
-      val display = if customSeedInput.isEmpty then "type seed..." else customSeedInput
-      val inputW = (contentW * 0.62f).max(220f).min(contentW)
-      rect(cx - inputW / 2f, pY + 106f * s, inputW, 30f * s, 0f, 0f, 0f, 0.70f)
-      rect(cx - inputW / 2f + 2f * s, pY + 108f * s, inputW - 4f * s, 26f * s, 0.12f, 0.14f, 0.18f, 0.85f)
-      centeredTextFit(cx, pY + 124f * s, display, 0.85f, 0.90f, 1f, 0.72f * s, inputW - 14f * s)
-
     val settingW = contentW.max(260f.min(pW - 32f * s))
     val settingH = (36f * s).min(38f).max(28f)
     val settingX = cx - settingW / 2f
-    val modeY = pY + 142f * s
-    val cheatsY = pY + 188f * s
+    val nameY = pY + 104f * s
+    val seedY = pY + 166f * s
+    val modeY = pY + 236f * s
+    val cheatsY = pY + 282f * s
+    renderNameField(settingX, nameY, settingW, 34f * s, "World name", worldNameInput, createWorldNameFocused)
+    val seedDisplay = if customSeedInput.nonEmpty then customSeedInput else worldSeed.toString
+    renderNameField(settingX, seedY, settingW, 34f * s, "Seed (optional)", seedDisplay, !createWorldNameFocused)
     def settingRow(y: Float, label: String, value: String): Unit =
       val (mx, my) = mouseFramebufferPos()
       val hover = inRect(mx, my, settingX, y, settingW, settingH)
@@ -3783,7 +4132,60 @@ final class Blockbox:
     drawButton(buttonX, buttonStartY + buttonH + gap, buttonW, buttonH, "Random Seed")
     drawButton(buttonX, buttonStartY + (buttonH + gap) * 2f, buttonW, buttonH, if enterCustomSeed then "Hide Custom Seed" else "Custom Seed")
     drawButton(buttonX, buttonStartY + (buttonH + gap) * 3f, buttonW, buttonH, "Back")
-    centeredTextFit(cx, pY + pH - 10f * s, "Press C to type a custom seed | M changes mode | H toggles cheats", 0.42f, 0.48f, 0.60f, 0.46f * s, pW - 48f * s)
+    centeredTextFit(cx, pY + pH - 10f * s, "Tab switches fields | N name | C seed | M mode | H cheats", 0.42f, 0.48f, 0.60f, 0.46f * s, pW - 48f * s)
+
+  private def renderLoadWorldMenu(): Unit =
+    glDisable(GL_DEPTH_TEST); glDisable(GL_CULL_FACE); setupOrtho()
+    val w = framebufferWidth.toFloat; val h = framebufferHeight.toFloat; val cx = w / 2f; val s = uiScale
+    glBegin(GL_QUADS)
+    glColor4f(0.05f, 0.06f, 0.12f, 1f); glVertex2f(0, 0); glVertex2f(w, 0)
+    glColor4f(0.14f, 0.26f, 0.44f, 1f); glVertex2f(w, h); glVertex2f(0, h)
+    glEnd()
+    rect(0, h * 0.62f, w, h * 0.38f, 0.06f, 0.18f, 0.06f, 0.85f)
+    val pW = (700f * s).min(w * 0.92f); val pH = (520f * s).min(h * 0.90f)
+    val pX = cx - pW / 2f; val pY = h / 2f - pH / 2f
+    drawPanel(pX, pY, pW, pH)
+    centeredTextFit(cx, pY + 34f * s, "SELECT WORLD", 1f, 0.90f, 0.55f, 2.0f * s, pW - 80f * s)
+    rect(pX + 34f * s, pY + 64f * s, pW - 68f * s, 1f, 0.30f, 0.30f, 0.35f, 0.30f)
+    val saves = worldSaveDirs
+    if saves.isEmpty then
+      centeredTextFit(cx, pY + 150f * s, "No saved worlds found in worlds/", 0.78f, 0.84f, 0.94f, 0.9f * s, pW - 80f * s)
+    else
+      val listX = pX + 42f * s
+      val listY = pY + 86f * s
+      val rowH = (46f * s).max(34f)
+      val visible = ((pH - 160f * s) / rowH).toInt.max(3)
+      if loadWorldSelection < loadWorldScroll then loadWorldScroll = loadWorldSelection
+      if loadWorldSelection >= loadWorldScroll + visible then loadWorldScroll = loadWorldSelection - visible + 1
+      loadWorldScroll = loadWorldScroll.max(0).min((saves.length - visible).max(0))
+      saves.zipWithIndex.drop(loadWorldScroll).take(visible).foreach { case (dir, idx) =>
+        val y = listY + (idx - loadWorldScroll) * rowH
+        val selected = idx == loadWorldSelection
+        val worldDat = new java.io.File(dir, "world.dat")
+        rect(listX, y, pW - 84f * s, rowH - 6f * s, if selected then 0.22f else 0.08f, if selected then 0.20f else 0.09f, if selected then 0.10f else 0.13f, 0.88f)
+        if selected then rect(listX, y, 4f * s, rowH - 6f * s, 1f, 0.82f, 0.32f, 0.82f)
+        renderTextShadow(listX + 14f * s, y + 7f * s, dir.getName, 0.94f, 0.96f, 1f, 0.76f * s)
+        renderTextShadow(listX + 14f * s, y + 25f * s, s"Saved: ${new java.util.Date(worldDat.lastModified()).toString}", 0.50f, 0.58f, 0.70f, 0.48f * s)
+      }
+    val bw = (220f * s).min(pW * 0.36f); val bh = (38f * s).max(30f)
+    drawButton(cx - bw - 12f * s, pY + pH - 56f * s, bw, bh, "Load Selected", accent = true)
+    drawButton(cx + 12f * s, pY + pH - 56f * s, bw, bh, "Back")
+    centeredTextFit(cx, pY + pH - 12f * s, "Up/Down selects | Enter loads | ESC backs out", 0.42f, 0.48f, 0.60f, 0.46f * s, pW - 80f * s)
+
+  private def handleLoadWorldClick(mx: Float, my: Float): Unit =
+    val w = framebufferWidth.toFloat; val h = framebufferHeight.toFloat; val cx = w / 2f; val s = uiScale
+    val pW = (700f * s).min(w * 0.92f); val pH = (520f * s).min(h * 0.90f)
+    val pX = cx - pW / 2f; val pY = h / 2f - pH / 2f
+    val saves = worldSaveDirs
+    val listX = pX + 42f * s; val listY = pY + 86f * s; val rowH = (46f * s).max(34f)
+    val visible = ((pH - 160f * s) / rowH).toInt.max(3)
+    saves.zipWithIndex.drop(loadWorldScroll).take(visible).foreach { case (_, idx) =>
+      val y = listY + (idx - loadWorldScroll) * rowH
+      if inRect(mx, my, listX, y, pW - 84f * s, rowH - 6f * s) then loadWorldSelection = idx
+    }
+    val bw = (220f * s).min(pW * 0.36f); val bh = (38f * s).max(30f)
+    if inRect(mx, my, cx - bw - 12f * s, pY + pH - 56f * s, bw, bh) then loadSelectedWorld()
+    else if inRect(mx, my, cx + 12f * s, pY + pH - 56f * s, bw, bh) then screen = Screen.MainMenu
 
   private def renderSettings(): Unit =
     glDisable(GL_DEPTH_TEST); glDisable(GL_CULL_FACE); setupOrtho()
@@ -3812,12 +4214,14 @@ final class Blockbox:
     slider(settingX, pY + 185 * s, rowW, (fogDensity - 0.6f) / 2.4f)
     clickRow(pY + 218 * s, f"FOV: $fov%.0f")
     slider(settingX, pY + 253 * s, rowW, (fov - 50f) / 50f)
-    clickRow(pY + 285 * s, s"Fast movement: ${onOff(fastMove)}")
-    clickRow(pY + 325 * s, s"VSync: ${onOff(vsync)}")
-    clickRow(pY + 365 * s, s"Game mode: ${gameMode}")
-    clickRow(pY + 405 * s, s"Sound effects: ${onOff(soundEnabled)}")
-    clickRow(pY + 445 * s, s"Fullscreen: ${onOff(fullscreen)}")
-    clickRow(pY + 485 * s, s"Pause ESC: ${if pauseEscReturnsToGame then "Resume game" else "Quit to title"}")
+    var optY = pY + 285 * s
+    clickRow(optY, s"Fast movement: ${onOff(fastMove)}"); optY += 40 * s
+    clickRow(optY, s"VSync: ${onOff(vsync)}"); optY += 40 * s
+    if settingsReturnTo == Screen.Playing && gameServer != null && worldCheatsEnabled then
+      clickRow(optY, s"Host game mode: ${gameMode}"); optY += 40 * s
+    clickRow(optY, s"Sound effects: ${onOff(soundEnabled)}"); optY += 40 * s
+    clickRow(optY, s"Fullscreen: ${onOff(fullscreen)}"); optY += 40 * s
+    clickRow(optY, s"Pause ESC: ${if pauseEscReturnsToGame then "Resume game" else "Quit to title"}")
     rect(pX + 40 * s, pY + 525 * s, pW - 80 * s, 1, 0.30f, 0.30f, 0.35f, 0.20f)
     val buttonW = 300f * s; val buttonH = 44f * s; val buttonX = cx - buttonW / 2f
     drawButton(buttonX, pY + 535 * s, buttonW, buttonH, "Done")
@@ -3871,8 +4275,7 @@ final class Blockbox:
       val sx = invX + col * (slot + gap); val sy = invY + row * (slot + gap)
       val block = items(i)
       val count = inventory(block.ordinal)
-      val hotbarIndex = placeableBlocks.indexOf(block)
-      val isSelected = hotbarIndex >= 0 && hotbarIndex == selectedBlock
+      val isSelected = hotbarBlocks.isDefinedAt(selectedBlock) && hotbarBlocks(selectedBlock) == block
       val hover = inRect(mx, my, sx, sy, slot, slot)
       if hover then
         hoveredBlock = block; hoveredX = sx + slot / 2f; hoveredY = sy
@@ -3921,10 +4324,13 @@ final class Blockbox:
     if craftMaxScroll > 0 then
       centeredTextFit(craftX + craftPanelW / 2f, craftY + maxCraftVisible * craftSlotH + 2f * s, s"${craftingScroll + 1}-${(craftingScroll + maxCraftVisible).min(craftingRecipes.length)}/${craftingRecipes.length}", 0.50f, 0.55f, 0.65f, 0.50f * s, craftPanelW)
 
+    val hotbarPanelY = py + ph - 104f * s
+    drawInventoryHotbar(px + 28f * s, hotbarPanelY, pw - 56f * s, s, mx, my)
     rect(px + 18f * s, py + ph - 54f * s, pw - 36f * s, 1f, 0.30f, 0.30f, 0.35f, 0.20f)
     drawButton(px + 22f * s, py + ph - 46f * s, 130f * s, (34f * s).min(ph * 0.08f).max(28f), "Furnace")
     drawButton(px + pw - 104f * s, py + ph - 46f * s, 82f * s, (34f * s).min(ph * 0.08f).max(28f), "Close")
     if hoveredBlock != null then renderTooltip(hoveredX, hoveredY - 8f * s, blockName(hoveredBlock.asInstanceOf[Block]))
+    renderHeldInventoryCursor(mx, my)
 
   private def renderCatalog(): Unit =
     glDisable(GL_DEPTH_TEST); glDisable(GL_CULL_FACE); setupOrtho()
@@ -3957,7 +4363,7 @@ final class Blockbox:
       val sx = gridX + col * slotSize
       val sy = gridY + row * slotSize
       val block = items(i)
-      val isSelected = placeableBlocks.isDefinedAt(selectedBlock) && placeableBlocks(selectedBlock) == block
+      val isSelected = hotbarBlocks.isDefinedAt(selectedBlock) && hotbarBlocks(selectedBlock) == block
       val count = inventory(block.ordinal)
       val hover = inRect(mx, my, sx, sy, slotSize, slotSize)
       val base = if hover then 0.13f else 0.09f
@@ -3986,15 +4392,51 @@ final class Blockbox:
       val thumbY = panelY + 52f * s + (catalogScroll.toFloat / scrollMax.max(1)) * (scrollBarH - thumbH)
       rect(scrollBarX, panelY + 52f * s, 12f * s, scrollBarH, 0.02f, 0.02f, 0.02f, 0.40f)
       rect(scrollBarX, thumbY, 12f * s, thumbH, 0.35f, 0.40f, 0.50f, 0.70f)
+    renderHeldInventoryCursor(mx, my)
     val infoY = panelY + panelH - 24f * s
     rect(panelX + 12f * s, infoY - 2f * s, panelW - 24f * s, 20f * s, 0.06f, 0.08f, 0.12f, 0.50f)
-    centeredTextFit(cx, infoY, "E or ESC close | Click to add to inventory", 0.55f, 0.60f, 0.70f, 0.60f * s, panelW - 32f * s)
+    centeredTextFit(cx, infoY, "E or ESC close | Click to hold item / assign selected hotbar", 0.55f, 0.60f, 0.70f, 0.60f * s, panelW - 32f * s)
 
   private def blockName(block: Block): String =
     block.toString.replaceAll("([a-z])([A-Z])", "$1 $2")
 
   private def inventoryItems: Array[Block] =
     Block.values.filter(b => b != Block.Air && b != Block.Water)
+
+  private def drawInventoryHotbar(panelX: Float, panelY: Float, panelW: Float, s: Float, mx: Float, my: Float): Unit =
+    val total = hotbarBlocks.length
+    val gap = (5f * s).max(4f)
+    val slot = ((panelW - gap * (total - 1)) / total).min(44f * s).max(28f)
+    val barW = slot * total + gap * (total - 1)
+    val startX = panelX + (panelW - barW) / 2f
+    renderTextShadow(panelX, panelY - 19f * s, "Hotbar: click an item, then click a slot", 0.70f, 0.78f, 0.95f, 0.56f * s)
+    var i = 0
+    while i < total do
+      val sx = startX + i * (slot + gap)
+      val selected = i == selectedBlock
+      val hover = inRect(mx, my, sx, panelY, slot, slot)
+      val block = hotbarBlocks(i)
+      val base = if hover then 0.14f else 0.085f
+      rect(sx - 1f * s, panelY - 1f * s, slot + 2f * s, slot + 2f * s, 0.015f, 0.017f, 0.022f, 0.78f)
+      rect(sx, panelY, slot, slot, base, base + 0.01f, base + 0.035f, 0.92f)
+      if selected then
+        rect(sx - 2f * s, panelY - 2f * s, slot + 4f * s, 2f * s, 1f, 0.92f, 0.42f, 0.55f)
+        rect(sx - 2f * s, panelY + slot, slot + 4f * s, 2f * s, 1f, 0.92f, 0.42f, 0.55f)
+        rect(sx - 2f * s, panelY - 2f * s, 2f * s, slot + 4f * s, 1f, 0.92f, 0.42f, 0.55f)
+        rect(sx + slot, panelY - 2f * s, 2f * s, slot + 4f * s, 1f, 0.92f, 0.42f, 0.55f)
+      if block != Block.Air then
+        val icon = (slot * 0.58f).min(26f * s).max(16f)
+        renderBlockIcon(block, sx + (slot - icon) / 2f, panelY + (slot - icon) / 2f, icon)
+      centeredTextFit(sx + slot / 2f, panelY + 3f * s, hotbarLabel(i), 0.96f, 0.96f, 0.98f, 0.54f * s, slot - 6f * s)
+      i += 1
+
+  private def renderHeldInventoryCursor(mx: Float, my: Float): Unit =
+    if heldInventoryBlock != Block.Air then
+      val s = uiScale
+      val size = (34f * s).max(24f)
+      rect(mx + 10f * s, my + 10f * s, size + 8f * s, size + 8f * s, 0f, 0f, 0f, 0.45f)
+      renderBlockIcon(heldInventoryBlock, mx + 14f * s, my + 14f * s, size)
+      renderTooltip(mx + 34f * s, my + 12f * s, s"Holding ${blockName(heldInventoryBlock)}")
 
   private def renderTooltip(anchorX: Float, anchorY: Float, text: String): Unit =
     if text == null || text.isEmpty then return
@@ -4134,8 +4576,9 @@ final class Blockbox:
     else if inRect(mx, my, px + pw - 104f * s, py + ph - 52f * s, 82f * s, bh) then enterGame()
 
   private def pickFurnaceInput(): Unit =
-    smeltableInputs.find(b => inventory(b.ordinal) > 0) match
-      case Some(b) => furnaceInput = b
+    val picked: Option[Block] = smeltableInputs.find(b => inventory(b.ordinal) > 0)
+    picked match
+      case Some(b: Block) => furnaceInput = b
       case None => addChatMessage("No smeltable items in inventory")
 
   private def smeltResult(input: Block): Option[(Block, Int)] = input match
@@ -4402,20 +4845,30 @@ final class Blockbox:
       }
     }
 
-  private def applyPendingNetworkBlocksToChunk(cx: Int, cz: Int): Unit =
+  private def applyNetworkBlocksToChunk(cx: Int, cz: Int): Unit =
     val chunkOpt = chunks.get((cx, cz))
-    if chunkOpt.isEmpty || pendingNetworkBlocks.isEmpty then return
+    if chunkOpt.isEmpty then return
     val chunk = chunkOpt.get
     var changed = false
-    val keys = pendingNetworkBlocks.keys.filter { case (wx, _, wz) => chunkCoordBlock(wx) == cx && chunkCoordBlock(wz) == cz }.toList
-    keys.foreach { case (wx, wy, wz) =>
-      pendingNetworkBlocks.remove((wx, wy, wz)).foreach { block =>
-        val lx = wx - cx * Terrain.chunkSize
-        val lz = wz - cz * Terrain.chunkSize
+    def applyOne(wx: Int, wy: Int, wz: Int, block: Block): Unit =
+      val lx = wx - cx * Terrain.chunkSize
+      val lz = wz - cz * Terrain.chunkSize
+      if lx >= 0 && lx < Terrain.chunkSize && wy >= 0 && wy < Terrain.worldHeight && lz >= 0 && lz < Terrain.chunkSize then
         chunk.setBlock(lx, wy, lz, block)
         if block == Block.Water then waterLevels((wx, wy, wz)) = 7.toByte
         else waterLevels.remove((wx, wy, wz))
         changed = true
+
+    val overrideKeys = networkBlockOverrides.keys.filter { case (wx, _, wz) => chunkCoordBlock(wx) == cx && chunkCoordBlock(wz) == cz }.toList
+    overrideKeys.foreach { case (wx, wy, wz) =>
+      networkBlockOverrides.get((wx, wy, wz)).foreach(block => applyOne(wx, wy, wz, block))
+    }
+
+    val pendingKeys = pendingNetworkBlocks.keys.filter { case (wx, _, wz) => chunkCoordBlock(wx) == cx && chunkCoordBlock(wz) == cz }.toList
+    pendingKeys.foreach { case (wx, wy, wz) =>
+      pendingNetworkBlocks.remove((wx, wy, wz)).foreach { block =>
+        networkBlockOverrides((wx, wy, wz)) = block
+        applyOne(wx, wy, wz, block)
       }
     }
     if changed then chunk.markDirtyMesh()
@@ -4437,7 +4890,7 @@ final class Blockbox:
           if !chunks.contains((cx, cz)) && loaded < maxPerFrame then
             val loadedFromDisk = canUseLocalChunkSaves && loadChunkIfSaved(cx, cz)
             if loadedFromDisk then
-              applyPendingNetworkBlocksToChunk(cx, cz)
+              applyNetworkBlocksToChunk(cx, cz)
               // Current/adjacent chunks should be ready immediately; far chunks can stream.
               if ring == 0 then chunks.get((cx, cz)).foreach(_.buildNowAndUpload()) else chunks.get((cx, cz)).foreach(queueChunkMesh)
               loaded += 1
@@ -4445,7 +4898,7 @@ final class Blockbox:
               val chunk = Chunk(cx, cz, activeAtlas, terrainGen)
               chunks((cx, cz)) = chunk
               initChunkWaterLevels(cx, cz)
-              applyPendingNetworkBlocksToChunk(cx, cz)
+              applyNetworkBlocksToChunk(cx, cz)
               if ring == 0 then chunk.buildNowAndUpload() else queueChunkMesh(chunk)
               loaded += 1
           else if chunks.contains((cx, cz)) then
@@ -4549,6 +5002,7 @@ final class Blockbox:
             val created = Chunk(cx, cz, activeAtlas, terrainGen)
             chunks(key) = created
             initChunkWaterLevels(cx, cz)
+            applyNetworkBlocksToChunk(cx, cz)
             created
         if !chunk.isDisposed && !chunk.hasMesh then chunk.forceBuildNowAndUpload()
         dz += 1
@@ -4592,6 +5046,7 @@ final class Blockbox:
 
   private def sendBlockNetwork(x: Int, y: Int, z: Int, blockId: Byte): Unit =
     if multiplayerMode then
+      networkBlockOverrides((x, y, z)) = Block.fromId(blockId)
       val msg = s"BLOC|$x|$y|$z|$blockId"
       if gameClient != null && gameClient.isConnected then gameClient.send(msg)
       else if gameServer != null then gameServer.broadcast(msg)
@@ -4616,8 +5071,8 @@ final class Blockbox:
         openFurnace()
       else
         val (x, y, z) = hit.place
-        val block = placeableBlocks(selectedBlock)
-        val hasBlock = gameMode == GameMode.Creative || inventory(block.ordinal) > 0
+        val block = hotbarBlocks(selectedBlock.max(0).min(hotbarBlocks.length - 1))
+        val hasBlock = block != Block.Air && (gameMode == GameMode.Creative || inventory(block.ordinal) > 0)
         if hasBlock && canPlaceBlockAt(x, y, z) then
           setActiveBlock(x, y, z, block)
           if gameMode == GameMode.Survival then inventory(block.ordinal) -= 1
@@ -4712,11 +5167,19 @@ final class Blockbox:
     val chunksDir = currentChunksDir
     val file = new java.io.File(chunksDir, s"chunk_${cx}_${cz}.dat")
     if file.exists() then
-      val chunk = Chunk(cx, cz, activeAtlas, terrainGen)
-      chunk.load(chunksDir)
-      chunks((cx, cz)) = chunk
-      initChunkWaterLevels(cx, cz)
-      true
+      try
+        val chunk = Chunk(cx, cz, activeAtlas, terrainGen)
+        chunk.load(chunksDir)
+        chunks((cx, cz)) = chunk
+        initChunkWaterLevels(cx, cz)
+        applyNetworkBlocksToChunk(cx, cz)
+        true
+      catch
+        case e: Exception =>
+          System.err.println(s"Corrupt chunk ignored $cx,$cz: $e")
+          try file.renameTo(new java.io.File(chunksDir, s"chunk_${cx}_${cz}.dat.bad")) catch case _: Exception => ()
+          chunks -= ((cx, cz))
+          false
     else
       false
 

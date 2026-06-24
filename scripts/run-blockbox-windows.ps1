@@ -1,17 +1,80 @@
 $ErrorActionPreference = "Stop"
 
 $LWJGL_VERSION = "3.4.1"
-$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$SourceFile = Join-Path $ScriptDir "Blockbox_Main_CrossPlatformSandPause_v25_UNIQUE.scala"
+$ScriptPath = $MyInvocation.MyCommand.Path
+$ScriptDir = Split-Path -Parent $ScriptPath
+$CurrentDir = (Get-Location).Path
 
-if (-not (Test-Path $SourceFile)) {
-  $ProjectSource = Join-Path $ScriptDir "src\main\scala\blockbox\Main.scala"
-  if (Test-Path $ProjectSource) {
-    $SourceFile = $ProjectSource
-  } else {
-    throw "Could not find Blockbox Scala source next to this script or at src\main\scala\blockbox\Main.scala."
-  }
+function Add-UniqueRoot([System.Collections.Generic.List[string]]$List, [string]$PathValue) {
+  if ([string]::IsNullOrWhiteSpace($PathValue)) { return }
+  $Full = [System.IO.Path]::GetFullPath($PathValue)
+  if (-not $List.Contains($Full)) { [void]$List.Add($Full) }
 }
+
+function Resolve-BlockboxRootAndSource {
+  $roots = New-Object System.Collections.Generic.List[string]
+  Add-UniqueRoot $roots $ScriptDir
+  Add-UniqueRoot $roots (Split-Path -Parent $ScriptDir)
+  Add-UniqueRoot $roots $CurrentDir
+  Add-UniqueRoot $roots (Split-Path -Parent $CurrentDir)
+
+  # Normal project layout first. This is the real target: src\main\scala\blockbox\Main.scala
+  foreach ($root in $roots) {
+    $projectMain = Join-Path $root "src\main\scala\blockbox\Main.scala"
+    if (Test-Path $projectMain) {
+      return @{ Root = $root; Source = $projectMain }
+    }
+  }
+
+  # Also support a simple single-file folder.
+  foreach ($root in $roots) {
+    $rootMain = Join-Path $root "Main.scala"
+    if (Test-Path $rootMain) {
+      return @{ Root = $root; Source = $rootMain }
+    }
+  }
+
+  # Last fallback for older packages, but not required.
+  foreach ($root in $roots) {
+    $anyUnique = Get-ChildItem -Path $root -Filter "Blockbox_Main_*_UNIQUE.scala" -File -ErrorAction SilentlyContinue |
+      Sort-Object LastWriteTime -Descending |
+      Select-Object -First 1
+    if ($null -ne $anyUnique) {
+      return @{ Root = $root; Source = $anyUnique.FullName }
+    }
+  }
+
+  throw @"
+Could not find Blockbox Scala source.
+
+Expected one of:
+  src\main\scala\blockbox\Main.scala
+  Main.scala
+  Blockbox_Main_*_UNIQUE.scala
+
+Checked:
+$($roots -join "`n")
+"@
+}
+
+$Resolved = Resolve-BlockboxRootAndSource
+$ProjectRoot = $Resolved.Root
+$SourceFile = $Resolved.Source
+Set-Location $ProjectRoot
+
+# Run from a clean mirror so scala-cli cannot accidentally compile old extra files nearby.
+$RunDir = Join-Path $ProjectRoot ".blockbox-run"
+if (Test-Path $RunDir) { Remove-Item -Recurse -Force $RunDir }
+New-Item -ItemType Directory -Force -Path $RunDir | Out-Null
+$RunFile = Join-Path $RunDir "Main.scala"
+Copy-Item -Force $SourceFile $RunFile
+
+$LogFile = Join-Path $ProjectRoot "blockbox-last-run.log"
+
+Write-Host "Blockbox: project root = $ProjectRoot"
+Write-Host "Blockbox: source       = $SourceFile"
+Write-Host "Blockbox: run mirror   = $RunFile"
+Write-Host "Blockbox: log          = $LogFile"
 
 function Test-Command($Name) {
   return [bool](Get-Command $Name -ErrorAction SilentlyContinue)
@@ -23,46 +86,58 @@ function Refresh-Path {
   $env:Path = "$machine;$user"
 }
 
-function Install-WithWinget($Id, $FriendlyName) {
+function Install-WithWinget($Ids, $FriendlyName) {
   if (-not (Test-Command winget)) {
     throw "$FriendlyName is missing and winget is not available. Install $FriendlyName manually, then rerun this script."
   }
-  Write-Host "Blockbox: installing $FriendlyName with winget..."
-  winget install --id $Id --exact --source winget --accept-package-agreements --accept-source-agreements
-  Refresh-Path
+
+  foreach ($id in $Ids) {
+    Write-Host "Blockbox: trying winget install $FriendlyName ($id)..."
+    winget install --id $id --exact --source winget --accept-package-agreements --accept-source-agreements
+    Refresh-Path
+    if ($LASTEXITCODE -eq 0) { return }
+  }
+
+  throw "Could not install $FriendlyName with winget. Install it manually, then rerun this script."
 }
 
 if (-not (Test-Command java)) {
-  Install-WithWinget "EclipseAdoptium.Temurin.21.JDK" "Temurin JDK 21"
+  Install-WithWinget @("EclipseAdoptium.Temurin.21.JDK") "Temurin JDK 21"
 }
 
 if (-not (Test-Command scala-cli)) {
-  Install-WithWinget "VirtusLab.ScalaCLI" "Scala CLI"
+  Install-WithWinget @("VirtusLab.ScalaCLI", "Scala.ScalaCli") "Scala CLI"
 }
 
 if (-not (Test-Command java)) { throw "java is still not on PATH after install. Open a new PowerShell window and rerun this script." }
 if (-not (Test-Command scala-cli)) { throw "scala-cli is still not on PATH after install. Open a new PowerShell window and rerun this script." }
 
-$NativeAccessOpt = @()
-& java --enable-native-access=ALL-UNNAMED -version *> $null
-if ($LASTEXITCODE -eq 0) {
-  $NativeAccessOpt = @("--java-opt", "--enable-native-access=ALL-UNNAMED")
-}
-
 $Deps = @(
+  "org.lwjgl:lwjgl:$LWJGL_VERSION",
+  "org.lwjgl:lwjgl-glfw:$LWJGL_VERSION",
+  "org.lwjgl:lwjgl-opengl:$LWJGL_VERSION",
+  "org.lwjgl:lwjgl-stb:$LWJGL_VERSION",
   "org.lwjgl:lwjgl:$LWJGL_VERSION,classifier=natives-windows",
   "org.lwjgl:lwjgl-glfw:$LWJGL_VERSION,classifier=natives-windows",
   "org.lwjgl:lwjgl-opengl:$LWJGL_VERSION,classifier=natives-windows",
   "org.lwjgl:lwjgl-stb:$LWJGL_VERSION,classifier=natives-windows"
 )
 
-$ArgsList = @("run", $SourceFile, "--java-opt", "-Xmx4G") + $NativeAccessOpt
+$ArgsList = @("run", $RunFile, "--server=false", "--java-opt", "-Xmx4G", "--java-opt", "--enable-native-access=ALL-UNNAMED")
 foreach ($dep in $Deps) {
   $ArgsList += @("--dependency", $dep)
 }
 
-Write-Host "Blockbox: running $SourceFile"
-& scala-cli @ArgsList
-if ($LASTEXITCODE -ne 0) {
-  throw "scala-cli exited with code $LASTEXITCODE"
+Write-Host "Blockbox: running..."
+"Blockbox command: scala-cli $($ArgsList -join ' ')" | Out-File -FilePath $LogFile -Encoding utf8
+& scala-cli @ArgsList 2>&1 | Tee-Object -FilePath $LogFile -Append
+$Exit = $LASTEXITCODE
+
+if ($Exit -ne 0) {
+  Write-Host ""
+  Write-Host "Blockbox failed. Full log saved to:"
+  Write-Host "  $LogFile"
+  Write-Host ""
+  Write-Host "Send blockbox-last-run.log, especially the FIRST [error] lines."
+  throw "scala-cli exited with code $Exit"
 }
