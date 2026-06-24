@@ -24,7 +24,7 @@ import java.net.*
 import java.util.concurrent.LinkedBlockingQueue
 import javax.sound.sampled.AudioFormat
 import javax.sound.sampled.AudioSystem
-import scala.collection.mutable.{ArrayBuffer, Queue}
+import scala.collection.mutable.{ArrayBuffer, Queue, HashSet}
 import scala.math.*
 import scala.util.Random
 
@@ -70,6 +70,7 @@ enum Block(val solid: Boolean, val rgb: (Float, Float, Float), val translucent: 
   case Bedrock extends Block(true, (0.12f, 0.12f, 0.12f))
   case IronIngot extends Block(false, (0.78f, 0.80f, 0.78f), true)
   case GoldIngot extends Block(false, (0.95f, 0.76f, 0.22f), true)
+  case Cactus extends Block(true, (0.18f, 0.55f, 0.18f))
   def id: Byte = ordinal.toByte
 object Block:
   private val valuesArray = values
@@ -288,6 +289,15 @@ final class TextureAtlas:
       if edge then (155, 108, 20, 235)
       else if shine then (255, 230, 92, 245)
       else vary((220, 166, 38), 16, noise(x, y, 1018), 240)
+    case Block.Cactus =>
+      val rib = x == 3 || x == 8 || x == 13
+      val thorn = (x * 7 + y * 11 + noise(x, y, 2024)) % 23 == 0
+      if face == FaceKind.Top || face == FaceKind.Bottom then
+        val ring = x == 0 || x == 15 || y == 0 || y == 15
+        if ring then (28, 96, 40, 255) else vary((38, 130, 54), 12, noise(x, y, 2025), 255)
+      else if thorn then (220, 235, 185, 255)
+      else if rib then vary((24, 104, 42), 10, noise(x, y, 2026), 255)
+      else vary((42, 150, 62), 14, noise(x, y, 2027), 255)
     case Block.Bedrock =>
       val crack = if noise(x, y, 1013) > 210 then 10 else 0
       val base = if noise(x, y, 1014) > 190 then (60 - crack, 52 - crack, 48 - crack) else (45 - crack, 38 - crack, 35 - crack)
@@ -330,96 +340,214 @@ final class TerrainGenerator(val seed: Long):
     n = (n ^ (n >>> 13)) * 1274126177
     ((n ^ (n >>> 16)) & 0x7fffffff).toFloat / 2147483647f
 
-  private def valueNoise2D(x: Float, z: Float, base: Int): Float =
+  private def valueNoise2D(x: Double, z: Double, base: Int): Float =
     val xi = floor(x).toInt; val zi = floor(z).toInt
-    val xf = x - xi; val zf = z - zi
-    val u = xf * xf * (3f - 2f * xf)
-    val v = zf * zf * (3f - 2f * zf)
-    val a = hash(xi, zi, 0, base) * 2f - 1f
-    val b = hash(xi + 1, zi, 0, base) * 2f - 1f
-    val c = hash(xi, zi + 1, 0, base) * 2f - 1f
-    val d = hash(xi + 1, zi + 1, 0, base) * 2f - 1f
+    val xf = x - xi.toDouble; val zf = z - zi.toDouble
+    val u = xf * xf * (3.0 - 2.0 * xf)
+    val v = zf * zf * (3.0 - 2.0 * zf)
+    val a = hash(xi, zi, 0, base).toDouble * 2.0 - 1.0
+    val b = hash(xi + 1, zi, 0, base).toDouble * 2.0 - 1.0
+    val c = hash(xi, zi + 1, 0, base).toDouble * 2.0 - 1.0
+    val d = hash(xi + 1, zi + 1, 0, base).toDouble * 2.0 - 1.0
     val x1 = a + (b - a) * u
     val x2 = c + (d - c) * u
-    x1 + (x2 - x1) * v
+    (x1 + (x2 - x1) * v).toFloat
 
-  private def fbm2D(x: Float, z: Float, octaves: Int, base: Int): Float =
-    var total = 0f; var amp = 1f; var freq = 1f; var norm = 0f
+  private def fbm2D(x: Double, z: Double, octaves: Int, base: Int): Float =
+    var total = 0.0; var amp = 1.0; var freq = 1.0; var norm = 0.0
     for _ <- 0 until octaves do
-      total += amp * valueNoise2D(x * freq, z * freq, base)
-      norm += amp; amp *= 0.52f; freq *= 2.05f
-    total / norm
+      total += amp * valueNoise2D(x * freq, z * freq, base).toDouble
+      norm += amp; amp *= 0.52; freq *= 2.05
+    (total / norm).toFloat
 
-  private def valueNoise3D(x: Float, y: Float, z: Float, base: Int): Float =
+  private def valueNoise3D(x: Double, y: Double, z: Double, base: Int): Float =
     val xi = floor(x).toInt; val yi = floor(y).toInt; val zi = floor(z).toInt
-    val xf = x - xi; val yf = y - yi; val zf = z - zi
-    val u = xf * xf * (3f - 2f * xf)
-    val v = yf * yf * (3f - 2f * yf)
-    val w = zf * zf * (3f - 2f * zf)
-    val aaa = hash(xi, yi, zi, base) * 2f - 1f; val baa = hash(xi+1, yi, zi, base) * 2f - 1f
-    val aba = hash(xi, yi+1, zi, base) * 2f - 1f; val bba = hash(xi+1, yi+1, zi, base) * 2f - 1f
-    val aab = hash(xi, yi, zi+1, base) * 2f - 1f; val bab = hash(xi+1, yi, zi+1, base) * 2f - 1f
-    val abb = hash(xi, yi+1, zi+1, base) * 2f - 1f; val bbb = hash(xi+1, yi+1, zi+1, base) * 2f - 1f
+    val xf = x - xi.toDouble; val yf = y - yi.toDouble; val zf = z - zi.toDouble
+    val u = xf * xf * (3.0 - 2.0 * xf)
+    val v = yf * yf * (3.0 - 2.0 * yf)
+    val w = zf * zf * (3.0 - 2.0 * zf)
+    val aaa = hash(xi, yi, zi, base).toDouble * 2.0 - 1.0; val baa = hash(xi+1, yi, zi, base).toDouble * 2.0 - 1.0
+    val aba = hash(xi, yi+1, zi, base).toDouble * 2.0 - 1.0; val bba = hash(xi+1, yi+1, zi, base).toDouble * 2.0 - 1.0
+    val aab = hash(xi, yi, zi+1, base).toDouble * 2.0 - 1.0; val bab = hash(xi+1, yi, zi+1, base).toDouble * 2.0 - 1.0
+    val abb = hash(xi, yi+1, zi+1, base).toDouble * 2.0 - 1.0; val bbb = hash(xi+1, yi+1, zi+1, base).toDouble * 2.0 - 1.0
     val x11 = aaa + (baa - aaa) * u; val x12 = aba + (bba - aba) * u
     val x21 = aab + (bab - aab) * u; val x22 = abb + (bbb - abb) * u
     val y1 = x11 + (x12 - x11) * v; val y2 = x21 + (x22 - x21) * v
-    y1 + (y2 - y1) * w
+    (y1 + (y2 - y1) * w).toFloat
 
-  private def ridgedNoise(x: Float, z: Float, base: Int, octaves: Int): Float =
-    var total = 0f; var amp = 1f; var freq = 1f; var norm = 0f
+  private def ridgedNoise(x: Double, z: Double, base: Int, octaves: Int): Float =
+    var total = 0.0; var amp = 1.0; var freq = 1.0; var norm = 0.0
     for _ <- 0 until octaves do
-      val n = 1f - abs(valueNoise2D(x * freq, z * freq, base))
+      val n = 1.0 - abs(valueNoise2D(x * freq, z * freq, base).toDouble)
       total += amp * n * n
-      norm += amp; amp *= 0.5f; freq *= 2.2f
-    total / norm
+      norm += amp; amp *= 0.5; freq *= 2.2
+    (total / norm).toFloat
+
+  private def moistureAt(x: Int, z: Int): Float =
+    val fx = x.toDouble; val fz = z.toDouble
+    // Broad, slow climate cells keep biomes coherent. A small local term breaks
+    // hard borders without making snow/desert confetti.
+    val broad = fbm2D((fx + 500.0) * 0.00165, (fz - 300.0) * 0.00165, 5, 51)
+    val regional = fbm2D((fx - 930.0) * 0.0038, (fz + 760.0) * 0.0038, 4, 53) * 0.26f
+    val local = fbm2D((fx - 180.0) * 0.0080, (fz + 90.0) * 0.0080, 3, 52) * 0.12f
+    (broad + regional + local).max(-1f).min(1f)
+
+  private def temperatureAt(x: Int, z: Int, h: Int): Float =
+    val fx = x.toDouble; val fz = z.toDouble
+    // Broad temperature bands make deserts and snow fields read as actual regions.
+    // Height cools the value, so mountains can snow without covering normal plains.
+    val climateMacro = fbm2D((fx + 50.0) * 0.00095, (fz + 50.0) * 0.00095, 5, 301)
+    val climateRegional = fbm2D((fx - 620.0) * 0.0028, (fz + 240.0) * 0.0028, 4, 302) * 0.24f
+    climateMacro + climateRegional - ((h - Terrain.seaLevel).toFloat / 158f)
+
+  private def beachAt(h: Int): Boolean = h <= Terrain.seaLevel + 2
+
+  private def coldRegionAt(x: Int, z: Int): Float =
+    val broad = fbm2D((x - 2100.0) * 0.00082, (z + 900.0) * 0.00082, 5, 721)
+    val regional = fbm2D((x + 740.0) * 0.0022, (z - 1200.0) * 0.0022, 4, 722) * 0.22f
+    broad + regional
+
+  private def desertRegionAt(x: Int, z: Int): Float =
+    val broad = fbm2D((x + 1400.0) * 0.00082, (z - 900.0) * 0.00082, 5, 701)
+    val regional = fbm2D((x - 400.0) * 0.0026, (z + 330.0) * 0.0026, 4, 702) * 0.24f
+    broad + regional
+
+  private def forestRegionAt(x: Int, z: Int): Float =
+    val broad = fbm2D((x + 840.0) * 0.0032, (z - 310.0) * 0.0032, 4, 612)
+    val groves = fbm2D((x - 340.0) * 0.010, (z + 190.0) * 0.010, 3, 613) * 0.18f
+    broad + groves
+
+  private def coldAt(x: Int, z: Int, h: Int): Boolean =
+    val t = temperatureAt(x, z, h)
+    val coldRegion = coldRegionAt(x, z)
+    // Snow should read as a real biome or alpine cap, not random high-elevation paint.
+    // Keep it broader than a tiny patch, but require a cold climate signal too.
+    val alpine = h > Terrain.seaLevel + 70 && t < -0.05f && coldRegion < 0.42f
+    val snowField = t < -0.58f && coldRegion < 0.06f
+    val deepSnow = t < -0.74f && coldRegion < 0.28f
+    alpine || snowField || deepSnow
+
+  private def desertAt(x: Int, z: Int, h: Int): Boolean =
+    val m = moistureAt(x, z)
+    val t = temperatureAt(x, z, h)
+    val score = desertRegionAt(x, z)
+    !beachAt(h) && h < Terrain.seaLevel + 42 && t > 0.10f && m < -0.18f && score > -0.02f
+
+  private def rockyAt(x: Int, z: Int, h: Int): Boolean =
+    if h < Terrain.seaLevel + 42 then false
+    else
+      val ridge = ridgedNoise((x + 310.0) * 0.0075, (z - 520.0) * 0.0075, 931, 3)
+      val exposure = fbm2D((x - 120.0) * 0.014, (z + 270.0) * 0.014, 3, 932)
+      h > Terrain.seaLevel + 86 || (ridge > 0.82f && exposure > 0.18f)
+
+  private def localSlopeAt(x: Int, z: Int, h: Int): Int =
+    val h1 = heightAt(x + 1, z)
+    val h2 = heightAt(x - 1, z)
+    val h3 = heightAt(x, z + 1)
+    val h4 = heightAt(x, z - 1)
+    max(max(abs(h - h1), abs(h - h2)), max(abs(h - h3), abs(h - h4)))
+
+  private def cliffAt(x: Int, z: Int, h: Int): Boolean =
+    h > Terrain.seaLevel + 34 && localSlopeAt(x, z, h) >= 5
+
+  private def spruceAt(x: Int, z: Int, h: Int): Boolean =
+    coldAt(x, z, h) && moistureAt(x, z) > -0.28f
 
   private def caveNoise(x: Int, y: Int, z: Int, h: Int): Boolean =
-    if y <= 3 || y >= Terrain.worldHeight - 4 then return false
-    // Keep cave mouths from shredding beaches and hillsides, then carve deeper
-    // with larger overlapping 3D fields. This gives more minecraft-like chambers
-    // and tunnels instead of random pinholes everywhere.
-    if y >= h - 16 then return false
+    if y <= 4 || y >= Terrain.worldHeight - 4 then return false
+    // Keep the roof stable and carve bigger connected bodies deeper down.
+    // This avoids pinhole swiss-cheese while making caves feel more cavern-like.
+    if y >= h - 12 then return false
     val depth = (h - y).max(0).toFloat
-    val lowEnough = y > 7 && depth > 18f
-    val chamberA = valueNoise3D(x * 0.018f, y * 0.012f, z * 0.018f, 99)
-    val chamberB = valueNoise3D((x + 700) * 0.026f, y * 0.018f, (z - 500) * 0.026f, 199)
-    val chamberC = valueNoise3D((x - 230) * 0.010f, y * 0.008f, (z + 830) * 0.010f, 777)
-    val cavern = lowEnough && depth > 26f && chamberA > 0.46f && chamberB > -0.18f && chamberC > 0.10f
-    val bigRoom = lowEnough && depth > 38f && chamberA > 0.56f && chamberB > 0.05f
-    val tunnelA = abs(valueNoise2D(x * 0.011f, z * 0.011f, 333))
-    val tunnelB = abs(valueNoise2D((x + 120) * 0.014f, (z - 90) * 0.014f, 444))
-    val tunnelHeight = valueNoise3D(x * 0.010f, y * 0.020f, z * 0.010f, 555)
-    val tunnel = lowEnough && depth > 22f && y < Terrain.seaLevel + 42 && ((tunnelA < 0.026f && tunnelHeight > -0.36f) || (tunnelB < 0.022f && tunnelHeight > -0.22f))
+    val lowEnough = y > 7 && depth > 15f
+    val dx = x.toDouble; val dy = y.toDouble; val dz = z.toDouble
+    val region = valueNoise3D(dx * 0.0048, dy * 0.0035, dz * 0.0048, 77)
+    val roomA = valueNoise3D(dx * 0.010, dy * 0.007, dz * 0.010, 99)
+    val roomB = valueNoise3D((dx + 700.0) * 0.014, dy * 0.010, (dz - 500.0) * 0.014, 199)
+    val roomC = valueNoise3D((dx - 230.0) * 0.0065, dy * 0.005, (dz + 830.0) * 0.0065, 777)
+    val cavern = lowEnough && depth > 24f && region > -0.10f && roomA > 0.34f && roomB > -0.20f && roomC > -0.18f
+    val bigRoom = lowEnough && depth > 38f && region > 0.10f && roomA > 0.46f && roomB > -0.08f
+    val tubeA = abs(valueNoise2D(dx * 0.0065, dz * 0.0065, 333))
+    val tubeB = abs(valueNoise2D((dx + 120.0) * 0.0075, (dz - 90.0) * 0.0075, 444))
+    val verticalBand = valueNoise3D(dx * 0.006, dy * 0.014, dz * 0.006, 555)
+    val tunnel = lowEnough && depth > 18f && y < Terrain.seaLevel + 52 && ((tubeA < 0.026f && verticalBand > -0.38f) || (tubeB < 0.024f && verticalBand > -0.30f))
     cavern || bigRoom || tunnel
 
   def heightAt(x: Int, z: Int): Int =
-    val fx = x.toFloat; val fz = z.toFloat
-    val continent = fbm2D(fx * 0.005f, fz * 0.005f, 5, 1)
-    val moisture = fbm2D((fx + 500) * 0.015f, (fz - 300) * 0.015f, 4, 51)
-    val biome = smooth01((fbm2D((fx + 900) * 0.004f, (fz - 400) * 0.004f, 3, 101) + 1f) * 0.5f)
-    val detail = fbm2D(fx * 0.030f, fz * 0.030f, 3, 151) * 1.5f
-    val mountains = ridgedNoise((fx + 410) * 0.009f, (fz - 70) * 0.009f, 201, 5) * 32f * smooth01(biome * 1.5f)
-    val river = abs(fbm2D((fx - 90) * 0.007f, (fz + 120) * 0.007f, 4, 251))
-    val riverCut = smooth01(max(0f, 0.18f - river) / 0.18f) * 12f
-    val coastSmoothing = smooth01((continent + 1f) * 1.5f.max(0f).min(1f))
-    val h = (Terrain.seaLevel + 8 + continent * 10f + detail + mountains - riverCut).round.max(1).min(Terrain.worldHeight - 4)
-    h
+    val fx = x.toDouble; val fz = z.toDouble
+
+    // Minecraft-like terrain needs multiple scales working together: broad continents,
+    // rolling local relief, occasional hills, rarer mountain chains, and carved low divots.
+    // Keep all coordinate math in Double so far-from-spawn terrain stays stable.
+    val warpX = fbm2D((fx + 810.0) * 0.00070, (fz - 410.0) * 0.00070, 4, 1201).toDouble * 96.0
+    val warpZ = fbm2D((fx - 260.0) * 0.00070, (fz + 680.0) * 0.00070, 4, 1202).toDouble * 96.0
+    val wx = fx + warpX
+    val wz = fz + warpZ
+
+    val continent = fbm2D(wx * 0.00092, wz * 0.00092, 6, 1).toDouble
+    val regional = fbm2D((wx + 300.0) * 0.0022, (wz - 250.0) * 0.0022, 5, 151).toDouble * 12.0
+    val localRoll = fbm2D((wx - 670.0) * 0.0088, (wz + 430.0) * 0.0088, 3, 153).toDouble * 5.2
+    val detail = fbm2D((wx + 120.0) * 0.024, (wz - 210.0) * 0.024, 2, 154).toDouble * 2.4
+
+    val hillMask = smooth01(((fbm2D((wx + 900.0) * 0.00165, (wz - 400.0) * 0.00165, 4, 101) + 0.48f) / 0.90f))
+    val highlandMask = smooth01(((fbm2D((wx - 540.0) * 0.00130, (wz + 220.0) * 0.00130, 5, 1001) + 0.30f) / 0.82f))
+    val mountainRegion = smooth01(((fbm2D((wx - 1500.0) * 0.00082, (wz + 700.0) * 0.00082, 5, 202) + 0.38f) / 0.82f))
+    val mountainMask = mountainRegion * smooth01(((continent + 0.70) / 1.12).toFloat)
+
+    val rolling = (ridgedNoise((wx - 110.0) * 0.0038, (wz + 210.0) * 0.0038, 171, 4).toDouble * 25.0 + localRoll) * hillMask.toDouble
+    val highlands = ridgedNoise((wx + 130.0) * 0.0025, (wz - 710.0) * 0.0025, 1002, 5).toDouble * 24.0 * highlandMask.toDouble
+    val mountainCore = ridgedNoise((wx + 410.0) * 0.0028, (wz - 70.0) * 0.0028, 201, 5).toDouble
+    val mountainDetail = ridgedNoise((wx - 240.0) * 0.0072, (wz + 520.0) * 0.0072, 301, 3).toDouble * 12.0
+    val peakShape = pow(mountainCore.max(0.001), 1.55)
+    val mountains = (peakShape * 62.0 + mountainDetail) * mountainMask.toDouble
+
+    // Divots and soft valleys break up the flat green-sheet look without creating ugly holes.
+    val valley = abs(fbm2D((wx - 90.0) * 0.0027, (wz + 120.0) * 0.0027, 5, 251).toDouble)
+    val riverish = smooth01((max(0.0, 0.132 - valley) / 0.132).toFloat).toDouble
+    val valleyCut = riverish * (7.5 + 10.0 * mountainMask + 4.0 * highlandMask)
+    val dimple = smooth01((max(0.0, 0.095 - abs(fbm2D((wx + 70.0) * 0.0068, (wz - 190.0) * 0.0068, 4, 252).toDouble)) / 0.095).toFloat).toDouble
+    val divots = dimple * (2.0 + 4.0 * hillMask)
+
+    val desertish = moistureAt(x, z) < -0.18f && temperatureAt(x, z, Terrain.seaLevel + 8) > 0.08f && desertRegionAt(x, z) > -0.10f
+    val dryRelief =
+      if desertish then
+        val dune = fbm2D((wx + 220.0) * 0.010, (wz - 180.0) * 0.010, 3, 811).toDouble * 4.2
+        val mesaMask = smooth01(((fbm2D((wx - 600.0) * 0.00155, (wz + 330.0) * 0.00155, 4, 813) + 0.20f) / 0.70f)).toDouble
+        val mesa = ridgedNoise((wx - 500.0) * 0.0048, (wz + 260.0) * 0.0048, 812, 3).toDouble * 12.0 * mesaMask
+        dune + mesa
+      else 0.0
+
+    val base =
+      Terrain.seaLevel + 8.0 +
+      continent * 22.0 +
+      regional +
+      rolling +
+      highlands +
+      mountains +
+      dryRelief +
+      detail -
+      valleyCut -
+      divots
+
+    base.round.toInt.max(1).min(Terrain.worldHeight - 8)
 
   def surfaceBlock(x: Int, y: Int, z: Int, h: Int): Block =
-    val moisture = fbm2D((x + 500) * 0.015f, (z - 300) * 0.015f, 4, 51)
-    val cold = h > 60 || fbm2D((x + 50) * 0.007f, (z + 50) * 0.007f, 3, 301) > 0.50f
-    val beach = h <= Terrain.seaLevel + 2
-    val desert = moisture < -0.35f && !cold && !beach
-    if cold then Block.Snow
-    else if beach || desert then Block.Sand
+    val beach = beachAt(h)
+    if beach || desertAt(x, z, h) then Block.Sand
+    else if coldAt(x, z, h) then Block.Snow
+    else if cliffAt(x, z, h) then Block.Stone
+    else if rockyAt(x, z, h) && hash(x, h, z, 733) > 0.82f then Block.Stone
     else Block.Grass
 
   def fillBlock(x: Int, y: Int, z: Int, h: Int): Block =
-    val moisture = fbm2D((x + 500) * 0.015f, (z - 300) * 0.015f, 4, 51)
-    val beach = h <= Terrain.seaLevel + 2
-    val desert = moisture < -0.35f && !beach
-    if y == h then surfaceBlock(x, y, z, h)
-    else if y > h - 18 then (if beach || desert then Block.Sand else Block.Dirt)
+    val beach = beachAt(h)
+    val desert = desertAt(x, z, h)
+    val surface = surfaceBlock(x, y, z, h)
+    if y == h then surface
+    else if y > h - (if desert then 2 else 3) && (beach || desert) then Block.Sand
+    else if surface == Block.Stone && y > h - (if cliffAt(x, z, h) then 7 else 4) then Block.Stone
+    else if y > h - 6 && cliffAt(x, z, h) && hash(x, y, z, 734) > 0.20f then Block.Stone
+    else if y > h - 18 then Block.Dirt
     else if y < 6 && h > Terrain.seaLevel then Block.Stone
     else if y < h - 28 && y < 12 && hash(x, y, z, 17) > 0.92f then Block.Clay
     else if y < h - 28 && y < 60 && hash(x, y, z, 37) > 0.88f then Block.Coal
@@ -435,14 +563,52 @@ final class TerrainGenerator(val seed: Long):
     None
 
   def treeAt(x: Int, z: Int, h: Int, surface: Block): Option[(Int, Int, Int, Int)] =
-    if h <= Terrain.seaLevel + 2 || surface == Block.Sand then return None
-    val forestNoise = fbm2D((x + 840) * 0.010f, (z - 310) * 0.010f, 3, 612)
-    val localSpacing = hash(Math.floorDiv(x, 4), Math.floorDiv(z, 4), 0, 913)
+    if h <= Terrain.seaLevel + 2 || surface == Block.Sand || surface == Block.Stone then return None
+    val forestNoise = forestRegionAt(x, z)
+    val spruce = spruceAt(x, z, h)
+    val spacingCell = if spruce then 7 else if forestNoise > 0.34f then 8 else 11
+    val cellX = Math.floorDiv(x, spacingCell)
+    val cellZ = Math.floorDiv(z, spacingCell)
+    val cellGate = hash(cellX, cellZ, 0, 913)
     val treeChance = hash(x, z, 0, 19)
-    val threshold = if surface == Block.Snow then 0.992f else if forestNoise > 0.18f then 0.985f else 0.994f
-    val height = if surface == Block.Snow then 6 else 4 + (hash(x, z, 0, 41) * 4).toInt
-    if localSpacing > 0.58f && treeChance > threshold then Some((x, h + 1, z, height))
+    val dense = forestNoise > 0.22f && moistureAt(x, z) > -0.42f
+    val threshold =
+      if spruce then 0.972f
+      else if dense then 0.978f
+      else if forestNoise > -0.08f then 0.991f
+      else 0.9970f
+    val height =
+      if spruce then 8 + (hash(x, z, 0, 42) * 5).toInt
+      else if hash(x, z, 0, 43) > 0.78f then 7 + (hash(x, z, 0, 44) * 4).toInt
+      else 4 + (hash(x, z, 0, 41) * 4).toInt
+    if cellGate > 0.44f && treeChance > threshold then Some((x, h + 1, z, height))
     else None
+
+  def cactusAt(x: Int, z: Int, h: Int, surface: Block): Option[(Int, Int, Int, Int)] =
+    if surface != Block.Sand || !desertAt(x, z, h) || h <= Terrain.seaLevel + 2 then None
+    else
+      val cellOk = hash(Math.floorDiv(x, 8), Math.floorDiv(z, 8), 0, 3033) > 0.66f
+      val chance = hash(x, z, 0, 3034)
+      if cellOk && chance > 0.982f then Some((x, h + 1, z, 2 + (hash(x, z, 0, 3035) * 3).toInt))
+      else None
+
+  def bushAt(x: Int, z: Int, h: Int, surface: Block): Option[(Int, Int, Int, Int)] =
+    if surface != Block.Grass || h <= Terrain.seaLevel + 2 || coldAt(x, z, h) || cliffAt(x, z, h) then None
+    else
+      val grove = forestRegionAt(x, z)
+      val cellOk = hash(Math.floorDiv(x, 9), Math.floorDiv(z, 9), 0, 4040) > 0.88f
+      val chance = hash(x, z, 0, 4041)
+      if grove > 0.02f && cellOk && chance > 0.994f then Some((x, h + 1, z, 1))
+      else None
+
+  def boulderAt(x: Int, z: Int, h: Int, surface: Block): Option[(Int, Int, Int, Int)] =
+    if h <= Terrain.seaLevel + 4 || surface == Block.Sand || surface == Block.Snow then None
+    else
+      val rockyPatch = rockyAt(x, z, h) || fbm2D((x + 40.0) * 0.006, (z - 90.0) * 0.006, 3, 5050) > 0.42f
+      val cellOk = hash(Math.floorDiv(x, 13), Math.floorDiv(z, 13), 0, 5051) > 0.86f
+      val chance = hash(x, z, 0, 5052)
+      if rockyPatch && cellOk && chance > 0.991f then Some((x, h + 1, z, if hash(x, z, 0, 5053) > 0.78f then 2 else 1))
+      else None
 
   private def smooth01(v: Float): Float =
     val t = v.max(0f).min(1f); t * t * (3f - 2f * t)
@@ -465,17 +631,25 @@ final class TerrainGenerator(val seed: Long):
       for lz <- 0 until Terrain.chunkSize do
         val wz = baseZ + lz
         val h = heights(lx)(lz)
-        val moisture = fbm2D((wx + 500) * 0.015f, (wz - 300) * 0.015f, 3, 51)
-        val cold = h > 60 || fbm2D((wx + 50) * 0.007f, (wz + 50) * 0.007f, 2, 301) > 0.50f
-        val beach = h <= Terrain.seaLevel + 2
-        val desert = moisture < -0.35f && !cold && !beach
-        val surface = if cold then Block.Snow else if beach || desert then Block.Sand else Block.Grass
-        val shallow = if beach || desert then Block.Sand else Block.Dirt
+        val beach = beachAt(h)
+        val desert = desertAt(wx, wz, h)
+        val cold = coldAt(wx, wz, h)
+        val rocky = rockyAt(wx, wz, h)
+        val cliff = cliffAt(wx, wz, h)
+        val surface =
+          if beach || desert then Block.Sand
+          else if cold then Block.Snow
+          else if cliff then Block.Stone
+          else if rocky && hash(wx, h, wz, 733) > 0.82f then Block.Stone
+          else Block.Grass
         for y <- 1 until Terrain.worldHeight do
           if y <= h then
             val block =
               if y == h then surface
-              else if y > h - 18 then shallow
+              else if y > h - (if desert then 2 else 3) && (beach || desert) then Block.Sand
+              else if surface == Block.Stone && y > h - (if cliff then 7 else 4) then Block.Stone
+              else if y > h - 6 && cliff && hash(wx, y, wz, 734) > 0.20f then Block.Stone
+              else if y > h - 18 then Block.Dirt
               else if y < 6 && h > Terrain.seaLevel then Block.Stone
               else if y < h - 28 && y < 12 && hash(wx, y, wz, 17) > 0.92f then Block.Clay
               else if y < h - 28 && y < 60 && hash(wx, y, wz, 37) > 0.88f then Block.Coal
@@ -493,7 +667,16 @@ final class TerrainGenerator(val seed: Long):
       val h = heightAt(wx, wz)
       val surface = surfaceBlock(wx, h, wz, h)
       treeAt(wx, wz, h, surface).foreach { case (tx, ty, tz, th) =>
-        placeTreeWorld(blocks, baseX, baseZ, tx, ty, tz, th)
+        placeTreeWorld(blocks, baseX, baseZ, tx, ty, tz, th, spruceAt(wx, wz, h))
+      }
+      cactusAt(wx, wz, h, surface).foreach { case (cx0, cy0, cz0, ch) =>
+        placeCactusWorld(blocks, baseX, baseZ, cx0, cy0, cz0, ch)
+      }
+      bushAt(wx, wz, h, surface).foreach { case (bx0, by0, bz0, br) =>
+        placeBushWorld(blocks, baseX, baseZ, bx0, by0, bz0, br)
+      }
+      boulderAt(wx, wz, h, surface).foreach { case (bx0, by0, bz0, br) =>
+        placeBoulderWorld(blocks, baseX, baseZ, bx0, by0, bz0, br)
       }
     // Do not do chunk-local "floating cleanup" here. Treating outside-of-chunk
     // as air made edge columns disagree with their neighbors and caused visible
@@ -501,18 +684,68 @@ final class TerrainGenerator(val seed: Long):
     // now handles chunk borders correctly instead.
     blocks
 
-  private def placeTreeWorld(blocks: Array[Byte], baseX: Int, baseZ: Int, x: Int, y: Int, z: Int, height: Int): Unit =
+  private def placeTreeWorld(blocks: Array[Byte], baseX: Int, baseZ: Int, x: Int, y: Int, z: Int, height: Int, spruce: Boolean): Unit =
     def set(wx: Int, wy: Int, wz: Int, block: Block): Unit =
       val lx = wx - baseX; val lz = wz - baseZ
       if lx >= 0 && lx < Terrain.chunkSize && lz >= 0 && lz < Terrain.chunkSize && wy >= 0 && wy < Terrain.worldHeight then
         blocks(idx(lx, wy, lz)) = block.id
-    for dy <- 0 until height do set(x, y + dy, z, Block.Wood)
-    val leafStart = height - 2
-    val leafSpread = if height >= 6 then 4 else 3
-    for dx <- -leafSpread to leafSpread; dz <- -leafSpread to leafSpread; dy <- leafStart to height + 1 do
-      val dist = abs(dx) + abs(dz) + max(0, dy - height)
-      if dist <= leafSpread + 1 && !(dx == 0 && dz == 0 && dy > height - 1) then
-        set(x + dx, y + dy, z + dz, Block.Leaves)
+    val leanX = if !spruce && hash(x, z, 0, 6001) > 0.86f then (if hash(x, z, 0, 6002) > 0.5f then 1 else -1) else 0
+    val leanZ = if !spruce && hash(x, z, 0, 6003) > 0.86f then (if hash(x, z, 0, 6004) > 0.5f then 1 else -1) else 0
+    for dy <- 0 until height do
+      val sx = x + (if dy > height / 2 then leanX else 0)
+      val sz = z + (if dy > height / 2 then leanZ else 0)
+      set(sx, y + dy, sz, Block.Wood)
+    val topX = x + leanX
+    val topZ = z + leanZ
+    if spruce then
+      for dy <- 2 to height + 3 do
+        val layer = dy - 2
+        val radius = (4 - layer / 2).max(1)
+        for dx <- -radius to radius; dz <- -radius to radius do
+          val dist = abs(dx) + abs(dz)
+          if dist <= radius + 1 && !(dx == 0 && dz == 0 && dy < height) then
+            set(topX + dx, y + dy, topZ + dz, Block.Leaves)
+      set(topX, y + height + 3, topZ, Block.Leaves)
+    else
+      val wide = hash(x, z, 0, 6101) > 0.68f
+      val leafStart = if wide then height - 3 else height - 2
+      val leafSpread = if wide then 4 else if height >= 7 then 4 else 3
+      for dx <- -leafSpread to leafSpread; dz <- -leafSpread to leafSpread; dy <- leafStart to height + 2 do
+        val dist = abs(dx) + abs(dz) + max(0, dy - height)
+        val edgeNoise = hash(topX + dx, y + dy, topZ + dz, 6102)
+        if dist <= leafSpread + (if edgeNoise > 0.62f then 1 else 0) && !(dx == 0 && dz == 0 && dy > height - 1) then
+          set(topX + dx, y + dy, topZ + dz, Block.Leaves)
+
+  private def placeCactusWorld(blocks: Array[Byte], baseX: Int, baseZ: Int, x: Int, y: Int, z: Int, height: Int): Unit =
+    def set(wx: Int, wy: Int, wz: Int, block: Block): Unit =
+      val lx = wx - baseX; val lz = wz - baseZ
+      if lx >= 0 && lx < Terrain.chunkSize && lz >= 0 && lz < Terrain.chunkSize && wy >= 0 && wy < Terrain.worldHeight then
+        blocks(idx(lx, wy, lz)) = block.id
+    for dy <- 0 until height do set(x, y + dy, z, Block.Cactus)
+
+  private def placeBushWorld(blocks: Array[Byte], baseX: Int, baseZ: Int, x: Int, y: Int, z: Int, radius: Int): Unit =
+    def set(wx: Int, wy: Int, wz: Int, block: Block): Unit =
+      val lx = wx - baseX; val lz = wz - baseZ
+      if lx >= 0 && lx < Terrain.chunkSize && lz >= 0 && lz < Terrain.chunkSize && wy >= 0 && wy < Terrain.worldHeight then
+        val i = idx(lx, wy, lz)
+        if blocks(i) == Block.Air.id then blocks(i) = block.id
+    // Small hand-placed shrub shape. This prevents the old dense leaf blanket look.
+    set(x, y, z, Block.Leaves)
+    if hash(x, z, 0, 4044) > 0.35f then set(x + 1, y, z, Block.Leaves)
+    if hash(x, z, 0, 4045) > 0.35f then set(x - 1, y, z, Block.Leaves)
+    if hash(x, z, 0, 4046) > 0.35f then set(x, y, z + 1, Block.Leaves)
+    if hash(x, z, 0, 4047) > 0.35f then set(x, y, z - 1, Block.Leaves)
+    if hash(x, z, 0, 4048) > 0.72f then set(x, y + 1, z, Block.Leaves)
+
+  private def placeBoulderWorld(blocks: Array[Byte], baseX: Int, baseZ: Int, x: Int, y: Int, z: Int, radius: Int): Unit =
+    def set(wx: Int, wy: Int, wz: Int, block: Block): Unit =
+      val lx = wx - baseX; val lz = wz - baseZ
+      if lx >= 0 && lx < Terrain.chunkSize && lz >= 0 && lz < Terrain.chunkSize && wy >= 0 && wy < Terrain.worldHeight then
+        blocks(idx(lx, wy, lz)) = block.id
+    for dx <- -radius to radius; dz <- -radius to radius; dy <- 0 to radius do
+      val ell = dx * dx + dz * dz + dy * dy
+      if ell <= radius * radius + 1 && hash(x + dx, y + dy, z + dz, 5054) > 0.16f then
+        set(x + dx, y + dy, z + dz, if hash(x + dx, y + dy, z + dz, 5055) > 0.74f then Block.Clay else Block.Stone)
 
   private def placeTree(blocks: Array[Byte], lx: Int, y: Int, lz: Int, height: Int): Unit =
     val baseX = 0; val baseZ = 0
@@ -534,6 +767,10 @@ final class TerrainGenerator(val seed: Long):
 final class Chunk(val cx: Int, val cz: Int, atlas: TextureAtlas, gen: TerrainGenerator):
   var blocks: Array[Byte] = gen.fillChunkBlocks(cx, cz)
   private[blockbox] val edits = scala.collection.mutable.HashMap.empty[(Int, Int, Int), Block]
+  // 0 means default full-height water for generated/static water.
+  // 1..8 are dynamic flowing-water levels used by the cellular automata.
+  private val waterLevelsLocal = new Array[Byte](Terrain.chunkSize * Terrain.worldHeight * Terrain.chunkSize)
+  private val waterExtraMagic = 0x574C5631 // "WLV1"
 
   val baseX = cx * Terrain.chunkSize
   val baseZ = cz * Terrain.chunkSize
@@ -577,20 +814,41 @@ final class Chunk(val cx: Int, val cz: Int, atlas: TextureAtlas, gen: TerrainGen
     meshQueued.set(false)
     destroy()
 
+  private def localIndex(lx: Int, y: Int, lz: Int): Int =
+    (y * Terrain.chunkSize + lz) * Terrain.chunkSize + lx
+
+  private def validLocal(lx: Int, y: Int, lz: Int): Boolean =
+    lx >= 0 && lx < Terrain.chunkSize && y >= 0 && y < Terrain.worldHeight && lz >= 0 && lz < Terrain.chunkSize
+
   def getBlock(lx: Int, y: Int, lz: Int): Block =
     val found: Option[Block] = edits.synchronized { edits.get((lx, y, lz)) }
     found match
       case Some(b: Block) => b
       case None =>
-        if lx >= 0 && lx < Terrain.chunkSize && y >= 0 && y < Terrain.worldHeight && lz >= 0 && lz < Terrain.chunkSize then
-          Block.fromId(blocks((y * Terrain.chunkSize + lz) * Terrain.chunkSize + lx))
+        if validLocal(lx, y, lz) then Block.fromId(blocks(localIndex(lx, y, lz)))
         else Block.Air
 
+  def getWaterLevel(lx: Int, y: Int, lz: Int): Int =
+    if validLocal(lx, y, lz) && getBlock(lx, y, lz) == Block.Water then
+      val raw = waterLevelsLocal(localIndex(lx, y, lz)).toInt & 0xFF
+      if raw <= 0 then 8 else raw.max(1).min(8)
+    else 0
+
+  def setWaterLevel(lx: Int, y: Int, lz: Int, level: Int): Unit =
+    if validLocal(lx, y, lz) then
+      val i = localIndex(lx, y, lz)
+      val next = level.max(0).min(8).toByte
+      if waterLevelsLocal(i) != next then
+        waterLevelsLocal(i) = next
+        markDirtyMesh()
+
   def setBlock(lx: Int, y: Int, lz: Int, block: Block): Unit =
-    if lx >= 0 && lx < Terrain.chunkSize && y >= 0 && y < Terrain.worldHeight && lz >= 0 && lz < Terrain.chunkSize then
-      val i = (y * Terrain.chunkSize + lz) * Terrain.chunkSize + lx
+    if validLocal(lx, y, lz) then
+      val i = localIndex(lx, y, lz)
       val oldId = blocks(i)
       blocks(i) = block.id
+      if block == Block.Water && waterLevelsLocal(i) == 0 then waterLevelsLocal(i) = 8.toByte
+      if block != Block.Water then waterLevelsLocal(i) = 0.toByte
       edits.synchronized { edits((lx, y, lz)) = block }
       if oldId != block.id then markDirtyMesh()
 
@@ -612,6 +870,7 @@ final class Chunk(val cx: Int, val cz: Int, atlas: TextureAtlas, gen: TerrainGen
     // half-built meshes: the dark-blue empty world / missing terrain effect. Snapshotting
     // makes every mesh build deterministic for one revision.
     val blocksSnapshot = blocks.clone()
+    val waterLevelsSnapshot = waterLevelsLocal.clone()
     val editsSnapshot: scala.collection.mutable.HashMap[(Int, Int, Int), Block] =
       edits.synchronized { edits.clone() }
     def snapshotBlock(lx: Int, y: Int, lz: Int): Block =
@@ -634,22 +893,69 @@ final class Chunk(val cx: Int, val cz: Int, atlas: TextureAtlas, gen: TerrainGen
         // rebuild border chunks when neighbors load/change; it is safer to briefly draw an
         // extra hidden face than to delete a visible one.
         Block.Air
+
+    def localWaterLevel(nlx: Int, ny: Int, nlz: Int): Int =
+      if ny < 0 || ny >= Terrain.worldHeight || nlx < 0 || nlx >= Terrain.chunkSize || nlz < 0 || nlz >= Terrain.chunkSize then 0
+      else if snapshotBlock(nlx, ny, nlz) != Block.Water then 0
+      else
+        val raw = waterLevelsSnapshot((ny * Terrain.chunkSize + nlz) * Terrain.chunkSize + nlx).toInt & 0xFF
+        if raw <= 0 then 8 else raw.max(1).min(8)
+
+    def rawWaterTopY(nlx: Int, ny: Int, nlz: Int, fy: Float): Float =
+      val level = localWaterLevel(nlx, ny, nlz)
+      if level <= 0 then fy
+      else
+        val normalized = level.toFloat / 8f
+        // Keep water visually fuller and smoother. Very low, thin water sheets made the
+        // simulation technically correct but visually ugly, with lots of noisy transparent
+        // internal faces and jagged shoreline steps.
+        val surface =
+          if level >= 8 then 0.88f
+          else 0.24f + 0.58f * normalized
+        fy + surface.min(0.88f)
+    def waterCornerY(cells: Array[(Int, Int, Int)], fy: Float, fallback: Float): Float =
+      var sum = 0f
+      var count = 0
+      var hasFullColumn = false
+      var i = 0
+      while i < cells.length do
+        val (cx, cy, cz) = cells(i)
+        if localBlock(cx, cy, cz) == Block.Water then
+          if localBlock(cx, cy + 1, cz) == Block.Water then hasFullColumn = true
+          sum += rawWaterTopY(cx, cy, cz, fy)
+          count += 1
+        i += 1
+      if hasFullColumn then fy + 1f
+      else if count > 0 then sum / count.toFloat
+      else fallback
+    def isWaterSideVisible(nlx: Int, ny: Int, nlz: Int): Boolean =
+      // Never guess a neighbor chunk as air for water sides. Opaque blocks can tolerate
+      // temporary border faces, but transparent water cannot: those faces show up as huge
+      // blue sheets along chunk/grid seams. Neighbor chunks draw their own water tops, and
+      // real exposed sides are only emitted when the neighbor is known inside this chunk.
+      if nlx < 0 || nlx >= Terrain.chunkSize || nlz < 0 || nlz >= Terrain.chunkSize || ny < 0 || ny >= Terrain.worldHeight then false
+      else
+        val nb = localBlock(nlx, ny, nlz)
+        nb != Block.Water && (nb == Block.Air || nb.cutout || (nb.translucent && nb != Block.Water))
     def isVisible(nlx: Int, ny: Int, nlz: Int, block: Block): Boolean =
       val nb = localBlock(nlx, ny, nlz)
       if nb == Block.Air then true
-      else if block == Block.Water then nb != Block.Water && !nb.solid
+      else if block == Block.Water then isWaterSideVisible(nlx, ny, nlz)
       else if nb == Block.Water then true
       else if nb.cutout then block != nb
       else nb.translucent && nb != block
     for lx <- 0 until Terrain.chunkSize; lz <- 0 until Terrain.chunkSize; y <- 0 until Terrain.worldHeight do
       val block = snapshotBlock(lx, y, lz)
       if block != Block.Air then
-        val baseXv = baseX; val baseZv = baseZ; val atlasRef = atlas
-        val fx = (baseXv + lx).toFloat; val fy = y.toFloat; val fz = (baseZv + lz).toFloat
-        // Water geometry must stay flat and conservative. Per-block height ripples and
-        // internal translucent side faces look like broken chunk seams when many water
-        // blocks overlap. Keep water movement in the texture/simulation, not in the mesh.
-        val topY = if block == Block.Water then fy + 0.965f else fy + 1f
+        val atlasRef = atlas
+        // Keep chunk mesh vertices local to the chunk. The renderer applies a
+        // camera-relative chunk transform, which delays float precision "far lands"
+        // artifacts far beyond where full world-coordinate VBOs started wobbling.
+        val fx = lx.toFloat; val fy = y.toFloat; val fz = lz.toFloat
+        // Water is still one block in storage, but flowing water renders with a variable
+        // surface height from the per-chunk level array. Static generated oceans use the
+        // default full level without entering the simulation queue.
+        val topY = if block == Block.Water then rawWaterTopY(lx, y, lz, fy) else fy + 1f
         val yNorm = y.toFloat / Terrain.worldHeight.toFloat
         val ambient = 0.45f + yNorm * 0.10f
         def addFace(shade: Float, corners: Array[(Float, Float, Float, Float, Float)], kind: FaceKind): Unit =
@@ -663,19 +969,31 @@ final class Chunk(val cx: Int, val cz: Int, atlas: TextureAtlas, gen: TerrainGen
             val (cfx, cfy, cfz, tu, tv) = corners(i)
             val (u, v) = atlasRef.uv(block, kind, tu, tv)
             val alpha = block match
-              case Block.Water => 0.52f
+              case Block.Water => 0.43f
               case Block.Glass => 0.68f
               case _ => 1f
             buf += cfx; buf += cfy; buf += cfz
             buf += light; buf += light; buf += light; buf += alpha
             buf += u; buf += v
         if block == Block.Water then
-          // Render only the visible water surface. Drawing every water side/bottom face
-          // through transparent blending creates the ugly blue slabs/grids seen in lakes
-          // and oceans. Source bodies and flowing water still exist physically; the mesh
-          // just avoids rendering hidden internal faces.
-          if localBlock(lx, y + 1, lz) != Block.Water then
-            addFace(1.00f, Array((fx, topY, fz, 0f, 0f), (fx + 1, topY, fz, 1f, 0f), (fx + 1, topY, fz + 1, 1f, 1f), (fx, topY, fz + 1, 0f, 1f)), FaceKind.Top)
+          // Render water as one smoother continuous volume. The simulation can keep its
+          // block-level logic, but the mesh should avoid exposing a bunch of internal
+          // stair-step faces through transparency.
+          val fullAbove = localBlock(lx, y + 1, lz) == Block.Water
+          val nwTop = if fullAbove then fy + 1f else waterCornerY(Array((lx, y, lz), (lx - 1, y, lz), (lx, y, lz - 1), (lx - 1, y, lz - 1)), fy, topY)
+          val neTop = if fullAbove then fy + 1f else waterCornerY(Array((lx, y, lz), (lx + 1, y, lz), (lx, y, lz - 1), (lx + 1, y, lz - 1)), fy, topY)
+          val seTop = if fullAbove then fy + 1f else waterCornerY(Array((lx, y, lz), (lx + 1, y, lz), (lx, y, lz + 1), (lx + 1, y, lz + 1)), fy, topY)
+          val swTop = if fullAbove then fy + 1f else waterCornerY(Array((lx, y, lz), (lx - 1, y, lz), (lx, y, lz + 1), (lx - 1, y, lz + 1)), fy, topY)
+          if !fullAbove then
+            addFace(1.00f, Array((fx, nwTop, fz, 0f, 0f), (fx + 1, neTop, fz, 1f, 0f), (fx + 1, seTop, fz + 1, 1f, 1f), (fx, swTop, fz + 1, 0f, 1f)), FaceKind.Top)
+          if isWaterSideVisible(lx + 1, y, lz) then
+            addFace(0.82f, Array((fx + 1, fy, fz, 0f, 1f), (fx + 1, fy, fz + 1, 1f, 1f), (fx + 1, seTop, fz + 1, 1f, 0f), (fx + 1, neTop, fz, 0f, 0f)), FaceKind.East)
+          if isWaterSideVisible(lx - 1, y, lz) then
+            addFace(0.55f, Array((fx, fy, fz + 1, 0f, 1f), (fx, fy, fz, 1f, 1f), (fx, nwTop, fz, 1f, 0f), (fx, swTop, fz + 1, 0f, 0f)), FaceKind.West)
+          if isWaterSideVisible(lx, y, lz + 1) then
+            addFace(0.74f, Array((fx + 1, fy, fz + 1, 0f, 1f), (fx, fy, fz + 1, 1f, 1f), (fx, swTop, fz + 1, 1f, 0f), (fx + 1, seTop, fz + 1, 0f, 0f)), FaceKind.South)
+          if isWaterSideVisible(lx, y, lz - 1) then
+            addFace(0.52f, Array((fx, fy, fz, 0f, 1f), (fx + 1, fy, fz, 1f, 1f), (fx + 1, neTop, fz, 1f, 0f), (fx, nwTop, fz, 0f, 0f)), FaceKind.North)
         else
           if isVisible(lx, y + 1, lz, block) then
             addFace(1.00f, Array((fx, topY, fz, 0f, 0f), (fx + 1, topY, fz, 1f, 0f), (fx + 1, topY, fz + 1, 1f, 1f), (fx, topY, fz + 1, 0f, 1f)), FaceKind.Top)
@@ -747,11 +1065,12 @@ final class Chunk(val cx: Int, val cz: Int, atlas: TextureAtlas, gen: TerrainGen
         if meshReady then uploadMesh() else false
       else false
 
-  // Batched rendering: caller manages state, chunks just draw their VBOs
-  def drawOpaque(): Unit = if opaqueCount > 0 then drawBuffer(opaqueVbo, opaqueCount)
-  def drawCutout(): Unit = if cutoutCount > 0 then drawBuffer(cutoutVbo, cutoutCount)
-  def drawTranslucent(): Unit = if translucentCount > 0 then drawBuffer(translucentVbo, translucentCount)
-  def drawWater(): Unit = if waterCount > 0 then drawBuffer(waterVbo, waterCount)
+  // Batched rendering: caller manages state, chunks just draw their VBOs.
+  // Vertices are chunk-local; the per-chunk transform is camera-relative.
+  def drawOpaque(camera: Vec3): Unit = if opaqueCount > 0 then drawBufferAt(opaqueVbo, opaqueCount, camera)
+  def drawCutout(camera: Vec3): Unit = if cutoutCount > 0 then drawBufferAt(cutoutVbo, cutoutCount, camera)
+  def drawTranslucent(camera: Vec3): Unit = if translucentCount > 0 then drawBufferAt(translucentVbo, translucentCount, camera)
+  def drawWater(camera: Vec3): Unit = if waterCount > 0 then drawBufferAt(waterVbo, waterCount, camera)
 
   def destroy(): Unit =
     if opaqueVbo != 0 then glDeleteBuffers(opaqueVbo); opaqueVbo = 0; opaqueCount = 0
@@ -771,6 +1090,18 @@ final class Chunk(val cx: Int, val cz: Int, atlas: TextureAtlas, gen: TerrainGen
       editCopy.foreach { case ((lx, ly, lz), block) =>
         out.writeInt(lx); out.writeInt(ly); out.writeInt(lz)
         out.writeByte(block.id)
+      }
+      val waterEntries = ArrayBuffer.empty[(Int, Byte)]
+      var wi = 0
+      while wi < waterLevelsLocal.length do
+        val level = waterLevelsLocal(wi)
+        if level != 0 then waterEntries += ((wi, level))
+        wi += 1
+      out.writeInt(waterExtraMagic)
+      out.writeInt(waterEntries.length)
+      waterEntries.foreach { case (i, level) =>
+        out.writeInt(i)
+        out.writeByte(level)
       }
     finally out.close()
     try
@@ -802,6 +1133,15 @@ final class Chunk(val cx: Int, val cz: Int, atlas: TextureAtlas, gen: TerrainGen
               edits((lx, ly, lz)) = b
               blocks((ly * Terrain.chunkSize + lz) * Terrain.chunkSize + lx) = b.id
         }
+        java.util.Arrays.fill(waterLevelsLocal, 0.toByte)
+        if in.available() >= 8 then
+          val magic = in.readInt()
+          if magic == waterExtraMagic then
+            val waterCount = in.readInt().max(0).min(waterLevelsLocal.length)
+            for _ <- 0 until waterCount do
+              val wi = in.readInt()
+              val level = in.readByte()
+              if wi >= 0 && wi < waterLevelsLocal.length then waterLevelsLocal(wi) = (level.toInt & 0xFF).max(0).min(8).toByte
         markDirtyMesh()
       finally in.close()
 
@@ -816,14 +1156,17 @@ final class Chunk(val cx: Int, val cz: Int, atlas: TextureAtlas, gen: TerrainGen
       glBindBuffer(GL_ARRAY_BUFFER, 0)
       (vbo, buffer.limit() / floatsPerVertex)
 
-  private def drawBuffer(vbo: Int, count: Int): Unit =
+  private def drawBufferAt(vbo: Int, count: Int, camera: Vec3): Unit =
     if vbo != 0 && count > 0 then
       val stride = floatsPerVertex * 4
+      glPushMatrix()
+      glTranslatef(baseX.toFloat - camera.x, 0f, baseZ.toFloat - camera.z)
       glBindBuffer(GL_ARRAY_BUFFER, vbo)
       glVertexPointer(3, GL_FLOAT, stride, 0L)
       glColorPointer(4, GL_FLOAT, stride, 12L)
       glTexCoordPointer(2, GL_FLOAT, stride, 28L)
       glDrawArrays(GL_TRIANGLES, 0, count)
+      glPopMatrix()
 
 // Multiplayer networking
 final class GameServer(
@@ -834,6 +1177,7 @@ final class GameServer(
   hostColorId: Int,
   onBlockChange: (Int, Int, Int, Byte) => Unit,
   worldSnapshot: () => Seq[(Int, Int, Int, Byte)],
+  opSnapshot: () => Seq[String],
   hostPosition: () => Vec3
 ):
   import GameServer.*
@@ -965,8 +1309,12 @@ final class GameServer(
               val worldMsg = "WORLD|" + worldSeed.toString + "|" + f"${spawn.x}%.3f" + "|" + f"${spawn.y}%.3f" + "|" + f"${spawn.z}%.3f" + "|" + colorId.toString + "|" + safeHostName + "|" + safeHostColor.toString
               send(worldMsg)
               send("PLAYERS|" + activePlayerTokensSnapshot.mkString("|"))
+              val opList =
+                try opSnapshot().map(safeName).filter(_.nonEmpty).distinct
+                catch case _: Exception => Seq.empty[String]
+              send("OPLIST|" + opList.mkString("|"))
               val snapshot =
-                try worldSnapshot().take(50000)
+                try worldSnapshot().take(250000)
                 catch case _: Exception => Seq.empty[(Int, Int, Int, Byte)]
               send("SNAPBEGIN|" + snapshot.length.toString)
               snapshot.foreach { case (sx, sy, sz, sid) => send("BLOC|" + sx + "|" + sy + "|" + sz + "|" + sid.toString) }
@@ -981,7 +1329,11 @@ final class GameServer(
               val x = parts(1).toInt; val y = parts(2).toInt; val z = parts(3).toInt
               val blockId = parts(4).toByte
               if canAcceptBlockChange(x, y, z, blockId) then
-                val clean = "BLOC|" + x + "|" + y + "|" + z + "|" + blockId.toString
+                val level =
+                  if blockId == Block.Water.id && parts.length >= 6 then
+                    try parts(5).toInt.max(1).min(8) catch case _: Exception => 8
+                  else if blockId == Block.Water.id then 8 else 0
+                val clean = "BLOC|" + x + "|" + y + "|" + z + "|" + blockId.toString + (if blockId == Block.Water.id then "|" + level.toString else "")
                 onBlockChange(x, y, z, blockId)
                 serverEvents.put(clean)
                 broadcast(clean)
@@ -993,6 +1345,9 @@ final class GameServer(
               val clean = "POS|" + onlineName + "|" + parts(2) + "|" + parts(3) + "|" + parts(4) + "|" + parts(5) + "|" + parts(6) + "|" + colorId.toString
               serverEvents.put(clean)
               broadcast(clean)
+          else if registered && line.startsWith("CMD|") then
+            val text = if parts.length >= 2 then parts.drop(1).mkString("|") else ""
+            if text.nonEmpty then serverEvents.put("RCMD|" + onlineName + "|" + text)
           else if registered && line.startsWith("CHAT|") then
             val text = if parts.length >= 3 then parts.drop(2).mkString("|") else ""
             val clean = "CHAT|" + onlineName + "|" + text
@@ -1139,9 +1494,11 @@ final class Blockbox:
   private var menuLeftWasDown = false
   private var breakingBlock: (Int, Int, Int) | Null = null
   private var breakingProgress = 0f
-  private val placeableBlocks = Array(Block.Grass, Block.Dirt, Block.Stone, Block.Sand, Block.Wood, Block.Planks, Block.Leaves, Block.Brick, Block.Glass, Block.Snow, Block.Clay, Block.Coal, Block.Copper, Block.IronOre, Block.GoldOre, Block.Diamond, Block.Furnace)
+  private val placeableBlocks = Array(Block.Grass, Block.Dirt, Block.Stone, Block.Sand, Block.Cactus, Block.Wood, Block.Planks, Block.Leaves, Block.Brick, Block.Glass, Block.Snow, Block.Clay, Block.Coal, Block.Copper, Block.IronOre, Block.GoldOre, Block.Diamond, Block.Furnace)
   private val inventory = Array.fill(Block.values.length)(0)
   private val hotbarBlocks: Array[Block] = Array.fill(10)(Block.Air)
+  private val hotbarCounts: Array[Int] = Array.fill(10)(0)
+  private val maxStackSize = 64
   private var selectedBlock = 0
   private var heldInventoryBlock: Block = Block.Air
   private var catalogScroll = 0
@@ -1170,10 +1527,12 @@ final class Blockbox:
   // target chunk unloads. Without this, client-only worlds regenerated from seed and
   // lost remote edits when walking away and returning.
   private val networkBlockOverrides = scala.collection.mutable.HashMap.empty[(Int, Int, Int), Block]
+  private val networkWaterLevelOverrides = scala.collection.mutable.HashMap.empty[(Int, Int, Int), Byte]
   private val worldExtraMagic = 0x42425831 // "BBX1": optional tail after old world.dat fields
-  private val worldExtraVersion = 1
+  private val worldExtraVersion = 2
   private val knownPlayerNames = scala.collection.mutable.HashSet.empty[String]
   private val playerColors = scala.collection.mutable.HashMap.empty[String, Int]
+  private val oppedPlayerNames = scala.collection.mutable.HashSet.empty[String]
   private var localColorId = 0
   private val playerColorPalette: Array[(Float, Float, Float)] = Array(
     (0.22f, 0.46f, 0.95f), // blue
@@ -1231,11 +1590,16 @@ final class Blockbox:
   private var commandSuggestionIndex = 0
   private val sandFallQueue = Queue.empty[(Int, Int, Int)]
   private val maxSandUpdatesPerFrame = 6
+  // Dynamic water is queue-driven. Natural generated water is dormant and costs
+  // nothing per tick until a nearby block update wakes it, which is the important
+  // trick for Minecraft-like water without beach/ocean microstutters.
   private val waterLevels = scala.collection.mutable.HashMap.empty[(Int, Int, Int), Byte]
   private val waterFlowQueue = Queue.empty[(Int, Int, Int)]
+  private val waterFlowQueued = HashSet.empty[(Int, Int, Int)]
   private var waterFlowTimer = 0f
-  private val waterFlowInterval = 0.12f
-  private val maxWaterUpdatesPerFrame = 16
+  private val waterFlowInterval = 0.05f
+  private val maxWaterUpdatesPerFrame = 36
+  private val maxQueuedWaterCells = 12000
   private var fov = 70f
   private var fullscreen = false
   private var windowedX = 0; private var windowedY = 0
@@ -1876,7 +2240,6 @@ final class Blockbox:
       val sx = hotStartX + i * (hotSlot + hotGap)
       if inRect(mx, my, sx, hotbarY, hotSlot, hotSlot) then
         if heldInventoryBlock != Block.Air then
-          if gameMode == GameMode.Creative then inventory(heldInventoryBlock.ordinal) = inventory(heldInventoryBlock.ordinal).max(64)
           assignBlockToHotbar(heldInventoryBlock, i)
           heldInventoryBlock = Block.Air
         else
@@ -1926,14 +2289,32 @@ final class Blockbox:
     val closeH = 28f * s
     if inRect(mx, my, panelX + panelW - 88f * s, panelY + 12f * s, closeW, closeH) then
       catalogScroll = 0
+      heldInventoryBlock = Block.Air
       enterGame()
       return
+
+    val hotbarY = panelY + panelH - 76f * s
+    val hotbarPanelW = panelW - 40f * s
+    val hotbarX = panelX + 20f * s
+    val hotGap = (5f * s).max(4f)
+    val hotSlot = ((hotbarPanelW - hotGap * (hotbarBlocks.length - 1)) / hotbarBlocks.length).min(44f * s).max(28f)
+    val hotBarW = hotSlot * hotbarBlocks.length + hotGap * (hotbarBlocks.length - 1)
+    val hotStartX = hotbarX + (hotbarPanelW - hotBarW) / 2f
+    for i <- 0 until hotbarBlocks.length do
+      val sx = hotStartX + i * (hotSlot + hotGap)
+      if inRect(mx, my, sx, hotbarY, hotSlot, hotSlot) then
+        if heldInventoryBlock != Block.Air then
+          assignBlockToHotbar(heldInventoryBlock, i)
+          heldInventoryBlock = Block.Air
+        else selectedBlock = i
+        return
+
     val slotSize = (48f * s).max(34f).min(54f)
     val gridX = panelX + 20f * s
     val gridY = panelY + 52f * s
     val cols = ((panelW - 54f * s) / slotSize).toInt.max(4).min(12)
     val items = catalogItems
-    val visibleRows = ((panelH - 90f * s) / slotSize).toInt.max(1)
+    val visibleRows = ((hotbarY - gridY - 26f * s) / slotSize).toInt.max(1)
     val scrollMax = ((items.length - 1) / cols - visibleRows + 2).max(0)
     if catalogScroll > scrollMax then catalogScroll = scrollMax
     for i <- items.indices.drop(catalogScroll * cols).take(cols * visibleRows) do
@@ -1943,13 +2324,10 @@ final class Blockbox:
       val sx = gridX + col * slotSize
       val sy = gridY + row * slotSize
       if inRect(mx, my, sx, sy, slotSize, slotSize) then
-        val block = items(i)
-        if gameMode == GameMode.Creative then inventory(block.ordinal) = inventory(block.ordinal).max(64)
-        heldInventoryBlock = block
-        assignBlockToHotbar(block, selectedBlock.max(0).min(hotbarBlocks.length - 1))
+        heldInventoryBlock = items(i)
         return
     val scrollUp = inRect(mx, my, panelX + panelW - 18f * s, panelY + 50f * s, 14f * s, 20f * s)
-    val scrollDown = inRect(mx, my, panelX + panelW - 18f * s, panelY + panelH - 55f * s, 14f * s, 20f * s)
+    val scrollDown = inRect(mx, my, panelX + panelW - 18f * s, hotbarY - 26f * s, 14f * s, 20f * s)
     if scrollUp then catalogScroll = (catalogScroll - 1).max(0)
     if scrollDown then catalogScroll = (catalogScroll + 1).min(scrollMax)
     if catalogScroll < 0 then catalogScroll = 0
@@ -2013,6 +2391,20 @@ final class Blockbox:
   private def colorForPlayer(name: String): Int =
     val safe = networkSafeName(name)
     playerColors.getOrElseUpdate(safe, fallbackColorForName(safe))
+
+  private def isOppedName(name: String): Boolean =
+    val safe = networkSafeName(name)
+    oppedPlayerNames.exists(_.equalsIgnoreCase(safe))
+
+  private def setOppedName(name: String, value: Boolean, announce: Boolean = true): Unit =
+    val safe = networkSafeName(name)
+    if safe.nonEmpty then
+      if value then oppedPlayerNames += safe else oppedPlayerNames.find(_.equalsIgnoreCase(safe)).foreach(n => oppedPlayerNames -= n)
+      if announce then addChatMessage(if value then s"$safe is now an operator" else s"$safe is no longer an operator")
+
+  private def broadcastOpState(name: String, value: Boolean): Unit =
+    val safe = networkSafeName(name)
+    if gameServer != null && safe.nonEmpty then gameServer.broadcast("OP|" + networkEscape(safe) + "|" + (if value then "1" else "0"))
 
   private def parsePlayerToken(token: String): Option[(String, Int)] =
     val raw = Option(token).getOrElse("").trim
@@ -2105,6 +2497,7 @@ final class Blockbox:
       prepareWorldForHost()
       localColorId = chooseRandomLocalColor()
       playerColors.clear()
+      oppedPlayerNames.clear(); oppedPlayerNames += playerName
       rememberPlayerColor(playerName, localColorId)
       val server = GameServer(
         serverPort,
@@ -2119,6 +2512,7 @@ final class Blockbox:
             setActiveBlock(x, y, z, block)
             dirtyChunkAt(x, z),
         () => snapshotWorldEditsForNetwork(),
+        () => oppedPlayerNames.toSeq,
         () => camera
       )
       gameServer = server
@@ -2128,6 +2522,7 @@ final class Blockbox:
           multiplayerMode = true
           knownPlayerNames.clear(); knownPlayerNames += playerName
           playerColors.clear()
+          oppedPlayerNames.clear(); oppedPlayerNames += playerName
           rememberPlayerColor(playerName, localColorId)
           hostStatusError = false
           hostStatusMessage = s"Hosting as $playerName. Join locally with 127.0.0.1:${server.localPort}, or share your LAN/ZeroTier IP."
@@ -2173,6 +2568,7 @@ final class Blockbox:
           multiplayerMode = true
           knownPlayerNames.clear(); knownPlayerNames += playerName
           playerColors.clear()
+          oppedPlayerNames.clear()
           rememberPlayerColor(playerName, localColorId)
           joinStatusError = false
           joinStatusMessage = s"Connected to $host:$port as $playerName."
@@ -2206,8 +2602,10 @@ final class Blockbox:
     remotePlayers.clear()
     knownPlayerNames.clear()
     playerColors.clear()
+    oppedPlayerNames.clear()
     pendingNetworkBlocks.clear()
     networkBlockOverrides.clear()
+    networkWaterLevelOverrides.clear()
     multiplayerMode = false
 
   private def startGame(): Unit =
@@ -2267,6 +2665,7 @@ final class Blockbox:
     inventory.foreach(v => out.writeInt(v.max(0)))
     out.writeInt(hotbarBlocks.length)
     hotbarBlocks.foreach(b => out.writeByte(b.ordinal.toByte))
+    hotbarCounts.foreach(c => out.writeInt(c.max(0).min(maxStackSize)))
     out.writeInt(selectedBlock.max(0).min(hotbarBlocks.length - 1))
     out.writeInt(playerHealth.round)
     out.writeInt(playerFood.round)
@@ -2295,6 +2694,18 @@ final class Blockbox:
             val block = Block.fromId(in.readByte())
             if i < hotbarBlocks.length && block != Block.Water then hotbarBlocks(i) = block
             i += 1
+          if version >= 2 && in.available() >= hotLen * 4 then
+            i = 0
+            while i < hotLen do
+              val count = in.readInt().max(0).min(maxStackSize)
+              if i < hotbarCounts.length then hotbarCounts(i) = count
+              i += 1
+          else
+            i = 0
+            while i < hotbarBlocks.length do
+              hotbarCounts(i) = if gameMode == GameMode.Creative && hotbarBlocks(i) != Block.Air then maxStackSize else 0
+              i += 1
+          compactHotbarAssignments()
           selectedBlock = in.readInt().max(0).min(hotbarBlocks.length - 1)
           playerHealth = in.readInt().max(0).min(20).toFloat
           playerFood = in.readInt().max(0).min(20).toFloat
@@ -2328,6 +2739,8 @@ final class Blockbox:
   private def clearLoadedChunks(saveFirst: Boolean): Unit =
     if saveFirst then saveLoadedChunks()
     chunkBuildQueue.clear(); chunkUploadQueue.clear()
+    waterFlowQueue.clear()
+    waterFlowQueued.clear()
     chunks.values.foreach(_.dispose())
     chunks.clear()
 
@@ -2419,6 +2832,7 @@ final class Blockbox:
     var i = 0
     while i < hotbarBlocks.length do
       hotbarBlocks(i) = Block.Air
+      hotbarCounts(i) = 0
       i += 1
     selectedBlock = selectedBlock.max(0).min(hotbarBlocks.length - 1)
     heldInventoryBlock = Block.Air
@@ -2427,8 +2841,8 @@ final class Blockbox:
     java.util.Arrays.fill(inventory, 0)
     resetHotbarDefaults()
     if gameMode == GameMode.Creative then
-      for b <- placeableBlocks do inventory(b.ordinal) = 64
-      inventory(Block.Coal.ordinal) = inventory(Block.Coal.ordinal).max(64)
+      for b <- placeableBlocks do inventory(b.ordinal) = maxStackSize
+      inventory(Block.Coal.ordinal) = inventory(Block.Coal.ordinal).max(maxStackSize)
     furnaceInput = Block.Air
     furnaceFuel = Block.Air
     furnaceProgress = 0f
@@ -2436,43 +2850,141 @@ final class Blockbox:
     furnaceOutput = Block.Air
     furnaceOutputCount = 0
 
-  private def compactHotbarAssignments(): Unit =
-    if gameMode == GameMode.Survival then
-      val seen = scala.collection.mutable.HashSet.empty[Block]
+  private def validHotbarBlock(block: Block): Boolean =
+    block != Block.Air && block != Block.Water && block != Block.Bedrock && block != Block.FurnaceLit
+
+  private def addBackpackItem(block: Block, amount: Int): Int =
+    if !validHotbarBlock(block) || amount <= 0 then 0
+    else
+      val room = 999 - inventory(block.ordinal)
+      val moved = amount.min(room.max(0))
+      if moved > 0 then inventory(block.ordinal) += moved
+      moved
+
+  private def hotbarItemCount(block: Block): Int =
+    if !validHotbarBlock(block) then 0
+    else
+      var total = 0
       var i = 0
       while i < hotbarBlocks.length do
-        val b = hotbarBlocks(i)
-        if b == Block.Air || inventory(b.ordinal) <= 0 || seen.contains(b) then hotbarBlocks(i) = Block.Air
-        else seen += b
+        if hotbarBlocks(i) == block then total += hotbarCounts(i).max(0)
         i += 1
-      if heldInventoryBlock != Block.Air && inventory(heldInventoryBlock.ordinal) <= 0 then heldInventoryBlock = Block.Air
+      total
+
+  private def totalItemCount(block: Block): Int =
+    if gameMode == GameMode.Creative && validHotbarBlock(block) then maxStackSize
+    else if validHotbarBlock(block) then inventory(block.ordinal).max(0) + hotbarItemCount(block) else 0
+
+  private def compactHotbarAssignments(): Unit =
+    // The hotbar is real stack storage now, separate from the backpack inventory.
+    // It should never show a stale ghost item or duplicate shortcut clone.
+    val seen = scala.collection.mutable.HashSet.empty[Block]
+    var i = 0
+    while i < hotbarBlocks.length do
+      val b = hotbarBlocks(i)
+      if !validHotbarBlock(b) then
+        hotbarBlocks(i) = Block.Air
+        hotbarCounts(i) = 0
+      else if gameMode == GameMode.Creative then
+        if seen.contains(b) then
+          hotbarBlocks(i) = Block.Air
+          hotbarCounts(i) = 0
+        else
+          seen += b
+          hotbarCounts(i) = maxStackSize
+      else if hotbarCounts(i) <= 0 then
+        hotbarBlocks(i) = Block.Air
+        hotbarCounts(i) = 0
+      else if seen.contains(b) then
+        addBackpackItem(b, hotbarCounts(i))
+        hotbarBlocks(i) = Block.Air
+        hotbarCounts(i) = 0
+      else
+        seen += b
+        hotbarCounts(i) = hotbarCounts(i).min(maxStackSize)
+      i += 1
+    if gameMode == GameMode.Survival && heldInventoryBlock != Block.Air && inventory(heldInventoryBlock.ordinal) <= 0 then heldInventoryBlock = Block.Air
 
   private def assignBlockToHotbar(block: Block, preferredSlot: Int): Unit =
-    if block != Block.Air && block != Block.Water then
+    if validHotbarBlock(block) then
+      val slot = preferredSlot.max(0).min(hotbarBlocks.length - 1)
+      val oldBlock = hotbarBlocks(slot)
+      val oldCount = hotbarCounts(slot)
+      if gameMode == GameMode.Survival && validHotbarBlock(oldBlock) && oldCount > 0 then addBackpackItem(oldBlock, oldCount)
       var i = 0
       while i < hotbarBlocks.length do
-        if hotbarBlocks(i) == block then hotbarBlocks(i) = Block.Air
+        if i != slot && hotbarBlocks(i) == block then
+          if gameMode == GameMode.Survival && hotbarCounts(i) > 0 then addBackpackItem(block, hotbarCounts(i))
+          hotbarBlocks(i) = Block.Air
+          hotbarCounts(i) = 0
         i += 1
-      val preferred = preferredSlot.max(0).min(hotbarBlocks.length - 1)
-      val empty = hotbarBlocks.indexWhere(_ == Block.Air)
-      val slot = if hotbarBlocks(preferred) == Block.Air then preferred else if empty >= 0 then empty else preferred
-      hotbarBlocks(slot) = block
-      selectedBlock = slot
+      if gameMode == GameMode.Creative then
+        hotbarBlocks(slot) = block
+        hotbarCounts(slot) = maxStackSize
+        selectedBlock = slot
+      else
+        val moved = inventory(block.ordinal).max(0).min(maxStackSize)
+        if moved > 0 then
+          inventory(block.ordinal) -= moved
+          hotbarBlocks(slot) = block
+          hotbarCounts(slot) = moved
+          selectedBlock = slot
+        else
+          hotbarBlocks(slot) = Block.Air
+          hotbarCounts(slot) = 0
+      compactHotbarAssignments()
 
   private def gainItem(block: Block, amount: Int): Unit =
-    if block != Block.Air && block != Block.Water && amount > 0 then
-      inventory(block.ordinal) = (inventory(block.ordinal) + amount).min(999)
-      if gameMode == GameMode.Survival && !hotbarBlocks.contains(block) then assignBlockToHotbar(block, selectedBlock)
+    if validHotbarBlock(block) && amount > 0 then
+      var remaining = amount
+      if gameMode == GameMode.Survival then
+        var i = 0
+        while i < hotbarBlocks.length && remaining > 0 do
+          if hotbarBlocks(i) == block && hotbarCounts(i) < maxStackSize then
+            val moved = remaining.min(maxStackSize - hotbarCounts(i))
+            hotbarCounts(i) += moved
+            remaining -= moved
+          i += 1
+        i = 0
+        while i < hotbarBlocks.length && remaining > 0 do
+          if hotbarBlocks(i) == Block.Air then
+            val moved = remaining.min(maxStackSize)
+            hotbarBlocks(i) = block
+            hotbarCounts(i) = moved
+            remaining -= moved
+          i += 1
+      if remaining > 0 then addBackpackItem(block, remaining)
       compactHotbarAssignments()
 
   private def consumeInventory(block: Block, amount: Int): Boolean =
     if amount <= 0 then true
     else if gameMode == GameMode.Creative then true
-    else if block == Block.Air || block == Block.Water || inventory(block.ordinal) < amount then false
+    else if !validHotbarBlock(block) || totalItemCount(block) < amount then false
     else
-      inventory(block.ordinal) -= amount
+      var remaining = amount
+      val fromBackpack = remaining.min(inventory(block.ordinal).max(0))
+      inventory(block.ordinal) -= fromBackpack
+      remaining -= fromBackpack
+      var i = 0
+      while i < hotbarBlocks.length && remaining > 0 do
+        if hotbarBlocks(i) == block && hotbarCounts(i) > 0 then
+          val used = remaining.min(hotbarCounts(i))
+          hotbarCounts(i) -= used
+          remaining -= used
+        i += 1
       compactHotbarAssignments()
       true
+
+  private def consumeSelectedHotbar(amount: Int): Boolean =
+    if amount <= 0 then true
+    else if gameMode == GameMode.Creative then true
+    else
+      val slot = selectedBlock.max(0).min(hotbarBlocks.length - 1)
+      if hotbarBlocks(slot) == Block.Air || hotbarCounts(slot) < amount then false
+      else
+        hotbarCounts(slot) -= amount
+        compactHotbarAssignments()
+        true
 
   private type Recipe = (Block, Int, Block, Int, String)
   private val craftingRecipes: Array[Recipe] = Array(
@@ -2487,7 +2999,7 @@ final class Blockbox:
   private def tryCraft(index: Int): Unit =
     if index >= 0 && index < craftingRecipes.length then
       val (input, inputCount, output, outputCount, _) = craftingRecipes(index)
-      if inventory(input.ordinal) >= inputCount then
+      if totalItemCount(input) >= inputCount then
         consumeInventory(input, inputCount)
         gainItem(output, outputCount)
         playPlaceSound()
@@ -2517,14 +3029,17 @@ final class Blockbox:
     (Seq(playerName) ++ knownPlayerNames.toSeq ++ remotePlayers.keys.toSeq).map(networkSafeName).filter(_.nonEmpty).distinct
 
   private def canUseCheatAuthority: Boolean =
-    !multiplayerMode || gameServer != null
+    !multiplayerMode || gameServer != null || isOppedName(playerName)
+
+  private def isClientOnlyOperator: Boolean =
+    multiplayerMode && gameClient != null && gameServer == null && isOppedName(playerName)
 
   private def commandSuggestions(input: String): Seq[String] =
     if input == null || !input.startsWith("/") then Seq.empty
     else
       val raw = input.drop(1)
       val parts = raw.split("\\s+", -1)
-      val commands = Seq("/help", "/enablecheats", "/gamemode", "/gm", "/timeset", "/fly", "/tp", "/teleport")
+      val commands = Seq("/help", "/enablecheats", "/op", "/deop", "/gamemode", "/gm", "/timeset", "/fly", "/tp", "/teleport")
       if !raw.contains(" ") then
         val prefix = "/" + raw.toLowerCase
         commands.filter(_.startsWith(prefix)).take(8)
@@ -2536,6 +3051,10 @@ final class Blockbox:
           case "timeset" =>
             val prefix = parts.lastOption.getOrElse("").toLowerCase
             Seq("day", "night", "reset").filter(_.startsWith(prefix)).map(v => "/" + parts.head + " " + v)
+          case "op" | "deop" =>
+            val last = parts.lastOption.getOrElse("")
+            val prefix = last.toLowerCase
+            allPlayerNames.filter(_.toLowerCase.startsWith(prefix)).take(8).map(name => "/" + raw.dropRight(last.length) + name)
           case "tp" | "teleport" =>
             val last = parts.lastOption.getOrElse("")
             val prefix = last.toLowerCase
@@ -2571,6 +3090,47 @@ final class Blockbox:
       addChatMessage(s"Teleported $clean")
     else addChatMessage("Only the host can teleport other players")
 
+
+  private def setGameModeForPlayer(name: String, mode: GameMode): Unit =
+    val safe = networkSafeName(name)
+    if safe.equalsIgnoreCase(playerName) then toggleTo(mode)
+    else if gameServer != null then
+      gameServer.broadcast("GMODE|" + networkEscape(safe) + "|" + mode.ordinal.toString)
+      addChatMessage(s"Set $safe to $mode")
+    else addChatMessage("Only the host can change another player's gamemode")
+
+  private def toggleFlyForPlayer(name: String): Unit =
+    val safe = networkSafeName(name)
+    if safe.equalsIgnoreCase(playerName) then
+      if gameMode == GameMode.Survival then addChatMessage("Flight is only available in Creative mode")
+      else
+        flyEnabled = !flyEnabled
+        if flyEnabled then
+          velocity = Vec3(0f, 0f, 0f)
+          addChatMessage("Flight enabled")
+        else
+          onGround = true
+          velocity = Vec3(0f, 0f, 0f)
+          addChatMessage("Flight disabled")
+    else if gameServer != null then
+      gameServer.broadcast("FLY|" + networkEscape(safe) + "|TOGGLE")
+      addChatMessage(s"Toggled flight for $safe")
+    else addChatMessage("Only the host can toggle another player's flight")
+
+  private def setTimeCommand(mode: String): Unit =
+    mode match
+      case "day" =>
+        timeOverride = Some(dayLengthSeconds * 0.25f)
+        addChatMessage("Set time to day")
+      case "night" =>
+        timeOverride = Some(dayLengthSeconds + nightLengthSeconds * 0.25f)
+        addChatMessage("Set time to night")
+      case "reset" =>
+        timeOverride = None
+        addChatMessage("Time override cleared")
+      case _ => ()
+    if gameServer != null then gameServer.broadcast("TIME|" + mode)
+
   private def parseCoord(text: String, current: Float): Option[Float] =
     try
       if text == "~" then Some(current)
@@ -2578,7 +3138,7 @@ final class Blockbox:
       else Some(text.toFloat)
     catch case _: Exception => None
 
-  private def parseCommand(cmd: String): Unit =
+  private def parseCommand(cmd: String, remoteSender: Option[String] = None): Unit =
     val trimmed = cmd.trim
     if !trimmed.startsWith("/") then
       sendChatMessage(trimmed)
@@ -2587,15 +3147,41 @@ final class Blockbox:
     val args = trimmed.drop(1).split("\\s+").filter(_.nonEmpty)
     if args.isEmpty then return
     val command = args(0).toLowerCase
-    val isCheat = Set("gamemode", "gm", "timeset", "fly", "tp", "teleport").contains(command)
+    val actorName = remoteSender.map(networkSafeName).getOrElse(playerName)
+    val actorIsHostLocal = remoteSender.isEmpty && (!multiplayerMode || gameServer != null)
+    val actorIsOp = actorIsHostLocal || remoteSender.exists(isOppedName) || (remoteSender.isEmpty && isOppedName(playerName))
+    val isCheat = Set("gamemode", "gm", "timeset", "fly", "tp", "teleport", "op", "deop").contains(command)
+
+    if remoteSender.isEmpty && isClientOnlyOperator && isCheat && command != "enablecheats" && command != "cheats" && command != "op" && command != "deop" then
+      gameClient.send("CMD|" + networkEscape(trimmed))
+      addChatMessage("Command sent to host")
+      return
+
     if command == "enablecheats" || command == "cheats" then
-      if canUseCheatAuthority then
+      if actorIsHostLocal then
         worldCheatsEnabled = true
         addChatMessage("Cheats enabled")
       else addChatMessage("Only the host can enable cheats")
       return
-    if isCheat && !canUseCheatAuthority then
-      addChatMessage("Only the host can use cheat commands in multiplayer")
+
+    if (command == "op" || command == "deop") then
+      if !actorIsHostLocal then
+        addChatMessage("Only the host can op or deop players")
+        return
+      if !worldCheatsEnabled then
+        addChatMessage("Cheats are not enabled. Run /enablecheats first")
+        return
+      if args.length < 2 then
+        addChatMessage("Usage: /" + command + " <player>")
+        return
+      val target = findPlayerName(args(1)).getOrElse(networkSafeName(args(1)))
+      val value = command == "op"
+      setOppedName(target, value)
+      broadcastOpState(target, value)
+      return
+
+    if isCheat && !actorIsOp then
+      addChatMessage(if remoteSender.isDefined then s"$actorName tried to use a command but is not opped" else "You are not opped")
       return
     if isCheat && !worldCheatsEnabled then
       addChatMessage("Cheats are not enabled. Host can run /enablecheats")
@@ -2604,38 +3190,31 @@ final class Blockbox:
     command match
       case "gamemode" | "gm" =>
         val mode = if args.length > 1 then args(1).toLowerCase else ""
-        mode match
-          case "survival" | "s" | "0" => toggleTo(GameMode.Survival)
-          case "creative" | "c" | "1" => toggleTo(GameMode.Creative)
-          case _ => addChatMessage("Usage: /gamemode <survival|creative>")
+        val targetName = if args.length > 2 then findPlayerName(args(2)).getOrElse(networkSafeName(args(2))) else actorName
+        val parsedMode = mode match
+          case "survival" | "s" | "0" => Some(GameMode.Survival)
+          case "creative" | "c" | "1" => Some(GameMode.Creative)
+          case _ => None
+        parsedMode match
+          case Some(nextMode) => setGameModeForPlayer(targetName, nextMode)
+          case None => addChatMessage("Usage: /gamemode <survival|creative> [player]")
       case "timeset" =>
         val when = if args.length > 1 then args(1).toLowerCase else ""
         when match
           case "day" =>
-            timeOverride = Some(dayLengthSeconds * 0.25f)
-            addChatMessage("Set time to day")
+            setTimeCommand("day")
           case "night" =>
-            timeOverride = Some(dayLengthSeconds + nightLengthSeconds * 0.25f)
-            addChatMessage("Set time to night")
+            setTimeCommand("night")
           case "reset" =>
-            timeOverride = None
-            addChatMessage("Time override cleared")
+            setTimeCommand("reset")
           case _ => addChatMessage("Usage: /timeset <day|night|reset>")
       case "fly" =>
-        if gameMode == GameMode.Survival then addChatMessage("Flight is only available in Creative mode")
-        else
-          flyEnabled = !flyEnabled
-          if flyEnabled then
-            velocity = Vec3(0f, 0f, 0f)
-            addChatMessage("Flight enabled")
-          else
-            onGround = true
-            velocity = Vec3(0f, 0f, 0f)
-            addChatMessage("Flight disabled")
+        val targetName = if args.length > 1 then findPlayerName(args(1)).getOrElse(networkSafeName(args(1))) else actorName
+        toggleFlyForPlayer(targetName)
       case "tp" | "teleport" =>
         if args.length == 2 then
           findPlayerName(args(1)).flatMap(positionOfPlayer) match
-            case Some(dest) => teleportPlayer(playerName, dest)
+            case Some(dest) => teleportPlayer(actorName, dest)
             case None => addChatMessage("Usage: /tp <player> OR /tp <target> <destination> OR /tp <x> <y> <z>")
         else if args.length == 3 then
           val targetOpt = findPlayerName(args(1))
@@ -2644,11 +3223,12 @@ final class Blockbox:
             case (Some(target), Some(dest)) => teleportPlayer(target, dest)
             case _ => addChatMessage("Usage: /tp <target> <destination>")
         else if args.length == 4 then
-          val x = parseCoord(args(1), camera.x)
-          val y = parseCoord(args(2), camera.y)
-          val z = parseCoord(args(3), camera.z)
+          val base = positionOfPlayer(actorName).getOrElse(camera)
+          val x = parseCoord(args(1), base.x)
+          val y = parseCoord(args(2), base.y)
+          val z = parseCoord(args(3), base.z)
           (x, y, z) match
-            case (Some(px), Some(py), Some(pz)) => teleportPlayer(playerName, Vec3(px, py, pz))
+            case (Some(px), Some(py), Some(pz)) => teleportPlayer(actorName, Vec3(px, py, pz))
             case _ => addChatMessage("Usage: /tp <x> <y> <z>")
         else if args.length == 5 then
           val targetOpt = findPlayerName(args(1))
@@ -2661,7 +3241,7 @@ final class Blockbox:
             case _ => addChatMessage("Usage: /tp <target> <x> <y> <z>")
         else addChatMessage("Usage: /tp <player> | /tp <target> <destination> | /tp <x> <y> <z>")
       case "help" =>
-        addChatMessage("Commands: /help, /enablecheats, /gamemode, /timeset, /fly, /tp")
+        addChatMessage("Commands: /help, /enablecheats, /op, /deop, /gamemode, /timeset, /fly, /tp")
       case _ =>
         addChatMessage(s"Unknown command: /${args(0)}")
 
@@ -2923,101 +3503,156 @@ final class Blockbox:
     // its visuals and physics are rebuilt to a higher standard.
     ()
 
-  private def wl(x: Int, y: Int, z: Int): Int = waterLevels.get((x, y, z)) match
-    case Some(b) => b.toInt & 0xFF
-    case None => 0
+  private def loadedChunkForBlock(x: Int, z: Int): Option[Chunk] =
+    chunks.get((chunkCoordBlock(x), chunkCoordBlock(z)))
+
+  private def waterLevelAt(x: Int, y: Int, z: Int): Int =
+    if y < 0 || y >= Terrain.worldHeight then 0
+    else
+      loadedChunkForBlock(x, z) match
+        case Some(chunk) =>
+          val cx = chunkCoordBlock(x); val cz = chunkCoordBlock(z)
+          chunk.getWaterLevel(x - cx * Terrain.chunkSize, y, z - cz * Terrain.chunkSize)
+        case None => 0
+
+  private def setWaterLevelAt(x: Int, y: Int, z: Int, level: Int): Unit =
+    if y >= 0 && y < Terrain.worldHeight then
+      loadedChunkForBlock(x, z).foreach { chunk =>
+        val cx = chunkCoordBlock(x); val cz = chunkCoordBlock(z)
+        val next = level.max(0).min(8)
+        chunk.setWaterLevel(x - cx * Terrain.chunkSize, y, z - cz * Terrain.chunkSize, next)
+        if next > 0 then waterLevels((x, y, z)) = next.toByte else waterLevels.remove((x, y, z))
+      }
+
+  private def markWaterActive(x: Int, y: Int, z: Int): Unit =
+    if y >= 0 && y < Terrain.worldHeight && loadedChunkForBlock(x, z).isDefined && activeBlockAt(x, y, z) == Block.Water then
+      val key = (x, y, z)
+      if waterFlowQueued.size < maxQueuedWaterCells && !waterFlowQueued.contains(key) then
+        waterFlowQueue.enqueue(key)
+        waterFlowQueued += key
+
+  private def wakeWaterAround(x: Int, y: Int, z: Int): Unit =
+    markWaterActive(x, y, z)
+    markWaterActive(x + 1, y, z)
+    markWaterActive(x - 1, y, z)
+    markWaterActive(x, y, z + 1)
+    markWaterActive(x, y, z - 1)
+    markWaterActive(x, y + 1, z)
+    markWaterActive(x, y - 1, z)
+
+  private def waterCanEnter(block: Block): Boolean =
+    block == Block.Air || block == Block.Water
+
+  private def setFlowWater(x: Int, y: Int, z: Int, level: Int): Unit =
+    if y >= 0 && y < Terrain.worldHeight && loadedChunkForBlock(x, z).isDefined then
+      if activeBlockAt(x, y, z) != Block.Water then setActiveBlock(x, y, z, Block.Water)
+      val nextLevel = level.max(1).min(8)
+      setWaterLevelAt(x, y, z, nextLevel)
+      networkBlockOverrides((x, y, z)) = Block.Water
+      networkWaterLevelOverrides((x, y, z)) = nextLevel.toByte
+      if multiplayerMode && gameServer != null then gameServer.broadcast(s"BLOC|$x|$y|$z|${Block.Water.id}|$nextLevel")
+      markWaterActive(x, y, z)
+      dirtyChunkAt(x, z)
+
+  private def clearFlowWater(x: Int, y: Int, z: Int): Unit =
+    if loadedChunkForBlock(x, z).isDefined && activeBlockAt(x, y, z) == Block.Water then
+      setWaterLevelAt(x, y, z, 0)
+      setActiveBlock(x, y, z, Block.Air)
+      networkBlockOverrides((x, y, z)) = Block.Air
+      networkWaterLevelOverrides.remove((x, y, z))
+      if multiplayerMode && gameServer != null then gameServer.broadcast(s"BLOC|$x|$y|$z|0")
+      dirtyChunkAt(x, z)
+      wakeWaterAround(x, y, z)
 
   private def updateWater(dt: Float): Unit =
     waterFlowTimer += dt
     if waterFlowTimer < waterFlowInterval then return
     waterFlowTimer = 0f
+    if waterFlowQueue.isEmpty then return
+
     var processed = 0
-    val ccx = chunkCoordPos(camera.x)
-    val ccz = chunkCoordPos(camera.z)
-    val chunkReach = (renderDistance / Terrain.chunkSize + 4).max(6)
+    val budget = math.min(maxWaterUpdatesPerFrame, waterFlowQueue.size)
+    while processed < budget && waterFlowQueue.nonEmpty do
+      val (wx, wy, wz) = waterFlowQueue.dequeue()
+      waterFlowQueued -= ((wx, wy, wz))
+      simulateWaterCell(wx, wy, wz)
+      processed += 1
 
-    // Repair obvious sea/lake surface holes near the player so natural bodies stay filled.
-    val repairRadius = 18
-    var rx = floor(camera.x).toInt - repairRadius
-    while rx <= floor(camera.x).toInt + repairRadius && processed < maxWaterUpdatesPerFrame / 3 do
-      var rz = floor(camera.z).toInt - repairRadius
-      while rz <= floor(camera.z).toInt + repairRadius && processed < maxWaterUpdatesPerFrame / 3 do
-        val key = (rx, Terrain.seaLevel, rz)
-        if !waterLevels.contains(key) && activeBlockAt(rx, Terrain.seaLevel, rz) == Block.Water then
-          waterLevels(key) = 7.toByte
-          processed += 1
-        rz += 3
-      rx += 3
+  private def simulateWaterCell(wx: Int, wy: Int, wz: Int): Unit =
+    if loadedChunkForBlock(wx, wz).isEmpty || activeBlockAt(wx, wy, wz) != Block.Water then
+      waterLevels.remove((wx, wy, wz))
+      return
 
-    val nearby = ArrayBuffer.empty[(Int, Int, Int, Int)]
-    for ((wx, wy, wz), levelRaw) <- waterLevels do
-      val wcx = chunkCoordBlock(wx); val wcz = chunkCoordBlock(wz)
-      if abs(wcx - ccx) <= chunkReach && abs(wcz - ccz) <= chunkReach then
-        val level = levelRaw.toInt & 0xFF
-        if level > 0 && activeBlockAt(wx, wy, wz) == Block.Water then nearby += ((wx, wy, wz, level))
+    val level = waterLevelAt(wx, wy, wz).max(1).min(8)
+    val source = level >= 8
 
-    def isNaturalSource(wx: Int, wy: Int, wz: Int, level: Int): Boolean =
-      level >= 7 && wy <= Terrain.seaLevel && activeBlockAt(wx, wy, wz) == Block.Water
-
-    var wi = 0
-    while wi < nearby.length && processed < maxWaterUpdatesPerFrame do
-      val (wx, wy, wz, level) = nearby(wi); wi += 1
-      val source = isNaturalSource(wx, wy, wz, level)
+    if wy > 0 then
       val below = activeBlockAt(wx, wy - 1, wz)
-
       if below == Block.Air then
-        val downLevel = if source then 7 else level.max(1)
-        setActiveBlock(wx, wy - 1, wz, Block.Water)
-        waterLevels((wx, wy - 1, wz)) = downLevel.toByte
-        if !source then
-          val remaining = level - 1
-          if remaining <= 0 then
-            waterLevels.remove((wx, wy, wz)); setActiveBlock(wx, wy, wz, Block.Air)
-          else waterLevels((wx, wy, wz)) = remaining.toByte
-        dirtyQueued(wx, wz); processed += 1
-      else if below == Block.Water && wl(wx, wy - 1, wz) < 7 then
-        val belowLevel = wl(wx, wy - 1, wz)
-        val add = (7 - belowLevel).min(if source then 7 else level)
-        if add > 0 then
-          waterLevels((wx, wy - 1, wz)) = (belowLevel + add).min(7).toByte
-          if !source then
-            val remaining = level - add
-            if remaining <= 0 then
-              waterLevels.remove((wx, wy, wz)); setActiveBlock(wx, wy, wz, Block.Air)
-            else waterLevels((wx, wy, wz)) = remaining.toByte
-          dirtyQueued(wx, wz); processed += 1
-      else
-        val spreadLevel = if source then 7 else level - 1
-        if spreadLevel > 0 then
-          val rot = ((wx * 31 + wz * 17 + wy * 13) & 3)
-          val baseNeighbors = Array((1,0), (-1,0), (0,1), (0,-1))
-          var ni = 0
-          while ni < 4 && processed < maxWaterUpdatesPerFrame do
-            val d = baseNeighbors((ni + rot) & 3); ni += 1
-            val nx = wx + d._1; val nz = wz + d._2
-            val nBlock = activeBlockAt(nx, wy, nz)
-            if nBlock == Block.Air then
-              setActiveBlock(nx, wy, nz, Block.Water)
-              waterLevels((nx, wy, nz)) = spreadLevel.toByte
-              if !source then
-                val remaining = (wl(wx, wy, wz) - 1).max(0)
-                if remaining <= 0 then
-                  waterLevels.remove((wx, wy, wz)); setActiveBlock(wx, wy, wz, Block.Air)
-                else waterLevels((wx, wy, wz)) = remaining.toByte
-              dirtyQueued(nx, nz); dirtyQueued(wx, wz); processed += 1
-            else if nBlock == Block.Water then
-              val nLevel = wl(nx, wy, nz)
-              val cur = wl(wx, wy, wz)
-              if cur > nLevel + 1 && nLevel < 7 then
-                waterLevels((nx, wy, nz)) = (nLevel + 1).min(7).toByte
-                if !source then waterLevels((wx, wy, wz)) = (cur - 1).max(1).toByte
-                dirtyQueued(nx, nz); dirtyQueued(wx, wz); processed += 1
+        val downLevel = if source then 8 else level
+        setFlowWater(wx, wy - 1, wz, downLevel)
+        if !source then clearFlowWater(wx, wy, wz)
+        else
+          setWaterLevelAt(wx, wy, wz, 8)
+          markWaterActive(wx, wy, wz)
+        wakeWaterAround(wx, wy - 1, wz)
+        return
+      else if below == Block.Water then
+        val belowLevel = waterLevelAt(wx, wy - 1, wz)
+        if belowLevel > 0 && belowLevel < 8 then
+          val add = (8 - belowLevel).min(if source then 8 else (level - 1).max(0))
+          if add > 0 then
+            setWaterLevelAt(wx, wy - 1, wz, belowLevel + add)
+            if !source then
+              val remaining = level - add
+              if remaining <= 0 then clearFlowWater(wx, wy, wz)
+              else setWaterLevelAt(wx, wy, wz, remaining)
+            dirtyChunkAt(wx, wz)
+            markWaterActive(wx, wy - 1, wz)
+            if source || waterLevelAt(wx, wy, wz) > 1 then markWaterActive(wx, wy, wz)
+            return
 
-    val toRemove = ArrayBuffer.empty[(Int, Int, Int)]
-    for ((wx, wy, wz), levelRaw) <- waterLevels do
-      val level = levelRaw.toInt & 0xFF
-      if level <= 0 || activeBlockAt(wx, wy, wz) != Block.Water then toRemove += ((wx, wy, wz))
-    for key <- toRemove do waterLevels.remove(key)
+    val dirs = Array((1, 0), (-1, 0), (0, 1), (0, -1))
+    val targetLevel = if source then 7 else level - 1
+    var changed = false
+    if targetLevel > 0 then
+      val rot = ((wx * 31 + wz * 17 + wy * 13) & 3)
+      var i = 0
+      while i < 4 do
+        val (dx, dz) = dirs((i + rot) & 3)
+        val nx = wx + dx; val nz = wz + dz
+        val nb = activeBlockAt(nx, wy, nz)
+        if nb == Block.Air then
+          setFlowWater(nx, wy, nz, targetLevel)
+          changed = true
+        else if nb == Block.Water then
+          val nLevel = waterLevelAt(nx, wy, nz)
+          if nLevel > 0 && nLevel + 1 < targetLevel then
+            setWaterLevelAt(nx, wy, nz, targetLevel)
+            dirtyChunkAt(nx, nz)
+            markWaterActive(nx, wy, nz)
+            changed = true
+        i += 1
+
+    if changed then
+      dirtyChunkAt(wx, wz)
+      if source || waterLevelAt(wx, wy, wz) > 1 then markWaterActive(wx, wy, wz)
+    else if !source then
+      // Drain disconnected non-source water gradually when it has no stronger neighbor.
+      // This keeps old flows from hovering forever after a source is removed.
+      val supported =
+        activeBlockAt(wx, wy + 1, wz) == Block.Water ||
+        dirs.exists { case (dx, dz) =>
+          val nx = wx + dx; val nz = wz + dz
+          activeBlockAt(nx, wy, nz) == Block.Water && waterLevelAt(nx, wy, nz) > level
+        }
+      if !supported then
+        val next = level - 1
+        if next <= 0 then clearFlowWater(wx, wy, wz)
+        else
+          setWaterLevelAt(wx, wy, wz, next)
+          dirtyChunkAt(wx, wz)
+          markWaterActive(wx, wy, wz)
 
   private def updateSandFalling(): Unit =
     sandFallQueue.clear()
@@ -3140,9 +3775,15 @@ final class Blockbox:
     val lx = x - cx * Terrain.chunkSize
     val lz = z - cz * Terrain.chunkSize
     chunks.get((cx, cz)).foreach { chunk =>
+      val oldBlock = chunk.getBlock(lx, y, lz)
       chunk.setBlock(lx, y, lz, block)
-      if block == Block.Water then waterLevels((x, y, z)) = 7
-      else if block != Block.Water then waterLevels.remove((x, y, z))
+      if block == Block.Water then
+        setWaterLevelAt(x, y, z, 8)
+        markWaterActive(x, y, z)
+      else
+        setWaterLevelAt(x, y, z, 0)
+        waterLevels.remove((x, y, z))
+      if oldBlock != block then wakeWaterAround(x, y, z)
     }
 
   private def getWorldBlock(x: Int, y: Int, z: Int): Block =
@@ -3177,7 +3818,10 @@ final class Blockbox:
               terrainHeightCache.clear()
               pendingNetworkBlocks.clear()
               networkBlockOverrides.clear()
+              networkWaterLevelOverrides.clear()
               waterLevels.clear()
+              waterFlowQueue.clear()
+              waterFlowQueued.clear()
               clearLoadedChunks(saveFirst = false)
             camera = Vec3(sx, sy, sz)
             velocity = Vec3(0f, 0f, 0f); onGround = false
@@ -3191,15 +3835,49 @@ final class Blockbox:
             val x = parts(1).toInt; val y = parts(2).toInt; val z = parts(3).toInt
             val blockId = parts(4).toByte
             val block = Block.fromId(blockId)
+            val waterLevel =
+              if block == Block.Water && parts.length >= 6 then
+                try parts(5).toInt.max(1).min(8) catch case _: Exception => 8
+              else if block == Block.Water then 8 else 0
             networkBlockOverrides((x, y, z)) = block
+            if block == Block.Water then networkWaterLevelOverrides((x, y, z)) = waterLevel.toByte
+            else networkWaterLevelOverrides.remove((x, y, z))
             val cx = chunkCoordBlock(x); val cz = chunkCoordBlock(z)
             if chunks.contains((cx, cz)) then
               setActiveBlock(x, y, z, block)
+              if block == Block.Water then setWaterLevelAt(x, y, z, waterLevel)
               dirtyChunkAt(x, z)
             else
               pendingNetworkBlocks((x, y, z)) = block
         else if line.startsWith("SNAPBEGIN|") || line.startsWith("SNAPEND") then
           ()
+        else if line.startsWith("OPLIST|") then
+          if gameServer == null then
+            oppedPlayerNames.clear()
+            parts.drop(1).foreach(n => setOppedName(n, value = true, announce = false))
+        else if line.startsWith("OP|") then
+          if parts.length >= 3 then
+            val name = networkSafeName(parts(1))
+            val value = parts(2) == "1" || parts(2).equalsIgnoreCase("true")
+            setOppedName(name, value)
+        else if line.startsWith("GMODE|") then
+          if parts.length >= 3 then
+            val name = networkSafeName(parts(1))
+            if name.equalsIgnoreCase(playerName) then
+              gameMode = GameMode.fromOrdinal(parts(2).toInt)
+              velocity = Vec3(0f, 0f, 0f); onGround = false
+              addChatMessage(s"Game mode set to $gameMode")
+        else if line.startsWith("FLY|") then
+          if parts.length >= 3 then
+            val name = networkSafeName(parts(1))
+            if name.equalsIgnoreCase(playerName) then toggleFlyForPlayer(playerName)
+        else if line.startsWith("TIME|") then
+          if parts.length >= 2 then setTimeCommand(parts(1).toLowerCase)
+        else if line.startsWith("RCMD|") then
+          if gameServer != null && parts.length >= 3 then
+            val sender = networkSafeName(parts(1))
+            val commandText = networkUnescape(parts.drop(2).mkString("|"))
+            parseCommand(commandText, Some(sender))
         else if line.startsWith("POS|") then
           if parts.length >= 7 then
             val name = networkSafeName(parts(1))
@@ -3345,7 +4023,9 @@ final class Blockbox:
     glFogfv(GL_FOG_COLOR, floatBuffer(fogR, fogG, fogB, 1f))
     glMatrixMode(GL_PROJECTION); glLoadIdentity()
     val aspect = framebufferWidth.toDouble / framebufferHeight.toDouble
-    val near = 0.08; val far = (renderDistance + 24).toDouble
+    // Keep the near plane away from zero so the depth buffer has useful
+    // precision. Tiny near values caused early z-fighting at distance.
+    val near = 0.25; val far = (renderDistance + 24).toDouble
     val sprintFov = if screen == Screen.Playing then
       val moving = down(GLFW_KEY_W) || down(GLFW_KEY_S) || down(GLFW_KEY_A) || down(GLFW_KEY_D)
       if moving && (down(GLFW_KEY_LEFT_CONTROL) || down(GLFW_KEY_RIGHT_CONTROL)) then 8.5f else 0f
@@ -3355,7 +4035,9 @@ final class Blockbox:
     glMatrixMode(GL_MODELVIEW); glLoadIdentity()
     glRotatef(pitch, 1f, 0f, 0f)
     glRotatef(yaw, 0f, 1f, 0f)
-    glTranslatef(-camera.x, -camera.y, -camera.z)
+    // X/Z camera-relative rendering: chunk VBOs are local and translated by
+    // (chunkBase - camera). Only vertical camera motion remains in the view matrix.
+    glTranslatef(0f, -camera.y, 0f)
     if !isUnder then renderSky()
     renderBubbles()
     renderFallingSand()
@@ -3368,10 +4050,10 @@ final class Blockbox:
     glEnable(GL_TEXTURE_2D); activeAtlas.bind()
     glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE)
     glEnableClientState(GL_VERTEX_ARRAY); glEnableClientState(GL_COLOR_ARRAY); glEnableClientState(GL_TEXTURE_COORD_ARRAY)
-    chunkList.foreach(_.drawOpaque())
+    chunkList.foreach(_.drawOpaque(camera))
     // Batch cutout pass
     glEnable(GL_ALPHA_TEST); glAlphaFunc(GL_GREATER, 0.5f)
-    chunkList.foreach(_.drawCutout())
+    chunkList.foreach(_.drawCutout(camera))
     glDisable(GL_ALPHA_TEST)
     // Batch translucent + water pass
     glEnable(GL_BLEND)
@@ -3382,8 +4064,8 @@ final class Blockbox:
       val dz = (c.cz * Terrain.chunkSize + Terrain.chunkSize * 0.5f) - camera.z
       -(dx * dx + dz * dz)
     }
-    farToNearChunks.foreach(_.drawTranslucent())
-    farToNearChunks.foreach(_.drawWater())
+    farToNearChunks.foreach(_.drawTranslucent(camera))
+    farToNearChunks.foreach(_.drawWater(camera))
     glDepthMask(true)
     glDisableClientState(GL_TEXTURE_COORD_ARRAY); glDisableClientState(GL_COLOR_ARRAY); glDisableClientState(GL_VERTEX_ARRAY)
     glBindBuffer(GL_ARRAY_BUFFER, 0); glBindTexture(GL_TEXTURE_2D, 0)
@@ -3444,7 +4126,7 @@ final class Blockbox:
         val feetY = p.y - 1.62f
         val (cr, cg, cb) = colorForId(rp.colorId)
         glPushMatrix()
-        glTranslatef(p.x, 0f, p.z)
+        glTranslatef(p.x - camera.x, 0f, p.z - camera.z)
         glRotatef(-rp.yaw, 0f, 1f, 0f)
         drawColoredBox(-0.30f, feetY, -0.20f, 0.30f, feetY + 1.05f, 0.20f, cr, cg, cb, 1f)
         drawColoredBox(-0.23f, feetY + 1.05f, -0.23f, 0.23f, feetY + 1.48f, 0.23f, 0.90f, 0.74f, 0.55f, 1f)
@@ -3615,8 +4297,8 @@ final class Blockbox:
     raycast(8f).foreach { hit =>
       val block = activeBlockAt(hit.block._1, hit.block._2, hit.block._3)
       val by = framebufferHeight.toFloat
-      val hp = hit.block; val waterLvl = if block == Block.Water then wl(hp._1, hp._2, hp._3) else -1
-      val blockLabel = if waterLvl >= 0 then s"> ${block} (level $waterLvl/7)" else s"> ${block}"
+      val hp = hit.block; val waterLvl = if block == Block.Water then waterLevelAt(hp._1, hp._2, hp._3) else -1
+      val blockLabel = if waterLvl >= 0 then s"> ${block} (level $waterLvl/8)" else s"> ${block}"
       renderTextShadow(18, by - 90, blockLabel, 0.85f, 0.92f, 1f, 0.80f)
       renderTextShadow(18, by - 110, s"${hit.block._1}, ${hit.block._2}, ${hit.block._3}", 0.70f, 0.80f, 0.90f, 0.65f)
       if breakingProgress > 0f then
@@ -3672,7 +4354,7 @@ final class Blockbox:
       val sx = startX + i * (slotSize + gap)
       val selected = i == selectedBlock
       val block = hotbarBlocks(i)
-      val hasItem = block != Block.Air && (gameMode == GameMode.Creative || inventory(block.ordinal) > 0)
+      val hasItem = block != Block.Air && (gameMode == GameMode.Creative || hotbarCounts(i) > 0)
       rect(sx - 2f * s, y - 2f * s, slotSize + 4f * s, slotSize + 4f * s, 0f, 0f, 0f, 0.45f)
       rect(sx, y, slotSize, slotSize, if selected then 0.16f else 0.07f, if selected then 0.17f else 0.075f, if selected then 0.20f else 0.09f, if selected then 0.96f else 0.72f)
       rect(sx + 1f * s, y + 1f * s, slotSize - 2f * s, labelBandH, 0.28f, 0.30f, 0.35f, if selected then 0.42f else 0.20f)
@@ -3687,7 +4369,7 @@ final class Blockbox:
         val iconY = y + labelBandH + ((slotSize - labelBandH) - icon) / 2f + 2f * s
         renderBlockIcon(block, sx + (slotSize - icon) / 2f, iconY, icon)
         if gameMode == GameMode.Survival then
-          val count = inventory(block.ordinal)
+          val count = hotbarCounts(i)
           if count > 0 then
             val ns = count.toString
             val countScale = (1.12f * s).max(0.94f).min(slotSize / 16f)
@@ -3829,11 +4511,18 @@ final class Blockbox:
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
     val phase = dayPhase
     val daylight = daylightFactor
-    val starVis = smooth01((0.74f - daylight) / 0.44f)
+    val starVis = smooth01((0.88f - daylight) / 0.34f)
+
+    // Draw sky in camera space. Do not translate by world X/Z, otherwise large
+    // coordinates drag the sky into the same precision problem as terrain.
+    glMatrixMode(GL_MODELVIEW)
+    glPushMatrix()
+    glLoadIdentity()
+    glRotatef(pitch, 1f, 0f, 0f)
+    glRotatef(yaw, 0f, 1f, 0f)
 
     // Stars rotate with the sky dome
     glPushMatrix()
-    glTranslatef(camera.x, camera.y, camera.z)
     glRotatef(walk * -6f, 0f, 0f, 1f)
     glRotatef(35f, 1f, 0f, 0f)
     glPointSize(2.5f)
@@ -3848,75 +4537,10 @@ final class Blockbox:
     glPointSize(1f)
     glPopMatrix()
 
-    // Sun and moon in world space (not rotated with stars)
-    val sunAngle = walk * -6f
-    val angleRad = toRadians(sunAngle).toFloat
-    val tiltRad = toRadians(35f).toFloat
-    val sunR = 11f
-    val moonR = 7f
-    val sunDist = 60f
-    val cosT = cos(tiltRad).toFloat
-    val sinT = sin(tiltRad).toFloat
-
-    // Sun orbits on a great circle tilted 35° (arc-like path across the sky)
-    val sunX = sunR * sin(angleRad).toFloat
-    val sunY = sunR * cos(angleRad).toFloat * cosT
-    val sunZ = -sunDist + sunR * cos(angleRad).toFloat * sinT
-    val isSunVisible = sunY > -sunR * 0.5f
-
-    // Moon is opposite the sun (180° offset) so they alternate across the sky
-    val moonAngleRad = angleRad + Pi.toFloat
-    val moonX = sunR * sin(moonAngleRad).toFloat
-    val moonY = sunR * cos(moonAngleRad).toFloat * cosT
-    val moonZ = -sunDist + sunR * cos(moonAngleRad).toFloat * sinT
-    val isMoonVisible = moonY > -sunR * 0.5f
-
-    // Helper: draw a filled circle (triangle fan) at (cx, cy) with radius r
-    def drawCircle3D(cx: Float, cy: Float, cz: Float, r: Float, segments: Int): Unit =
-      glBegin(GL_TRIANGLE_FAN)
-      glVertex3f(cx, cy, cz)
-      var i = 0
-      while i <= segments do
-        val a = i.toFloat / segments * 2f * Pi.toFloat
-        glVertex3f(cx + r * cos(a).toFloat, cy + r * sin(a).toFloat, cz)
-        i += 1
-      glEnd()
-
-    // Sun with glow
-    if isSunVisible then
-      val warmth = if sunY < sunR * 0.8f then (sunY / (sunR * 0.8f)).max(0f) else 1f
-      val (sr, sg, sb) = (1f, 0.70f + 0.30f * warmth, 0.30f + 0.70f * warmth)
-      glBlendFunc(GL_SRC_ALPHA, GL_ONE)
-      glColor4f(sr, sg, sb, 0.08f * warmth)
-      drawCircle3D(sunX, sunY, sunZ, sunR * 2.2f, 24)
-      glColor4f(sr, sg, sb, 0.15f * warmth)
-      drawCircle3D(sunX, sunY, sunZ, sunR * 1.6f, 24)
-      glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
-      glColor4f(sr, sg, sb, 0.95f)
-      drawCircle3D(sunX, sunY, sunZ, sunR, 24)
-      glColor4f(1f, 1f, 1f, 0.85f)
-      drawCircle3D(sunX, sunY, sunZ, sunR * 0.4f, 16)
-
-    // Moon with crater details
-    if isMoonVisible then
-      val moonBright = (daylight - 0.18f) / 0.82f
-      glBlendFunc(GL_SRC_ALPHA, GL_ONE)
-      glColor4f(0.65f, 0.70f, 0.85f, 0.06f * (1f - moonBright))
-      drawCircle3D(moonX, moonY, moonZ, moonR * 2.5f, 24)
-      glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
-      glColor4f(0.78f, 0.82f, 0.90f, 0.75f + 0.15f * (1f - moonBright))
-      drawCircle3D(moonX, moonY, moonZ, moonR, 24)
-      val craterRng = new scala.util.Random(moonX.toInt * 31 + moonY.toInt * 17)
-      glColor4f(0.58f, 0.62f, 0.72f, 0.35f)
-      var ci = 0
-      while ci < 5 do
-        val ca = craterRng.nextFloat() * 2f * Pi.toFloat
-        val cd = craterRng.nextFloat() * moonR * 0.55f
-        val cr = 1f + craterRng.nextFloat() * 2.5f
-        drawCircle3D(moonX + cd * cos(ca).toFloat, moonY + cd * sin(ca).toFloat, moonZ, cr, 10)
-        ci += 1
-
+    // Sun and moon are intentionally disabled for now. The lighting cycle and stars stay,
+    // but the old discs looked cheap and distracted from the terrain.
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+    glPopMatrix()
     glDepthMask(true)
     glEnable(GL_DEPTH_TEST)
     glEnable(GL_FOG)
@@ -3950,7 +4574,7 @@ final class Blockbox:
       val bob = sin(t * 3f + x * 10f + z * 10f).toFloat * 0.05f
       val alpha = (life / 2f).max(0.15f).min(0.6f)
       glColor4f(0.85f, 0.92f, 1f, alpha)
-      glVertex3f(x + bob, y, z + bob)
+      glVertex3f(x - camera.x + bob, y, z - camera.z + bob)
     glEnd()
     glPointSize(1f)
     glDisable(GL_POINT_SMOOTH)
@@ -4390,7 +5014,7 @@ final class Blockbox:
       val hasItem = i < items.length
       val block = if hasItem then items(i) else Block.Air
       val count = if hasItem then inventory(block.ordinal) else 0
-      val isSelected = hasItem && hotbarBlocks.isDefinedAt(selectedBlock) && hotbarBlocks(selectedBlock) == block
+      val isSelected = false
       val hover = inRect(mx, my, sx, sy, slot, slot)
       if hover && hasItem then
         hoveredBlock = block; hoveredX = sx + slot / 2f; hoveredY = sy
@@ -4426,13 +5050,13 @@ final class Blockbox:
     for i <- craftingRecipes.indices.drop(craftingScroll).take(maxCraftVisible) do
       val (input, inputCount, output, outputCount, label) = craftingRecipes(i)
       val by = craftY + (i - craftingScroll) * craftSlotH
-      val canCraft = inventory(input.ordinal) >= inputCount
+      val canCraft = totalItemCount(input) >= inputCount
       val hoverCraft = inRect(mx, my, craftX, by, craftPanelW, craftSlotH - 5f * s)
       val br = if canCraft then (if hoverCraft then 0.32f else 0.22f) else (if hoverCraft then 0.16f else 0.10f)
       rect(craftX, by, craftPanelW, craftSlotH - 5f * s, br, br * 1.04f, br * 1.10f, 0.90f)
       rect(craftX + 1f * s, by + 1f * s, craftPanelW - 2f * s, 2f * s, 1f, 1f, 1f, 0.05f)
       renderTextShadow(craftX + 8f * s, by + 5f * s, label, 0.88f, 0.88f, 0.82f, (0.60f * s).min(craftPanelW / 34f))
-      renderTextShadow(craftX + 8f * s, by + 26f * s, s"${inputCount}x ${blockName(input)} (${inventory(input.ordinal)})", if canCraft then 0.68f else 0.40f, if canCraft then 0.72f else 0.45f, if canCraft then 0.78f else 0.50f, (0.50f * s).min(craftPanelW / 42f))
+      renderTextShadow(craftX + 8f * s, by + 26f * s, s"${inputCount}x ${blockName(input)} (${totalItemCount(input)})", if canCraft then 0.68f else 0.40f, if canCraft then 0.72f else 0.45f, if canCraft then 0.78f else 0.50f, (0.50f * s).min(craftPanelW / 42f))
       centeredTextFit(craftX + craftPanelW - 22f * s, by + 9f * s, s"+$outputCount", 0.82f, 0.88f, 0.78f, 0.55f * s, 38f * s)
     if craftMaxScroll > 0 then
       centeredTextFit(craftX + craftPanelW / 2f, craftY + maxCraftVisible * craftSlotH + 2f * s, s"${craftingScroll + 1}-${(craftingScroll + maxCraftVisible).min(craftingRecipes.length)}/${craftingRecipes.length}", 0.50f, 0.55f, 0.65f, 0.50f * s, craftPanelW)
@@ -4461,11 +5085,12 @@ final class Blockbox:
     drawButton(panelX + panelW - 88f * s, panelY + 12f * s, 72f * s, 28f * s, "X")
 
     val slotSize = (48f * s).max(34f).min(54f)
-    val cols = ((panelW - 54f * s) / slotSize).toInt.max(4).min(12)
     val gridX = panelX + 20f * s
     val gridY = panelY + 52f * s
+    val hotbarPanelY = panelY + panelH - 76f * s
+    val cols = ((panelW - 54f * s) / slotSize).toInt.max(4).min(12)
     val items = catalogItems
-    val visibleRows = ((panelH - 90f * s) / slotSize).toInt.max(1)
+    val visibleRows = ((hotbarPanelY - gridY - 26f * s) / slotSize).toInt.max(1)
     val scrollMax = ((items.length - 1) / cols - visibleRows + 2).max(0)
     if catalogScroll > scrollMax then catalogScroll = scrollMax
     val (mx, my) = mouseFramebufferPos()
@@ -4477,7 +5102,6 @@ final class Blockbox:
       val sy = gridY + row * slotSize
       val block = items(i)
       val isSelected = hotbarBlocks.isDefinedAt(selectedBlock) && hotbarBlocks(selectedBlock) == block
-      val count = inventory(block.ordinal)
       val hover = inRect(mx, my, sx, sy, slotSize, slotSize)
       val base = if hover then 0.13f else 0.09f
       rect(sx - 1f * s, sy - 1f * s, slotSize + 2f * s, slotSize + 2f * s, 0.02f, 0.02f, 0.02f, 0.70f)
@@ -4490,31 +5114,26 @@ final class Blockbox:
         rect(sx + slotSize, sy - 2f * s, 2f * s, slotSize + 4f * s, 1f, 0.92f, 0.45f, 0.55f)
       val icon = (slotSize * 0.56f).min(28f * s).max(18f)
       renderBlockIcon(block, sx + (slotSize - icon) / 2f, sy + (slotSize - icon) / 2f, icon)
-      if count > 0 then
-        val ns = count.toString
-        val countScale = (0.72f * s).max(0.56f).min(slotSize / 32f)
-        val tw = textWidth(ns, countScale)
-        val nx = sx + slotSize - tw - 5f * s
-        val ny = sy + slotSize - 12f * countScale - 2f * s
-        rect(nx - 2f * s, ny - 1f * s, tw + 4f * s, 11f * countScale + 3f * s, 0f, 0f, 0f, 0.64f)
-        renderText(nx, ny, ns, 1f, 1f, 1f, countScale)
+      if heldInventoryBlock == block then
+        rect(sx + 5f * s, sy + slotSize - 8f * s, slotSize - 10f * s, 3f * s, 1f, 0.86f, 0.30f, 0.85f)
     if scrollMax > 0 then
       val scrollBarX = panelX + panelW - 16f * s
-      val scrollBarH = panelH - 90f * s
+      val scrollBarH = hotbarPanelY - gridY - 8f * s
       val thumbH = (scrollBarH / (scrollMax + 1)).max(10f * s)
       val thumbY = panelY + 52f * s + (catalogScroll.toFloat / scrollMax.max(1)) * (scrollBarH - thumbH)
       rect(scrollBarX, panelY + 52f * s, 12f * s, scrollBarH, 0.02f, 0.02f, 0.02f, 0.40f)
       rect(scrollBarX, thumbY, 12f * s, thumbH, 0.35f, 0.40f, 0.50f, 0.70f)
+    drawInventoryHotbar(panelX + 20f * s, hotbarPanelY, panelW - 40f * s, s, mx, my)
     renderHeldInventoryCursor(mx, my)
-    val infoY = panelY + panelH - 24f * s
-    rect(panelX + 12f * s, infoY - 2f * s, panelW - 24f * s, 20f * s, 0.06f, 0.08f, 0.12f, 0.50f)
-    centeredTextFit(cx, infoY, "E or ESC close | Click to hold item / assign selected hotbar", 0.55f, 0.60f, 0.70f, 0.60f * s, panelW - 32f * s)
+    val infoY = panelY + panelH - 18f * s
+    rect(panelX + 12f * s, infoY - 2f * s, panelW - 24f * s, 18f * s, 0.06f, 0.08f, 0.12f, 0.50f)
+    centeredTextFit(cx, infoY, "catalog: click block, then click hotbar slot | e or esc closes", 0.55f, 0.60f, 0.70f, 0.56f * s, panelW - 32f * s)
 
   private def blockName(block: Block): String =
     block.toString.replaceAll("([a-z])([A-Z])", "$1 $2")
 
   private def inventoryItems: Array[Block] =
-    Block.values.filter(b => b != Block.Air && b != Block.Water && inventory(b.ordinal) > 0)
+    Block.values.filter(b => validHotbarBlock(b) && inventory(b.ordinal) > 0)
 
   private val inventoryGridSlots = 24
 
@@ -4531,7 +5150,7 @@ final class Blockbox:
       val selected = i == selectedBlock
       val hover = inRect(mx, my, sx, panelY, slot, slot)
       val block = hotbarBlocks(i)
-      val hasItem = block != Block.Air && (gameMode == GameMode.Creative || inventory(block.ordinal) > 0)
+      val hasItem = block != Block.Air && (gameMode == GameMode.Creative || hotbarCounts(i) > 0)
       val base = if hover then 0.14f else 0.085f
       rect(sx - 1f * s, panelY - 1f * s, slot + 2f * s, slot + 2f * s, 0.015f, 0.017f, 0.022f, 0.78f)
       rect(sx, panelY, slot, slot, base, base + 0.01f, base + 0.035f, 0.92f)
@@ -4543,6 +5162,11 @@ final class Blockbox:
       if hasItem then
         val icon = (slot * 0.58f).min(26f * s).max(16f)
         renderBlockIcon(block, sx + (slot - icon) / 2f, panelY + (slot - icon) / 2f, icon)
+        if gameMode == GameMode.Survival then
+          val ns = hotbarCounts(i).toString
+          val cs = (0.58f * s).max(0.46f)
+          val tw = textWidth(ns, cs)
+          renderTextShadow(sx + slot - tw - 4f * s, panelY + slot - 13f * s, ns, 1f, 1f, 1f, cs)
       centeredTextFit(sx + slot / 2f, panelY + 3f * s, hotbarLabel(i), 0.96f, 0.96f, 0.98f, 0.54f * s, slot - 6f * s)
       i += 1
 
@@ -4570,7 +5194,8 @@ final class Blockbox:
     rect(x, y, boxW, 1.5f * s, 0.95f, 0.80f, 0.36f, 0.62f)
     renderTextShadow(x + padX, y + padY, text, 0.96f, 0.94f, 0.82f, scale)
 
-  private def catalogItems: Array[Block] = placeableBlocks
+  private def catalogItems: Array[Block] =
+    Block.values.filter(b => b != Block.Air && b != Block.Water && b != Block.Bedrock && b != Block.FurnaceLit)
 
   private def renderFurnaceUI(): Unit =
     glDisable(GL_DEPTH_TEST); glDisable(GL_CULL_FACE); setupOrtho()
@@ -4590,11 +5215,11 @@ final class Blockbox:
     val rowH = (38f * s).max(30f)
     rect(listX - 8f * s, listY - 34f * s, listW + 16f * s, rowH * smeltableInputs.length + 48f * s, 0.045f, 0.060f, 0.085f, 0.72f)
     centeredTextFit(listX + listW / 2f, listY - 24f * s, "Choose input", 0.80f, 0.86f, 1f, 0.66f * s, listW)
-    val furnaceItems = inventoryItems.filter(b => smeltResult(b).nonEmpty)
+    val furnaceItems = smeltableInputs.filter(b => smeltResult(b).nonEmpty && totalItemCount(b) > 0)
     for i <- 0 until inventoryGridSlots.min(6) do
       val b = if i < furnaceItems.length then furnaceItems(i) else Block.Air
       val y = listY + i * rowH
-      val count = if b == Block.Air then 0 else inventory(b.ordinal)
+      val count = if b == Block.Air then 0 else totalItemCount(b)
       val selected = b != Block.Air && furnaceInput == b
       val hover = inRect(mx, my, listX, y, listW, rowH - 4f * s)
       val br = if selected then 0.30f else if hover then 0.18f else 0.095f
@@ -4629,7 +5254,7 @@ final class Blockbox:
     val inputY = py + 94f * s
     val outputX = workX + workW - slot - 8f * s
     val outputY = inputY
-    val inputCount = if furnaceInput == Block.Air then 0 else inventory(furnaceInput.ordinal)
+    val inputCount = if furnaceInput == Block.Air then 0 else totalItemCount(furnaceInput)
     drawFurnaceSlot(inputX, inputY, "Input", furnaceInput, inputCount)
     drawFurnaceSlot(outputX, outputY, "Output", furnaceOutput, furnaceOutputCount)
 
@@ -4643,7 +5268,7 @@ final class Blockbox:
 
     val fuelY = py + 212f * s
     rect(workX + 8f * s, fuelY, workW - 16f * s, 58f * s, 0.045f, 0.060f, 0.085f, 0.72f)
-    renderTextShadow(workX + 18f * s, fuelY + 10f * s, s"Fuel: Coal ${inventory(Block.Coal.ordinal)} | Wood ${inventory(Block.Wood.ordinal)}", 0.76f, 0.82f, 0.92f, 0.58f * s)
+    renderTextShadow(workX + 18f * s, fuelY + 10f * s, s"Fuel: Coal ${totalItemCount(Block.Coal)} | Wood ${totalItemCount(Block.Wood)}", 0.76f, 0.82f, 0.92f, 0.58f * s)
     val fuelText = if furnaceFuelRemaining > 0f then f"Buffered fuel: $furnaceFuelRemaining%.0f ticks" else "Buffered fuel: empty"
     renderTextShadow(workX + 18f * s, fuelY + 32f * s, fuelText, 0.62f, 0.68f, 0.78f, 0.52f * s)
     val recipeText = furnaceInput match
@@ -4673,7 +5298,7 @@ final class Blockbox:
     val listY = py + 82f * s
     val listW = (210f * s).min(pw * 0.34f).max(160f * s)
     val rowH = (38f * s).max(30f)
-    val furnaceItems = inventoryItems.filter(b => smeltResult(b).nonEmpty)
+    val furnaceItems = smeltableInputs.filter(b => smeltResult(b).nonEmpty && totalItemCount(b) > 0)
     for i <- 0 until inventoryGridSlots.min(6) do
       val y = listY + i * rowH
       if inRect(mx, my, listX, y, listW, rowH - 4f * s) then
@@ -4692,7 +5317,7 @@ final class Blockbox:
     val outputX = workX + workW - slot - 8f * s
     val outputY = inputY
     if inRect(mx, my, inputX, inputY, slot, slot) then
-      if heldInventoryBlock != Block.Air && smeltResult(heldInventoryBlock).nonEmpty && inventory(heldInventoryBlock.ordinal) > 0 then
+      if heldInventoryBlock != Block.Air && smeltResult(heldInventoryBlock).nonEmpty && totalItemCount(heldInventoryBlock) > 0 then
         furnaceInput = heldInventoryBlock
         furnaceProgress = 0f
       else if heldInventoryBlock == Block.Air then
@@ -4715,7 +5340,7 @@ final class Blockbox:
     else if inRect(mx, my, b0 + (btnW + buttonGap) * 3f, buttonY, btnW, bh) then enterGame()
 
   private def pickFurnaceInput(): Unit =
-    val picked: Option[Block] = smeltableInputs.find(b => inventory(b.ordinal) > 0)
+    val picked: Option[Block] = smeltableInputs.find(b => totalItemCount(b) > 0)
     picked match
       case Some(b: Block) => furnaceInput = b
       case None => addChatMessage("No smeltable items in inventory")
@@ -4730,16 +5355,16 @@ final class Blockbox:
     case _ => None
 
   private def canConsumeFuelFor(input: Block): Boolean =
-    inventory(Block.Coal.ordinal) > 0 || inventory(Block.Wood.ordinal) > (if input == Block.Wood then 1 else 0)
+    totalItemCount(Block.Coal) > 0 || totalItemCount(Block.Wood) > (if input == Block.Wood then 1 else 0)
 
   private def consumeFuelFor(input: Block): Boolean =
     if furnaceFuelRemaining > 0f then true
-    else if inventory(Block.Coal.ordinal) > 0 then
+    else if totalItemCount(Block.Coal) > 0 then
       consumeInventory(Block.Coal, 1)
       furnaceFuel = Block.Coal
       furnaceFuelRemaining = 8f
       true
-    else if inventory(Block.Wood.ordinal) > (if input == Block.Wood then 1 else 0) then
+    else if totalItemCount(Block.Wood) > (if input == Block.Wood then 1 else 0) then
       consumeInventory(Block.Wood, 1)
       furnaceFuel = Block.Wood
       furnaceFuelRemaining = 4f
@@ -4748,7 +5373,7 @@ final class Blockbox:
 
   private def takeFurnaceOutput(): Unit =
     if furnaceOutput != Block.Air && furnaceOutputCount > 0 then
-      val room = (999 - inventory(furnaceOutput.ordinal)).max(0)
+      val room = (999 - totalItemCount(furnaceOutput)).max(0)
       val moved = math.min(room, furnaceOutputCount)
       if moved > 0 then
         gainItem(furnaceOutput, moved)
@@ -4763,7 +5388,7 @@ final class Blockbox:
     if furnaceInput == Block.Air then
       if showMessages then addChatMessage("Choose an input from the furnace list first")
       return false
-    if inventory(furnaceInput.ordinal) <= 0 then
+    if totalItemCount(furnaceInput) <= 0 then
       if showMessages then addChatMessage(s"No ${blockName(furnaceInput)} left")
       furnaceInput = Block.Air
       furnaceProgress = 0f
@@ -4787,7 +5412,7 @@ final class Blockbox:
     furnaceProgress = 4f
     furnaceOutput = out
     furnaceOutputCount += amount
-    if inventory(furnaceInput.ordinal) <= 0 then furnaceInput = Block.Air
+    if totalItemCount(furnaceInput) <= 0 then furnaceInput = Block.Air
     if furnaceFuelRemaining <= 0f then
       furnaceFuelRemaining = 0f
       furnaceFuel = Block.Air
@@ -4994,8 +5619,14 @@ final class Blockbox:
       val lz = wz - cz * Terrain.chunkSize
       if lx >= 0 && lx < Terrain.chunkSize && wy >= 0 && wy < Terrain.worldHeight && lz >= 0 && lz < Terrain.chunkSize then
         chunk.setBlock(lx, wy, lz, block)
-        if block == Block.Water then waterLevels((wx, wy, wz)) = 7.toByte
-        else waterLevels.remove((wx, wy, wz))
+        if block == Block.Water then
+          val level = networkWaterLevelOverrides.get((wx, wy, wz)).map(b => (b.toInt & 0xFF).max(1).min(8)).getOrElse(8)
+          chunk.setWaterLevel(lx, wy, lz, level)
+          waterLevels((wx, wy, wz)) = level.toByte
+          markWaterActive(wx, wy, wz)
+        else
+          chunk.setWaterLevel(lx, wy, lz, 0)
+          waterLevels.remove((wx, wy, wz))
         changed = true
 
     val overrideKeys = networkBlockOverrides.keys.filter { case (wx, _, wz) => chunkCoordBlock(wx) == cx && chunkCoordBlock(wz) == cz }.toList
@@ -5062,7 +5693,8 @@ final class Blockbox:
     // hitching while still avoiding the old race-condition void bug.
     if chunkGenPool != null then return
     chunkGenRunning = true
-    val threads = 1
+    val cores = Runtime.getRuntime.availableProcessors().max(1)
+    val threads = if cores >= 6 then 2 else 1
     chunkGenPool = java.util.concurrent.Executors.newFixedThreadPool(threads)
     for i <- 0 until threads do
       chunkGenPool.submit(new Runnable:
@@ -5185,8 +5817,12 @@ final class Blockbox:
 
   private def sendBlockNetwork(x: Int, y: Int, z: Int, blockId: Byte): Unit =
     if multiplayerMode then
-      networkBlockOverrides((x, y, z)) = Block.fromId(blockId)
-      val msg = s"BLOC|$x|$y|$z|$blockId"
+      val block = Block.fromId(blockId)
+      networkBlockOverrides((x, y, z)) = block
+      if block == Block.Water then networkWaterLevelOverrides((x, y, z)) = waterLevelAt(x, y, z).max(1).min(8).toByte
+      else networkWaterLevelOverrides.remove((x, y, z))
+      val levelPart = if block == Block.Water then "|" + waterLevelAt(x, y, z).max(1).min(8).toString else ""
+      val msg = s"BLOC|$x|$y|$z|$blockId$levelPart"
       if gameClient != null && gameClient.isConnected then gameClient.send(msg)
       else if gameServer != null then gameServer.broadcast(msg)
 
@@ -5211,10 +5847,10 @@ final class Blockbox:
       else
         val (x, y, z) = hit.place
         val block = hotbarBlocks(selectedBlock.max(0).min(hotbarBlocks.length - 1))
-        val hasBlock = block != Block.Air && (gameMode == GameMode.Creative || inventory(block.ordinal) > 0)
+        val hasBlock = block != Block.Air && (gameMode == GameMode.Creative || hotbarCounts(selectedBlock.max(0).min(hotbarCounts.length - 1)) > 0)
         if hasBlock && canPlaceBlockAt(x, y, z) then
           setActiveBlock(x, y, z, block)
-          if gameMode == GameMode.Survival then consumeInventory(block, 1)
+          if gameMode == GameMode.Survival then consumeSelectedHotbar(1)
           dirtyChunkAt(x, z)
           // Sand currently behaves like a normal block.
           playPlaceSound()
@@ -5238,7 +5874,7 @@ final class Blockbox:
   private def renderRayLine(): Unit =
     val dir = viewDirection; val end = camera + dir * 8f
     glDisable(GL_DEPTH_TEST); glLineWidth(2f); glColor4f(0f, 1f, 0f, 0.6f)
-    glBegin(GL_LINES); glVertex3f(camera.x, camera.y, camera.z); glVertex3f(end.x, end.y, end.z); glEnd()
+    glBegin(GL_LINES); glVertex3f(0f, camera.y, 0f); glVertex3f(end.x - camera.x, end.y, end.z - camera.z); glEnd()
     glLineWidth(1f); glEnable(GL_DEPTH_TEST)
 
   private def renderChunkBorders(): Unit =
@@ -5246,10 +5882,11 @@ final class Blockbox:
     glBegin(GL_LINES)
     chunks.keys.foreach { case (cx, cz) =>
       val x = cx * 16; val z = cz * 16
-      glVertex3f(x.toFloat, 0f, z.toFloat); glVertex3f((x + 16).toFloat, 0f, z.toFloat)
-      glVertex3f((x + 16).toFloat, 0f, z.toFloat); glVertex3f((x + 16).toFloat, 0f, (z + 16).toFloat)
-      glVertex3f((x + 16).toFloat, 0f, (z + 16).toFloat); glVertex3f(x.toFloat, 0f, (z + 16).toFloat)
-      glVertex3f(x.toFloat, 0f, (z + 16).toFloat); glVertex3f(x.toFloat, 0f, z.toFloat)
+      val rx = x.toFloat - camera.x; val rz = z.toFloat - camera.z
+      glVertex3f(rx, 0f, rz); glVertex3f(rx + 16f, 0f, rz)
+      glVertex3f(rx + 16f, 0f, rz); glVertex3f(rx + 16f, 0f, rz + 16f)
+      glVertex3f(rx + 16f, 0f, rz + 16f); glVertex3f(rx, 0f, rz + 16f)
+      glVertex3f(rx, 0f, rz + 16f); glVertex3f(rx, 0f, rz)
     }
     glEnd(); glEnable(GL_DEPTH_TEST); glLineWidth(1f)
 
@@ -5257,8 +5894,8 @@ final class Blockbox:
     raycast(8f).foreach { hit =>
       val (x, y, z) = hit.block
       glDisable(GL_DEPTH_TEST)
-      val e = 0.005f; val x0 = x - e; val x1 = x + 1f + e
-      val y0 = y - e; val y1 = y + 1f + e; val z0 = z - e; val z1 = z + 1f + e
+      val e = 0.005f; val x0 = x - camera.x - e; val x1 = x - camera.x + 1f + e
+      val y0 = y - e; val y1 = y + 1f + e; val z0 = z - camera.z - e; val z1 = z - camera.z + 1f + e
       glLineWidth(3f); glBegin(GL_LINES)
       glColor4f(0f, 0f, 0f, 0.5f)
       lineEdges(x0, y0, z0, x1, y1, z1)
@@ -5282,19 +5919,9 @@ final class Blockbox:
     glVertex3f(x0, y1, z0); glVertex3f(x0, y1, z1)
 
   private def initChunkWaterLevels(cx: Int, cz: Int): Unit =
-    val baseX = cx * Terrain.chunkSize
-    val baseZ = cz * Terrain.chunkSize
-    val minY = (Terrain.seaLevel - 10).max(0)
-    val maxY = (Terrain.seaLevel + 8).min(Terrain.worldHeight - 1)
-    val chunk = chunks.get((cx, cz))
-    for lx <- 0 until Terrain.chunkSize; lz <- 0 until Terrain.chunkSize do
-      var y = minY
-      while y <= maxY do
-        val wx = baseX + lx; val wz = baseZ + lz
-        chunk match
-          case Some(c) => if c.getBlock(lx, y, lz) == Block.Water then waterLevels((wx, y, wz)) = 7
-          case None => if activeBlockAt(wx, y, wz) == Block.Water then waterLevels((wx, y, wz)) = 7
-        y += 1
+    // Do not register generated oceans/lakes into the dynamic water simulator.
+    // Natural water is static terrain. Only player-placed/flowing water enters waterLevels.
+    ()
 
   private def saveChunk(cx: Int, cz: Int): Unit =
     if !canUseLocalChunkSaves then return
