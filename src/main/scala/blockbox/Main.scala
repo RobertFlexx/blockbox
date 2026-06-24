@@ -906,6 +906,12 @@ final class GameServer(
       (0 until colorCount).find(c => !used.contains(c)).getOrElse((used.size + 1) % colorCount)
     }
 
+  private def isNameInUse(name: String): Boolean =
+    val safe = safeName(name)
+    safe.equalsIgnoreCase(safeHostName) || clients.synchronized {
+      clients.exists(c => c.active && c.registered && c.onlineName.equalsIgnoreCase(safe))
+    }
+
   private def registerClient(client: ClientHandler): Unit =
     clients.synchronized {
       if !clients.exists(_ eq client) then clients += client
@@ -953,26 +959,29 @@ final class GameServer(
             send("PONG|BLOCKBOX|1")
             active = false
           else if line.startsWith("HELO|") then
-            onlineName =
-              if parts.length >= 2 && parts(1).nonEmpty then
-                parts(1).filter(ch => ch.isLetterOrDigit || ch == '_' || ch == '-').take(16)
+            val requestedName =
+              if parts.length >= 2 && parts(1).nonEmpty then safeName(parts(1))
               else "Player"
-            if onlineName.isEmpty then onlineName = "Player"
-            colorId = assignColor()
-            val worldMsg = "WORLD|" + worldSeed.toString + "|" + f"${spawn.x}%.3f" + "|" + f"${spawn.y}%.3f" + "|" + f"${spawn.z}%.3f" + "|" + colorId.toString + "|" + safeHostName + "|" + safeHostColor.toString
-            send(worldMsg)
-            send("PLAYERS|" + activePlayerTokensSnapshot.mkString("|"))
-            val snapshot =
-              try worldSnapshot().take(50000)
-              catch case _: Exception => Seq.empty[(Int, Int, Int, Byte)]
-            send("SNAPBEGIN|" + snapshot.length.toString)
-            snapshot.foreach { case (sx, sy, sz, sid) => send("BLOC|" + sx + "|" + sy + "|" + sz + "|" + sid.toString) }
-            send("SNAPEND")
-            registered = true
-            registerClient(this)
-            val joinMsg = s"JOIN|$onlineName|$colorId"
-            serverEvents.put(joinMsg)
-            broadcast(joinMsg)
+            if isNameInUse(requestedName) then
+              send("ERR|NAME_TAKEN|That name is already in this world")
+              active = false
+            else
+              onlineName = requestedName
+              colorId = assignColor()
+              val worldMsg = "WORLD|" + worldSeed.toString + "|" + f"${spawn.x}%.3f" + "|" + f"${spawn.y}%.3f" + "|" + f"${spawn.z}%.3f" + "|" + colorId.toString + "|" + safeHostName + "|" + safeHostColor.toString
+              send(worldMsg)
+              send("PLAYERS|" + activePlayerTokensSnapshot.mkString("|"))
+              val snapshot =
+                try worldSnapshot().take(50000)
+                catch case _: Exception => Seq.empty[(Int, Int, Int, Byte)]
+              send("SNAPBEGIN|" + snapshot.length.toString)
+              snapshot.foreach { case (sx, sy, sz, sid) => send("BLOC|" + sx + "|" + sy + "|" + sz + "|" + sid.toString) }
+              send("SNAPEND")
+              registered = true
+              registerClient(this)
+              val joinMsg = s"JOIN|$onlineName|$colorId"
+              serverEvents.put(joinMsg)
+              broadcast(joinMsg)
           else if registered && line.startsWith("BLOC|") then
             if parts.length >= 5 then
               val x = parts(1).toInt; val y = parts(2).toInt; val z = parts(3).toInt
@@ -1046,6 +1055,11 @@ final class GameClient(host: String, port: Int):
       val firstLine = in.readLine()
       if firstLine == null then
         lastError = "Server closed the connection before sending world data."
+        disconnect()
+        return false
+      if firstLine.startsWith("ERR|") then
+        val parts = firstLine.split("\\|", -1)
+        lastError = if parts.length >= 3 then parts.drop(2).mkString(" ") else firstLine
         disconnect()
         return false
       if !firstLine.startsWith("WORLD|") then
@@ -1133,7 +1147,7 @@ final class Blockbox:
   private var breakingProgress = 0f
   private val placeableBlocks = Array(Block.Grass, Block.Dirt, Block.Stone, Block.Sand, Block.Wood, Block.Planks, Block.Leaves, Block.Brick, Block.Glass, Block.Snow, Block.Clay, Block.Coal, Block.Copper, Block.IronOre, Block.GoldOre, Block.Diamond, Block.Furnace)
   private val inventory = Array.fill(Block.values.length)(0)
-  private val hotbarBlocks: Array[Block] = Array.tabulate(10)(i => if i < placeableBlocks.length then placeableBlocks(i) else Block.Air)
+  private val hotbarBlocks: Array[Block] = Array.fill(10)(Block.Air)
   private var selectedBlock = 0
   private var heldInventoryBlock: Block = Block.Air
   private var catalogScroll = 0
@@ -1841,15 +1855,14 @@ final class Blockbox:
     val invX = px + 28f * s
     val invY = py + 76f * s
     val items = inventoryItems
-    for i <- items.indices do
+    for i <- 0 until inventoryGridSlots do
       val col = i % cols
       val row = i / cols
       val sx = invX + col * (slot + gap)
       val sy = invY + row * (slot + gap)
       if inRect(mx, my, sx, sy, slot, slot) then
-        val block = items(i)
-        if gameMode == GameMode.Creative then inventory(block.ordinal) = inventory(block.ordinal).max(64)
-        if gameMode == GameMode.Creative || inventory(block.ordinal) > 0 then
+        if i < items.length then
+          val block = items(i)
           heldInventoryBlock = block
         else
           heldInventoryBlock = Block.Air
@@ -2354,7 +2367,7 @@ final class Blockbox:
   private def resetHotbarDefaults(): Unit =
     var i = 0
     while i < hotbarBlocks.length do
-      hotbarBlocks(i) = if i < placeableBlocks.length then placeableBlocks(i) else Block.Air
+      hotbarBlocks(i) = Block.Air
       i += 1
     selectedBlock = selectedBlock.max(0).min(hotbarBlocks.length - 1)
     heldInventoryBlock = Block.Air
@@ -2508,18 +2521,12 @@ final class Blockbox:
           case _ => addChatMessage("Usage: /gamemode <survival|creative>")
       case "timeset" =>
         val when = if args.length > 1 then args(1).toLowerCase else ""
-        val currentTime = gameTime
-        val currentPhase = ((currentTime * 0.018f) % (2f * Pi.toFloat)) / (2f * Pi.toFloat)
         when match
           case "day" =>
-            val targetPhase = 0.50f
-            val diff = (targetPhase - currentPhase + 1f) % 1f
-            timeOverride = Some(currentTime + diff / 0.018f * Pi.toFloat)
+            timeOverride = Some(dayLengthSeconds * 0.25f)
             addChatMessage("Set time to day")
           case "night" =>
-            val targetPhase = 0.0f
-            val diff = (targetPhase - currentPhase + 1f) % 1f
-            timeOverride = Some(currentTime + diff / 0.018f * Pi.toFloat)
+            timeOverride = Some(dayLengthSeconds + nightLengthSeconds * 0.25f)
             addChatMessage("Set time to night")
           case "reset" =>
             timeOverride = None
@@ -3347,12 +3354,14 @@ final class Blockbox:
         val p = rp.pos
         val feetY = p.y - 1.62f
         val (cr, cg, cb) = colorForId(rp.colorId)
-        // Opaque player bodies avoid the black translucent sheet artifact that appeared
-        // when a second local client joined and the blended player quads overlapped terrain.
-        drawColoredBox(p.x - 0.30f, feetY, p.z - 0.20f, p.x + 0.30f, feetY + 1.05f, p.z + 0.20f, cr, cg, cb, 1f)
-        drawColoredBox(p.x - 0.23f, feetY + 1.05f, p.z - 0.23f, p.x + 0.23f, feetY + 1.48f, p.z + 0.23f, 0.90f, 0.74f, 0.55f, 1f)
-        drawColoredBox(p.x - 0.18f, feetY - 0.02f, p.z - 0.18f, p.x - 0.02f, feetY + 0.62f, p.z + 0.18f, cr * 0.72f, cg * 0.72f, cb * 0.72f, 1f)
-        drawColoredBox(p.x + 0.02f, feetY - 0.02f, p.z - 0.18f, p.x + 0.18f, feetY + 0.62f, p.z + 0.18f, cr * 0.72f, cg * 0.72f, cb * 0.72f, 1f)
+        glPushMatrix()
+        glTranslatef(p.x, 0f, p.z)
+        glRotatef(-rp.yaw, 0f, 1f, 0f)
+        drawColoredBox(-0.30f, feetY, -0.20f, 0.30f, feetY + 1.05f, 0.20f, cr, cg, cb, 1f)
+        drawColoredBox(-0.23f, feetY + 1.05f, -0.23f, 0.23f, feetY + 1.48f, 0.23f, 0.90f, 0.74f, 0.55f, 1f)
+        drawColoredBox(-0.18f, feetY - 0.02f, -0.18f, -0.02f, feetY + 0.62f, 0.18f, cr * 0.72f, cg * 0.72f, cb * 0.72f, 1f)
+        drawColoredBox(0.02f, feetY - 0.02f, -0.18f, 0.18f, feetY + 0.62f, 0.18f, cr * 0.72f, cg * 0.72f, cb * 0.72f, 1f)
+        glPopMatrix()
     glEnable(GL_FOG)
 
   private def drawColoredBox(x0: Float, y0: Float, z0: Float, x1: Float, y1: Float, z1: Float, r: Float, g: Float, b: Float, a: Float): Unit =
@@ -3597,8 +3606,6 @@ final class Blockbox:
             val ny = y + slotSize - 12f * countScale - 2f * s
             rect(nx - 2f * s, ny - 1f * s, tw + 4f * s, 11f * countScale + 3f * s, 0f, 0f, 0f, 0.64f)
             renderTextShadow(nx, ny, ns, 1f, 1f, 1f, countScale)
-      else
-        centeredTextFit(sx + slotSize / 2f, y + slotSize * 0.56f, "empty", 0.30f, 0.34f, 0.42f, 0.42f * s, slotSize - 6f * s)
       val label = hotbarLabel(i)
       centeredTextBox(sx + 1f * s, y + 1f * s, slotSize - 2f * s, labelBandH, label, 0.97f, 0.97f, 0.99f, (1.14f * s).max(0.96f).min(slotSize / 12.8f))
 
@@ -3668,13 +3675,29 @@ final class Blockbox:
       val b = (0.34f + 0.65f * daylight).max(0.06f).min(0.98f)
       (r, g, b)
 
+  private val dayLengthSeconds = 10f * 60f
+  private val nightLengthSeconds = 8f * 60f
+  private val dayNightCycleSeconds = dayLengthSeconds + nightLengthSeconds
+
   private def gameTime: Float = timeOverride.getOrElse(glfwGetTime().toFloat)
 
+  private def cycleClock: Float =
+    val raw = gameTime % dayNightCycleSeconds
+    if raw < 0f then raw + dayNightCycleSeconds else raw
+
   private def dayPhase: Float =
-    ((gameTime * 0.018f) % (2f * Pi.toFloat)) / (2f * Pi.toFloat)
+    val t = cycleClock
+    if t < dayLengthSeconds then (t / dayLengthSeconds) * 0.5f
+    else 0.5f + ((t - dayLengthSeconds) / nightLengthSeconds) * 0.5f
 
   private def daylightFactor: Float =
-    (0.5f + 0.5f * cos(dayPhase * 2.0 * Pi).toFloat).max(0.18f).min(1f)
+    val t = cycleClock
+    if t < dayLengthSeconds then
+      val p = (t / dayLengthSeconds).max(0f).min(1f)
+      (0.55f + 0.45f * sin(p * Pi).toFloat).max(0.48f).min(1f)
+    else
+      val p = ((t - dayLengthSeconds) / nightLengthSeconds).max(0f).min(1f)
+      (0.18f + 0.10f * sin(p * Pi).toFloat).max(0.18f).min(0.34f)
 
   private def smooth01(v: Float): Float =
     val t = v.max(0f).min(1f); t * t * (3f - 2f * t)
@@ -4270,16 +4293,17 @@ final class Blockbox:
 
     rect(invX - 10f * s, invY - 28f * s, gridW + 18f * s, ph - 140f * s, 0.045f, 0.060f, 0.085f, 0.68f)
     renderTextShadow(invX, invY - 20f * s, "Blocks & Items", 0.78f, 0.84f, 0.96f, 0.70f * s)
-    for i <- items.indices do
+    for i <- 0 until inventoryGridSlots do
       val col = i % cols; val row = i / cols
       val sx = invX + col * (slot + gap); val sy = invY + row * (slot + gap)
-      val block = items(i)
-      val count = inventory(block.ordinal)
-      val isSelected = hotbarBlocks.isDefinedAt(selectedBlock) && hotbarBlocks(selectedBlock) == block
+      val hasItem = i < items.length
+      val block = if hasItem then items(i) else Block.Air
+      val count = if hasItem then inventory(block.ordinal) else 0
+      val isSelected = hasItem && hotbarBlocks.isDefinedAt(selectedBlock) && hotbarBlocks(selectedBlock) == block
       val hover = inRect(mx, my, sx, sy, slot, slot)
-      if hover then
+      if hover && hasItem then
         hoveredBlock = block; hoveredX = sx + slot / 2f; hoveredY = sy
-      val base = if hover then 0.135f else 0.075f
+      val base = if hover then 0.115f else 0.075f
       rect(sx - 1f * s, sy - 1f * s, slot + 2f * s, slot + 2f * s, 0.015f, 0.017f, 0.022f, 0.78f)
       rect(sx, sy, slot, slot, base, base + 0.01f, base + 0.035f, 0.90f)
       rect(sx + 1f * s, sy + 1f * s, slot - 2f * s, 2f * s, 0.18f, 0.20f, 0.24f, 0.16f)
@@ -4288,7 +4312,7 @@ final class Blockbox:
         rect(sx - 2f * s, sy + slot, slot + 4f * s, 2f * s, 1f, 0.92f, 0.42f, 0.55f)
         rect(sx - 2f * s, sy - 2f * s, 2f * s, slot + 4f * s, 1f, 0.92f, 0.42f, 0.55f)
         rect(sx + slot, sy - 2f * s, 2f * s, slot + 4f * s, 1f, 0.92f, 0.42f, 0.55f)
-      if count > 0 then
+      if hasItem && count > 0 then
         val icon = (slot * 0.58f).min(26f * s).max(16f)
         renderBlockIcon(block, sx + (slot - icon) / 2f, sy + (slot - icon) / 2f, icon)
         val ns = count.toString
@@ -4298,8 +4322,6 @@ final class Blockbox:
         val ny = sy + slot - 12f * countScale - 2f * s
         rect(nx - 2f * s, ny - 1f * s, tw + 4f * s, 11f * countScale + 3f * s, 0f, 0f, 0f, 0.64f)
         renderText(nx, ny, ns, 1f, 1f, 1f, countScale)
-      else
-        centeredTextFit(sx + slot / 2f, sy + slot / 2f - 4f * s, "0", 0.28f, 0.30f, 0.34f, 0.46f * s, slot - 6f * s)
 
     val craftPanelW = (pw - gridW - 78f * s).max(210f * s)
     val craftX = px + pw - 28f * s - craftPanelW
@@ -4401,7 +4423,9 @@ final class Blockbox:
     block.toString.replaceAll("([a-z])([A-Z])", "$1 $2")
 
   private def inventoryItems: Array[Block] =
-    Block.values.filter(b => b != Block.Air && b != Block.Water)
+    Block.values.filter(b => b != Block.Air && b != Block.Water && inventory(b.ordinal) > 0)
+
+  private val inventoryGridSlots = 24
 
   private def drawInventoryHotbar(panelX: Float, panelY: Float, panelW: Float, s: Float, mx: Float, my: Float): Unit =
     val total = hotbarBlocks.length
@@ -4474,19 +4498,21 @@ final class Blockbox:
     val rowH = (38f * s).max(30f)
     rect(listX - 8f * s, listY - 34f * s, listW + 16f * s, rowH * smeltableInputs.length + 48f * s, 0.045f, 0.060f, 0.085f, 0.72f)
     centeredTextFit(listX + listW / 2f, listY - 24f * s, "Choose input", 0.80f, 0.86f, 1f, 0.66f * s, listW)
-    for i <- smeltableInputs.indices do
-      val b = smeltableInputs(i)
+    val furnaceItems = inventoryItems.filter(b => smeltResult(b).nonEmpty)
+    for i <- 0 until inventoryGridSlots.min(6) do
+      val b = if i < furnaceItems.length then furnaceItems(i) else Block.Air
       val y = listY + i * rowH
-      val count = inventory(b.ordinal)
-      val selected = furnaceInput == b
+      val count = if b == Block.Air then 0 else inventory(b.ordinal)
+      val selected = b != Block.Air && furnaceInput == b
       val hover = inRect(mx, my, listX, y, listW, rowH - 4f * s)
       val br = if selected then 0.30f else if hover then 0.18f else 0.095f
-      rect(listX, y, listW, rowH - 4f * s, br, br * 1.06f, br * 1.16f, if count > 0 then 0.92f else 0.52f)
+      rect(listX, y, listW, rowH - 4f * s, br, br * 1.06f, br * 1.16f, if b != Block.Air then 0.92f else 0.52f)
       rect(listX + 1f * s, y + 1f * s, listW - 2f * s, 2f * s, 1f, 1f, 1f, 0.06f)
-      val icon = (rowH * 0.52f).min(22f * s).max(16f)
-      if count > 0 then renderBlockIcon(b, listX + 8f * s, y + (rowH - icon) / 2f - 2f * s, icon)
-      renderTextShadow(listX + 38f * s, y + 8f * s, blockName(b), if count > 0 then 0.88f else 0.44f, if count > 0 then 0.90f else 0.46f, if count > 0 then 0.86f else 0.50f, 0.54f * s)
-      centeredTextFit(listX + listW - 28f * s, y + 8f * s, s"x$count", 0.80f, 0.84f, 0.92f, 0.50f * s, 48f * s)
+      if b != Block.Air && count > 0 then
+        val icon = (rowH * 0.52f).min(22f * s).max(16f)
+        renderBlockIcon(b, listX + 8f * s, y + (rowH - icon) / 2f - 2f * s, icon)
+        renderTextShadow(listX + 38f * s, y + 8f * s, blockName(b), 0.88f, 0.90f, 0.86f, 0.54f * s)
+        centeredTextFit(listX + listW - 28f * s, y + 8f * s, s"x$count", 0.80f, 0.84f, 0.92f, 0.50f * s, 48f * s)
 
     val workX = listX + listW + 34f * s
     val workW = px + pw - 28f * s - workX
@@ -4537,13 +4563,17 @@ final class Blockbox:
 
     val bh = (36f * s).min(38f).max(30f)
     val buttonY = py + ph - 52f * s
-    val smeltW = (130f * s).min(workW * 0.30f).max(100f)
-    val allW = (120f * s).min(workW * 0.28f).max(92f)
-    val takeW = (100f * s).min(workW * 0.24f).max(80f)
-    drawButton(workX + 8f * s, buttonY, smeltW, bh, "Smelt One", accent = true)
-    drawButton(workX + 18f * s + smeltW, buttonY, allW, bh, "Smelt All")
-    drawButton(workX + 28f * s + smeltW + allW, buttonY, takeW, bh, "Take")
-    drawButton(px + pw - 104f * s, py + ph - 52f * s, 82f * s, bh, "Close")
+    val buttonGap = 8f * s
+    val totalButtonW = workW - 16f * s
+    val smeltW = totalButtonW * 0.30f
+    val allW = totalButtonW * 0.25f
+    val takeW = totalButtonW * 0.20f
+    val closeW = totalButtonW - smeltW - allW - takeW - buttonGap * 3f
+    val b0 = workX + 8f * s
+    drawButton(b0, buttonY, smeltW, bh, "Smelt One", accent = true)
+    drawButton(b0 + smeltW + buttonGap, buttonY, allW, bh, "Smelt All")
+    drawButton(b0 + smeltW + allW + buttonGap * 2f, buttonY, takeW, bh, "Take")
+    drawButton(b0 + smeltW + allW + takeW + buttonGap * 3f, buttonY, closeW.max(70f * s), bh, "Close")
 
   private def handleFurnaceClick(mx: Float, my: Float): Unit =
     val cx = framebufferWidth / 2f; val cy = framebufferHeight / 2f; val s = uiScale
@@ -4554,26 +4584,49 @@ final class Blockbox:
     val listY = py + 82f * s
     val listW = (210f * s).min(pw * 0.34f).max(160f * s)
     val rowH = (38f * s).max(30f)
-    for i <- smeltableInputs.indices do
+    val furnaceItems = inventoryItems.filter(b => smeltResult(b).nonEmpty)
+    for i <- 0 until inventoryGridSlots.min(6) do
       val y = listY + i * rowH
       if inRect(mx, my, listX, y, listW, rowH - 4f * s) then
-        val b = smeltableInputs(i)
-        if inventory(b.ordinal) > 0 then
+        if i < furnaceItems.length then
+          val b = furnaceItems(i)
           furnaceInput = b
           furnaceProgress = 0f
-        else addChatMessage(s"No ${blockName(b)} to smelt")
+        else furnaceInput = Block.Air
         return
+
     val workX = listX + listW + 34f * s
     val workW = px + pw - 28f * s - workX
+    val slot = (68f * s).min(74f).max(52f)
+    val inputX = workX + 8f * s
+    val inputY = py + 94f * s
+    val outputX = workX + workW - slot - 8f * s
+    val outputY = inputY
+    if inRect(mx, my, inputX, inputY, slot, slot) then
+      if heldInventoryBlock != Block.Air && smeltResult(heldInventoryBlock).nonEmpty && inventory(heldInventoryBlock.ordinal) > 0 then
+        furnaceInput = heldInventoryBlock
+        furnaceProgress = 0f
+      else if heldInventoryBlock == Block.Air then
+        furnaceInput = Block.Air
+        furnaceProgress = 0f
+      else addChatMessage("That item cannot be smelted")
+      return
+    if inRect(mx, my, outputX, outputY, slot, slot) then
+      takeFurnaceOutput()
+      return
     val bh = (36f * s).min(38f).max(30f)
     val buttonY = py + ph - 52f * s
-    val smeltW = (130f * s).min(workW * 0.30f).max(100f)
-    val allW = (120f * s).min(workW * 0.28f).max(92f)
-    val takeW = (100f * s).min(workW * 0.24f).max(80f)
-    if inRect(mx, my, workX + 8f * s, buttonY, smeltW, bh) then smeltFurnace()
-    else if inRect(mx, my, workX + 18f * s + smeltW, buttonY, allW, bh) then smeltAllFurnace()
-    else if inRect(mx, my, workX + 28f * s + smeltW + allW, buttonY, takeW, bh) then takeFurnaceOutput()
-    else if inRect(mx, my, px + pw - 104f * s, py + ph - 52f * s, 82f * s, bh) then enterGame()
+    val buttonGap = 8f * s
+    val totalButtonW = workW - 16f * s
+    val smeltW = totalButtonW * 0.30f
+    val allW = totalButtonW * 0.25f
+    val takeW = totalButtonW * 0.20f
+    val closeW = totalButtonW - smeltW - allW - takeW - buttonGap * 3f
+    val b0 = workX + 8f * s
+    if inRect(mx, my, b0, buttonY, smeltW, bh) then smeltFurnace()
+    else if inRect(mx, my, b0 + smeltW + buttonGap, buttonY, allW, bh) then smeltAllFurnace()
+    else if inRect(mx, my, b0 + smeltW + allW + buttonGap * 2f, buttonY, takeW, bh) then takeFurnaceOutput()
+    else if inRect(mx, my, b0 + smeltW + allW + takeW + buttonGap * 3f, buttonY, closeW.max(70f * s), bh) then enterGame()
 
   private def pickFurnaceInput(): Unit =
     val picked: Option[Block] = smeltableInputs.find(b => inventory(b.ordinal) > 0)
