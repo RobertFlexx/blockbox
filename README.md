@@ -1,63 +1,228 @@
-# Blockbox
+# blockbox
 
-Blockbox is a free and open source Scala voxel sandbox prototype. It aims for familiar blocky worlds while building its own identity, mechanics, and codebase.
+blockbox is a free and open source voxel sandbox made in scala 3 with lwjgl.
 
-## Current State
+this is not some giant studio project. it is made by one guy, robertflexx. i work very hard on it and i am building it piece by piece because i like blocky games, weird game engines, linux, jvm stuff, and making things from scratch.
 
-This is a first playable slice:
+the goal is to have a familiar blocky sandbox feeling, but not just be a cheap copy of anything. blockbox has its own codebase, its own messy little history, and its own direction.
 
-- Main menu, settings screen, pause flow, and in-game HUD text.
-- Procedural blocky terrain with grass, dirt, stone, sand, water, wood, planks, glass, and leafy blocks.
-- Chunk-style mesh building with hidden faces skipped before upload.
-- Survival and creative modes with mouse look, block breaking, and block placement.
-- Framebuffer-aware rendering for resized/HiDPI windows.
-- Larger Minecraft-like worlds with beaches, mountains, snow, caves, ores, forests, shrubs, water, and simple generated structures.
-- Render-distance settings with dynamic mesh rebuilds around the player.
-- Gravity, jumping, basic player collision, hotbar inventory, and simple wandering mobs.
-- Generated pixel-art block textures, translucent water/glass/leaves, smoother biome terrain, cave carving, improved mobs, health bars, and damage feedback.
-- Accurate crosshair-based voxel picking for block breaking and placement.
-- Sprinting, swimming, buoyancy, underwater fog, and a subtle underwater overlay.
-- Scala 3 + LWJGL, no proprietary assets.
+it is still early, still rough, and still changing a lot, but it is already playable.
 
-## Requirements
+## what it is right now
 
-- Java 21 or newer.
-- `scala-cli`.
-- Linux desktop with OpenGL support.
+blockbox is a first playable slice of a voxel sandbox.
 
-## Run
+right now it has:
+
+* a main menu
+* a new world screen
+* a load world screen
+* settings
+* pause menu
+* in-game hud
+* survival and creative modes
+* mouse look
+* block breaking
+* block placing
+* hotbar
+* inventory work
+* world saving and loading
+* procedural terrain
+* chunks
+* caves
+* beaches
+* mountains
+* snow
+* forests
+* shrubs
+* ores
+* water
+* simple structures
+* simple mobs
+* health and food ui
+* sprinting
+* swimming
+* buoyancy
+* underwater fog
+* crosshair based block picking
+* generated pixel style block textures
+* transparent glass, water, and leaves
+* render distance settings
+* basic multiplayer experiments
+* chat
+* commands
+* no proprietary assets
+
+it is not finished, but it is real and it runs.
+
+## why i am making it
+
+i wanted to make a block game that feels handmade.
+
+not a polished corporate thing. not a template. not a fake project that only has a screenshot and nothing else. and no paid bullshit, fully free and fucking open source and auditable.
+
+i wanted something that actually has code, terrain, saving, ui, bugs, fixes, multiplayer attempts, weird experiments, and all the stuff that happens when one person is trying to build a game for real.
+
+blockbox is me learning, building, fixing, breaking things, and making it better over time.
+
+## requirements
+
+you need:
+
+* java 21 or newer
+* scala-cli
+* opengl support
+* a desktop that can run lwjgl
+
+linux is the main setup right now, but windows launch scripts are included in newer builds.
+
+## running on linux
+
+from the project folder:
 
 ```bash
 bash scripts/run.sh
 ```
 
-The first run downloads LWJGL dependencies and Linux native libraries.
+the first run will download scala and lwjgl dependencies through scala-cli.
 
-On Linux, X11/XWayland is the supported launch path right now. If your desktop session is Wayland and the window does not appear, run:
+if you are on wayland and the window does not show up, try forcing x11:
 
 ```bash
-GLFW_PLATFORM=x11 bash scripts/run.sh
+glfw_platform=x11 bash scripts/run.sh
 ```
 
-## Controls
+## running on windows
 
-- `Enter`: Start game from the main menu.
-- `S`: Settings from the main menu.
-- `Esc`: Pause in game, return/back in menus.
-- `W/A/S/D`: Move.
-- `Space`: Jump in survival, move up in creative.
-- `Left Control`: Sprint in survival.
-- `Left Shift`: Swim down in survival water, move down in creative.
-- Mouse: Look around in game.
-- Left mouse: Break targeted block.
-- Right mouse: Place selected block.
-- `1`-`9`, `0`: Select build block.
-- `R`: Regenerate the world.
-- `M`: Toggle survival/creative mode.
-- `F`: Toggle fast movement in settings.
-- `V`: Toggle VSync in settings.
-- `Left`/`Right` or `-`/`+`: Adjust render distance in settings.
+newer builds include:
 
-## Direction
+```text
+run-blockbox-windows.bat
+```
 
-Next milestones should add saved worlds, richer terrain biomes, inventory/crafting, audio, configurable controls, better mob AI, and multiplayer experiments.
+or:
+
+```text
+scripts\run-blockbox-windows.bat
+```
+
+the windows script tries to set up what it needs and loads the lwjgl windows native jars.
+
+## controls
+
+basic controls:
+
+* `w/a/s/d` moves
+* mouse looks around
+* left click breaks a block
+* right click places a block
+* `space` jumps in survival
+* `space` moves up in creative
+* `left control` sprints
+* `left shift` swims down in water or moves down in creative
+* `1` to `9` and `0` select hotbar slots
+* `e` opens inventory or creative catalog
+* `esc` pauses
+* `t` opens chat
+* `/` opens chat with command mode
+* `tab` can autocomplete commands
+* up and down can move through command suggestions
+* `f3` toggles debug info
+* `f4` toggles wireframe
+* `f5` toggles chunk borders
+
+settings controls:
+
+* `f` toggles fast movement
+* `v` toggles vsync
+* left and right, or `-` and `+`, adjust render distance
+* `p` changes how escape behaves from the pause menu
+
+## commands
+
+some commands exist for testing and messing with worlds.
+
+examples:
+
+```text
+/help
+/enablecheats
+/gamemode creative
+/gamemode survival
+/timeset day
+/timeset night
+/fly
+/tp playername
+/tp player1 player2
+/tp 0 90 0
+/tp playername 0 90 0
+```
+
+cheat commands need cheats enabled. in multiplayer, clients should not be able to just change their own gamemode from settings.
+
+## world saves
+
+blockbox saves worlds into:
+
+```text
+worlds/
+```
+
+each world gets its own folder.
+
+the newer save system tries to be safer by writing temporary files first, then replacing the real save files after the write finishes. corrupt chunks should be skipped instead of killing the whole world load.
+
+it is still early, but the goal is simple:
+
+when you leave a world and come back, it should look like how you left it.
+
+## multiplayer
+
+multiplayer is experimental.
+
+there is lan hosting and joining, player names, chat, player positions, block updates, and some server side checks.
+
+it is not perfect yet. chunk sync and usernames are still being improved. the goal is to make it feel more like a real little server instead of just a quick hacked together connection.
+
+## current problems
+
+blockbox is still a prototype, so there are bugs.
+
+things that still need work:
+
+* better multiplayer chunk sync
+* better player identity handling on servers
+* better inventory dragging
+* better mobs
+* better animations
+* better world generation
+* better sound
+* better crafting
+* better ui polish
+* better performance
+* better save management
+* better structure generation
+
+i am not pretending it is done. i am working on it.
+
+## direction
+
+i want blockbox to become a fun handmade voxel sandbox with:
+
+* better survival
+* better creative building
+* better terrain
+* better caves
+* better mobs
+* better structures
+* better multiplayer
+* better ui
+* better world saves
+* real crafting
+* more blocks
+* more items
+* more reasons to explore
+
+it is made by one guy, robertflexx, and i work very hard on it.
+
+that is basically the whole spirit of the project.
