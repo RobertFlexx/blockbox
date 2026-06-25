@@ -99,6 +99,11 @@ function Refresh-Path {
   $user = [System.Environment]::GetEnvironmentVariable("Path", "User")
   $process = [System.Environment]::GetEnvironmentVariable("Path", "Process")
   $env:Path = @($process, $machine, $user) -join ";"
+  Remove-EmptyPathSegments
+}
+
+function Remove-EmptyPathSegments {
+  $env:Path = (($env:Path -split ";") | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }) -join ";"
 }
 
 function Quote-CmdArg([string]$Arg) {
@@ -111,8 +116,9 @@ function Invoke-NativeLogged([string]$FileName, [string[]]$Arguments, [string]$O
   $command = (Quote-CmdArg $FileName) + " " + (($Arguments | ForEach-Object { Quote-CmdArg $_ }) -join " ")
   # Windows PowerShell turns native stderr records into NativeCommandError when 2>&1 is piped.
   # Merge stderr inside cmd.exe instead so downloader progress from scala-cli stays normal output.
-  & cmd.exe /d /c "$command 2>&1" | Tee-Object -FilePath $OutputLog -Append
-  return $LASTEXITCODE
+  & cmd.exe /d /c "$command 2>&1" | Tee-Object -FilePath $OutputLog -Append | ForEach-Object { Write-Host $_ }
+  $exitCode = $LASTEXITCODE
+  return $exitCode
 }
 
 function Get-JavaMajorVersion {
@@ -142,6 +148,8 @@ function Install-WithWinget($Ids, $FriendlyName) {
 
   throw "Could not install $FriendlyName with winget. Install it manually, then rerun this script."
 }
+
+Remove-EmptyPathSegments
 
 if ((Get-JavaMajorVersion) -lt 21) {
   Install-WithWinget @("EclipseAdoptium.Temurin.21.JDK") "Temurin JDK 21"
