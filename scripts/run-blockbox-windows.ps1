@@ -76,7 +76,7 @@ New-Item -ItemType Directory -Force -Path $RunDir | Out-Null
 $ProjectMain = Join-Path $ProjectRoot "src\main\scala\blockbox\Main.scala"
 if ([System.IO.Path]::GetFullPath($SourceFile) -eq [System.IO.Path]::GetFullPath($ProjectMain)) {
   Copy-Item -Recurse -Force (Join-Path $ProjectRoot "src") (Join-Path $RunDir "src")
-  $RunTarget = $RunDir
+  $RunTarget = Join-Path $RunDir "src\main\scala"
   $RunFile = Join-Path $RunDir "src\main\scala\blockbox\Main.scala"
 } else {
   $RunFile = Join-Path $RunDir "Main.scala"
@@ -145,6 +145,19 @@ function Get-LwjglNativeJars([string]$NativeDir) {
   }
 
   return $jars.ToArray()
+}
+
+function Show-ScalaCliStacktraces([string]$Text) {
+  $matches = [regex]::Matches($Text, "'([^']*\\.scala-build\\stacktraces\\[^']+\.log)'")
+  foreach ($match in $matches) {
+    $path = $match.Groups[1].Value
+    if (Test-Path $path) {
+      Write-Host ""
+      Write-Host "Scala CLI stacktrace: $path"
+      Write-Host ""
+      Get-Content -Path $path -Tail 120 -ErrorAction SilentlyContinue | ForEach-Object { Write-Host $_ }
+    }
+  }
 }
 
 function Get-JavaMajorVersion {
@@ -219,7 +232,9 @@ if ($Exit -ne 0) {
   Write-Host ""
   Write-Host "Last log lines:"
   Write-Host ""
-  Get-Content -Path $LogFile -Tail 80 -ErrorAction SilentlyContinue | ForEach-Object { Write-Host $_ }
+  $lastLog = @(Get-Content -Path $LogFile -Tail 80 -ErrorAction SilentlyContinue)
+  $lastLog | ForEach-Object { Write-Host $_ }
+  Show-ScalaCliStacktraces ($lastLog -join "`n")
   Write-Host ""
   Write-Host "Send blockbox-last-run.log, especially the FIRST [error] lines above."
   Write-Host "scala-cli exited with code $Exit"
