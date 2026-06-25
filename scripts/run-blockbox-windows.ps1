@@ -7,6 +7,7 @@ $LWJGL_NATIVE_CLASSIFIER = switch ($env:PROCESSOR_ARCHITECTURE) {
   "x86" { "natives-windows-x86"; break }
   default { "natives-windows"; break }
 }
+$LWJGL_MODULES = @("lwjgl", "lwjgl-glfw", "lwjgl-opengl", "lwjgl-stb")
 $ScriptPath = $MyInvocation.MyCommand.Path
 $ScriptDir = Split-Path -Parent $ScriptPath
 $CurrentDir = (Get-Location).Path
@@ -99,11 +100,14 @@ function Refresh-Path {
   $user = [System.Environment]::GetEnvironmentVariable("Path", "User")
   $process = [System.Environment]::GetEnvironmentVariable("Path", "Process")
   $env:Path = @($process, $machine, $user) -join ";"
-  Remove-EmptyPathSegments
+  Remove-EmptyPathSegments "Path"
 }
 
-function Remove-EmptyPathSegments {
-  $env:Path = (($env:Path -split ";") | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }) -join ";"
+function Remove-EmptyPathSegments([string]$Name) {
+  $value = [System.Environment]::GetEnvironmentVariable($Name, "Process")
+  if ([string]::IsNullOrEmpty($value)) { return }
+  $clean = (($value -split ";") | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }) -join ";"
+  [System.Environment]::SetEnvironmentVariable($Name, $clean, "Process")
 }
 
 function Quote-CmdArg([string]$Arg) {
@@ -113,12 +117,34 @@ function Quote-CmdArg([string]$Arg) {
 }
 
 function Invoke-NativeLogged([string]$FileName, [string[]]$Arguments, [string]$OutputLog) {
-  $command = (Quote-CmdArg $FileName) + " " + (($Arguments | ForEach-Object { Quote-CmdArg $_ }) -join " ")
-  # Windows PowerShell turns native stderr records into NativeCommandError when 2>&1 is piped.
-  # Merge stderr inside cmd.exe instead so downloader progress from scala-cli stays normal output.
-  & cmd.exe /d /c "$command 2>&1" | Tee-Object -FilePath $OutputLog -Append | ForEach-Object { Write-Host $_ }
-  $exitCode = $LASTEXITCODE
-  return $exitCode
+  $oldPreference = $ErrorActionPreference
+  try {
+    # Windows PowerShell turns native stderr records into NativeCommandError when ErrorActionPreference is Stop.
+    $ErrorActionPreference = "Continue"
+    & $FileName @Arguments 2>&1 | Tee-Object -FilePath $OutputLog -Append | ForEach-Object { Write-Host $_ }
+    $exitCode = $LASTEXITCODE
+    return $exitCode
+  } finally {
+    $ErrorActionPreference = $oldPreference
+  }
+}
+
+function Get-LwjglNativeJars([string]$NativeDir) {
+  New-Item -ItemType Directory -Force -Path $NativeDir | Out-Null
+  $jars = New-Object System.Collections.Generic.List[string]
+
+  foreach ($module in $LWJGL_MODULES) {
+    $fileName = "$module-$LWJGL_VERSION-$LWJGL_NATIVE_CLASSIFIER.jar"
+    $target = Join-Path $NativeDir $fileName
+    if (-not (Test-Path $target)) {
+      $url = "https://repo1.maven.org/maven2/org/lwjgl/$module/$LWJGL_VERSION/$fileName"
+      Write-Host "Blockbox: downloading $fileName..."
+      Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $target
+    }
+    [void]$jars.Add($target)
+  }
+
+  return $jars.ToArray()
 }
 
 function Get-JavaMajorVersion {
@@ -149,7 +175,8 @@ function Install-WithWinget($Ids, $FriendlyName) {
   throw "Could not install $FriendlyName with winget. Install it manually, then rerun this script."
 }
 
-Remove-EmptyPathSegments
+Remove-EmptyPathSegments "Path"
+Remove-EmptyPathSegments "CLASSPATH"
 
 if ((Get-JavaMajorVersion) -lt 21) {
   Install-WithWinget @("EclipseAdoptium.Temurin.21.JDK") "Temurin JDK 21"
@@ -168,16 +195,17 @@ $Deps = @(
   "org.lwjgl:lwjgl-glfw:$LWJGL_VERSION",
   "org.lwjgl:lwjgl-opengl:$LWJGL_VERSION",
   "org.lwjgl:lwjgl-stb:$LWJGL_VERSION",
-  "org.apache.groovy:groovy:$GROOVY_VERSION",
-  "org.lwjgl:lwjgl:$LWJGL_VERSION,classifier=$LWJGL_NATIVE_CLASSIFIER",
-  "org.lwjgl:lwjgl-glfw:$LWJGL_VERSION,classifier=$LWJGL_NATIVE_CLASSIFIER",
-  "org.lwjgl:lwjgl-opengl:$LWJGL_VERSION,classifier=$LWJGL_NATIVE_CLASSIFIER",
-  "org.lwjgl:lwjgl-stb:$LWJGL_VERSION,classifier=$LWJGL_NATIVE_CLASSIFIER"
+  "org.apache.groovy:groovy:$GROOVY_VERSION"
 )
+
+$NativeJars = Get-LwjglNativeJars (Join-Path $RunDir "lwjgl-natives")
 
 $ArgsList = @("run", $RunTarget, "--server=false", "--java-opt", "-Xmx4G", "--java-opt", "--enable-native-access=ALL-UNNAMED")
 foreach ($dep in $Deps) {
-  $ArgsList += @("--dependency", $dep)
+  $ArgsList += "--dependency=$dep"
+}
+foreach ($jar in $NativeJars) {
+  $ArgsList += @("--extra-jar", $jar)
 }
 
 Write-Host "Blockbox: running..."
