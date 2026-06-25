@@ -13,6 +13,7 @@ import org.lwjgl.glfw.GLFWErrorCallback
 import org.lwjgl.glfw.GLFWFramebufferSizeCallback
 import org.lwjgl.glfw.GLFWKeyCallback
 import org.lwjgl.glfw.GLFWCharCallback
+import org.lwjgl.glfw.GLFWScrollCallback
 import org.lwjgl.opengl.GL
 import org.lwjgl.opengl.GL11.*
 import org.lwjgl.opengl.GL15.*
@@ -86,6 +87,10 @@ enum Block(val solid: Boolean, val rgb: (Float, Float, Float), val translucent: 
   case AcaciaLeaves extends Block(true, (0.30f, 0.45f, 0.13f), false, false, true)
   // First official demo mod block. Appended so old world block ids stay stable.
   case RainbowBlock extends Block(true, (0.95f, 0.26f, 0.92f))
+  // Variant planks are appended after the demo mod block so old block ids stay stable.
+  case BirchPlanks extends Block(true, (0.76f, 0.63f, 0.42f))
+  case PinePlanks extends Block(true, (0.44f, 0.28f, 0.14f))
+  case AcaciaPlanks extends Block(true, (0.78f, 0.38f, 0.16f))
   def id: Byte = ordinal.toByte
 object Block:
   private val valuesArray = values
@@ -174,14 +179,16 @@ final class TextureAtlas:
     case Block.Grass =>
       face match
         case FaceKind.Top =>
-          val g = if ((x ^ y) & 1) == 0 then 148 else 172
-          val g2 = if (x * 3 + y * 7) % 5 < 2 then g - 18 else g
-          (52 + (x * 3) % 12, g2, 36 + (y * 2) % 16, 255)
+          val base = if ((x ^ y) & 1) == 0 then 214 else 238
+          val shade = if (x * 3 + y * 7) % 5 < 2 then -18 else 0
+          val mask = (base + shade).max(172).min(248)
+          (mask, mask, mask, 255)
         case FaceKind.Bottom => dirtPixel(x, y, 23)
         case _ =>
           if y < 4 then
             val shade = if ((x + y) & 1) == 0 then 0 else -10
-            (82 + shade, 162 + shade, 52 + shade, 255)
+            val mask = (224 + shade).max(184).min(242)
+            (mask, mask, mask, 255)
           else dirtPixel(x, y, 24)
     case Block.Dirt => dirtPixel(x, y, 31)
     case Block.Stone =>
@@ -197,7 +204,7 @@ final class TextureAtlas:
       val dot = if noise(x, y, 51) > 182 then 12 else 0
       (220 - dot, 204 - dot, 142 - dot, 255)
     case Block.Water =>
-      // Clean, readable water texture: calmer than noise soup, but still animated-looking in motion.
+      // Clean, readable water texture with enough opacity for falling columns to read.
       val n1 = noise(x, y, 61)
       val n2 = noise(x + 9, y + 3, 62)
       val wave = ((sin((x + n1 * 0.02f) * 0.85f) + cos((y + n2 * 0.02f) * 0.70f)) * 0.5f + 1f) * 0.5f
@@ -206,7 +213,7 @@ final class TextureAtlas:
       val r = (18 + stripe / 4 + sparkle / 4).max(10).min(58)
       val g = (88 + (wave * 22f).toInt + stripe / 2 + sparkle / 4).max(64).min(140)
       val b = (180 + (wave * 34f).toInt + stripe + sparkle).max(145).min(245)
-      val alpha = if face == FaceKind.Top then 154 else 128
+      val alpha = if face == FaceKind.Top then 238 else 232
       (r, g, b, alpha)
     case Block.Wood =>
       face match
@@ -275,6 +282,24 @@ final class TextureAtlas:
       val seamX = x == 0 || x == 15
       val plankBase = if seamY || seamX then (92, 60, 28) else (168, 116, 58)
       vary(plankBase, 12, noise(x, y, 81), 255)
+    case Block.BirchPlanks =>
+      val seamY = y == 3 || y == 7 || y == 11
+      val seamX = x == 0 || x == 15
+      val knot = noise(x, y, 2181) > 232
+      val plankBase = if seamY || seamX then (138, 112, 74) else if knot then (172, 140, 94) else (206, 184, 132)
+      vary(plankBase, 13, noise(x, y, 2182), 255)
+    case Block.PinePlanks =>
+      val seamY = y == 3 || y == 7 || y == 11
+      val seamX = x == 0 || x == 15
+      val grain = if (x * 3 + y + noise(x, y, 2191) / 64) % 9 == 0 then -18 else 0
+      val plankBase = if seamY || seamX then (58, 34, 18) else (106 + grain, 68 + grain / 2, 34)
+      vary(plankBase, 11, noise(x, y, 2192), 255)
+    case Block.AcaciaPlanks =>
+      val seamY = y == 3 || y == 7 || y == 11
+      val seamX = x == 0 || x == 15
+      val stripe = if (x + y / 2 + noise(x, y, 2201) / 80) % 6 == 0 then -20 else 0
+      val plankBase = if seamY || seamX then (126, 58, 26) else (196 + stripe, 92 + stripe / 2, 42)
+      vary(plankBase, 15, noise(x, y, 2202), 255)
     case Block.Leaves =>
       val hole = (x * 5 + y * 3) % 9 < 2 && x > 1 && x < 14 && y > 1 && y < 14
       val dark = (x * 7 + y * 11) % 13 < 5
@@ -542,7 +567,10 @@ final class TerrainGenerator(val seed: Long):
     h <= Terrain.seaLevel + 9 && (riverStrengthAt(x, z) > 0.40f || lakeStrengthAt(x, z) > 0.44f)
 
   private def waterSurfaceAt(x: Int, z: Int, h: Int): Int =
-    if freshwaterAt(x, z, h) then Terrain.seaLevel + 1 else Terrain.seaLevel
+    // Keep every generated natural water body on one stable surface plane.
+    // The old freshwater +1 level made rivers/lakes meet oceans at different
+    // heights, which rendered as huge transparent sheets and stair-stepped water.
+    Terrain.seaLevel
 
   private def coldAt(x: Int, z: Int, h: Int): Boolean =
     val t = temperatureAt(x, z, h)
@@ -567,6 +595,43 @@ final class TerrainGenerator(val seed: Long):
   private def birchGroveAt(x: Int, z: Int, h: Int): Boolean =
     !coldAt(x, z, h) && moistureAt(x, z) > 0.12f && forestRegionAt(x, z) > 0.18f && hash(Math.floorDiv(x, 22), 0, Math.floorDiv(z, 22), 6200) > 0.44f
 
+  def savannaBlendAt(x: Int, z: Int, h: Int): Float =
+    val t = temperatureAt(x, z, h)
+    val m = moistureAt(x, z)
+    val edgeNoise = fbm2D((x + 410.0) * 0.0022, (z - 260.0) * 0.0022, 3, 3301) * 0.09f
+    val dry = smooth01((0.22f - m + edgeNoise) / 0.50f)
+    val warm = smooth01((t + 0.03f + edgeNoise * 0.35f) / 0.38f)
+    val region = smooth01((desertRegionAt(x, z) + 0.18f + edgeNoise) / 0.62f)
+    if desertAt(x, z, h) || h <= Terrain.seaLevel + 2 then 0f else (dry * warm * region).max(0f).min(1f)
+
+  def birchBlendAt(x: Int, z: Int, h: Int): Float =
+    val m = moistureAt(x, z)
+    val forest = forestRegionAt(x, z)
+    val edgeNoise = fbm2D((x - 720.0) * 0.0020, (z + 540.0) * 0.0020, 3, 3302) * 0.10f
+    val wet = smooth01((m - 0.02f + edgeNoise) / 0.48f)
+    val grove = smooth01((forest - 0.06f + edgeNoise) / 0.46f)
+    val coolEnough = 1f - smooth01((temperatureAt(x, z, h) - 0.30f + edgeNoise * 0.30f) / 0.34f)
+    if coldAt(x, z, h) || desertAt(x, z, h) || h <= Terrain.seaLevel + 2 then 0f else (wet * grove * coolEnough).max(0f).min(1f)
+
+  def grassTintAt(x: Int, z: Int, h: Int): (Float, Float, Float) =
+    val savanna = savannaBlendAt(x, z, h).max(0f).min(1f)
+    val birch = (birchBlendAt(x, z, h) * (1f - savanna * 0.82f)).max(0f).min(1f)
+    val plains = (1f - savanna * 0.86f - birch * 0.82f).max(0.18f)
+    val cold = if coldAt(x, z, h) then 0.45f else 0f
+    val total = (plains + savanna + birch).max(0.001f)
+    // Stronger biome color anchors keep the grass blocks visibly different after
+    // texture modulation and lighting: plains is rich green, birch is pale/lush,
+    // and savanna is dry olive.
+    var r = (plains * 0.42f + birch * 0.66f + savanna * 0.54f) / total
+    var g = (plains * 0.82f + birch * 0.94f + savanna * 0.58f) / total
+    var b = (plains * 0.25f + birch * 0.36f + savanna * 0.13f) / total
+    if cold > 0f then
+      val w = (cold * 0.82f).max(0f).min(1f)
+      r = r * (1f - w) + 0.50f * w
+      g = g * (1f - w) + 0.82f * w
+      b = b * (1f - w) + 0.92f * w
+    (r.max(0.30f).min(0.82f), g.max(0.44f).min(1.00f), b.max(0.10f).min(0.52f))
+
   private def rockyAt(x: Int, z: Int, h: Int): Boolean =
     if h < Terrain.seaLevel + 42 then false
     else
@@ -590,12 +655,13 @@ final class TerrainGenerator(val seed: Long):
   private def caveMouthDepthAt(x: Int, z: Int, h: Int): Int =
     if h <= Terrain.seaLevel + 8 || h >= Terrain.worldHeight - 16 then 0
     else
-      // Sparse side-of-hill entrances. No circular top-down gashes.
-      val cellSize = 72
+      // Sparse side-of-hill entrances. Wider irregular throats make caves read like
+      // natural Minecraft-style hillside mouths instead of circular top-down gashes.
+      val cellSize = 60
       val cellX = Math.floorDiv(x, cellSize)
       val cellZ = Math.floorDiv(z, cellSize)
       val gate = hash(cellX, cellZ, 0, 8600)
-      if gate < 0.875f then 0
+        if gate < 0.840f then 0
       else
         val anchorX = cellX * cellSize + 12 + (hash(cellX, 0, cellZ, 8601) * (cellSize - 24)).toInt
         val anchorZ = cellZ * cellSize + 12 + (hash(cellX, 1, cellZ, 8602) * (cellSize - 24)).toInt
@@ -606,16 +672,17 @@ final class TerrainGenerator(val seed: Long):
         val dirZ = sin(angle).toFloat
         val forward = dx * dirX + dz * dirZ
         val side = abs(-dx * dirZ + dz * dirX)
-        val length = 18f + hash(cellX, 5, cellZ, 8607) * 30f
-        val throatRadius = 1.15f + hash(cellX, 6, cellZ, 8608) * 1.05f
-        val taper = 1.35f - forward / (length * 1.65f)
+        val length = 24f + hash(cellX, 5, cellZ, 8607) * 38f
+        val throatRadius = 1.75f + hash(cellX, 6, cellZ, 8608) * 1.85f
+        val taper = 1.58f - forward / (length * 1.75f)
         val slopeSignal = ridgedNoise((x + 120.0) * 0.006, (z - 280.0) * 0.006, 8604, 3)
-        val terrainOk = h > Terrain.seaLevel + 16 && (slopeSignal > 0.48f || h > Terrain.seaLevel + 42)
-        if terrainOk && forward >= 0f && forward <= length && side <= throatRadius * taper.max(0.42f) then
+        val raggedEdge = valueNoise2D((x + 300.0) * 0.12, (z - 170.0) * 0.12, 8611) * 0.38f
+        val terrainOk = h > Terrain.seaLevel + 14 && (slopeSignal > 0.38f || h > Terrain.seaLevel + 38)
+        if terrainOk && forward >= -2f && forward <= length && side <= throatRadius * taper.max(0.46f) + raggedEdge then
           val sideEdge = 1f - (side / throatRadius.max(0.001f)).min(1f)
-          val entrance = 2.0f + sideEdge * 2.2f
-          val slopedDown = forward * (0.34f + hash(cellX, 7, cellZ, 8609) * 0.22f)
-          (entrance + slopedDown).toInt.max(1).min(26)
+          val entrance = 3.0f + sideEdge * 3.4f
+          val slopedDown = forward.max(0f) * (0.28f + hash(cellX, 7, cellZ, 8609) * 0.20f)
+          (entrance + slopedDown).toInt.max(2).min(32)
         else 0
 
   private def caveWaterSourceAt(x: Int, y: Int, z: Int): Boolean =
@@ -635,23 +702,25 @@ final class TerrainGenerator(val seed: Long):
     val depth = (h - y).max(0).toFloat
     val mouth = mouthDepth > 0 && depth >= 0f && depth <= mouthDepth.toFloat
     if mouth then
-      val throat = valueNoise3D(x.toDouble * 0.022, y.toDouble * 0.028, z.toDouble * 0.022, 8610)
-      return depth < 3f || throat > -0.42f || depth < mouthDepth.toFloat * 0.44f
-    if y >= h - 12 then return false
+      val throat = valueNoise3D(x.toDouble * 0.024, y.toDouble * 0.030, z.toDouble * 0.024, 8610)
+      val ceilingBreak = valueNoise3D((x + 90).toDouble * 0.055, (y - 20).toDouble * 0.045, (z + 40).toDouble * 0.055, 8612)
+      return depth < 4f || throat > -0.52f || ceilingBreak > 0.38f || depth < mouthDepth.toFloat * 0.52f
+    if y >= h - 10 then return false
     val lowEnough = y > 7 && depth > 13f
     val dx = x.toDouble; val dy = y.toDouble; val dz = z.toDouble
     val region = valueNoise3D(dx * 0.0037, dy * 0.0026, dz * 0.0037, 77)
-    if region < -0.63f then return false
+    if region < -0.68f then return false
     val roomA = valueNoise3D(dx * 0.0080, dy * 0.0054, dz * 0.0080, 99)
     val roomB = valueNoise3D((dx + 700.0) * 0.0108, dy * 0.0079, (dz - 500.0) * 0.0108, 199)
     val roomC = valueNoise3D((dx - 230.0) * 0.0047, dy * 0.0035, (dz + 830.0) * 0.0047, 777)
-    val cavern = lowEnough && depth > 22f && region > -0.20f && roomA > 0.25f && roomB > -0.30f && roomC > -0.34f
-    val bigRoom = lowEnough && depth > 36f && region > 0.00f && roomA > 0.37f && roomB > -0.18f
-    val giantPocket = lowEnough && depth > 48f && roomC > 0.32f && region > -0.02f && roomA > 0.04f
+    val cavern = lowEnough && depth > 20f && region > -0.26f && roomA > 0.20f && roomB > -0.34f && roomC > -0.38f
+    val bigRoom = lowEnough && depth > 34f && region > -0.04f && roomA > 0.32f && roomB > -0.22f
+    val giantPocket = lowEnough && depth > 46f && roomC > 0.28f && region > -0.06f && roomA > 0.00f
     val tubeA = abs(valueNoise2D(dx * 0.0055, dz * 0.0055, 333))
     val tubeB = abs(valueNoise2D((dx + 120.0) * 0.0064, (dz - 90.0) * 0.0064, 444))
     val verticalBand = valueNoise3D(dx * 0.0047, dy * 0.0104, dz * 0.0047, 555)
-    val tunnel = lowEnough && depth > 15f && y < Terrain.seaLevel + 64 && ((tubeA < 0.030f && verticalBand > -0.46f) || (tubeB < 0.027f && verticalBand > -0.39f))
+    val tubeC = abs(valueNoise2D((dx - 360.0) * 0.0044, (dz + 210.0) * 0.0044, 445))
+    val tunnel = lowEnough && depth > 13f && y < Terrain.seaLevel + 70 && ((tubeA < 0.037f && verticalBand > -0.52f) || (tubeB < 0.033f && verticalBand > -0.45f) || (tubeC < 0.024f && verticalBand > -0.30f))
     cavern || bigRoom || giantPocket || tunnel
 
   def heightAt(x: Int, z: Int): Int =
@@ -700,6 +769,14 @@ final class TerrainGenerator(val seed: Long):
         dune + mesa
       else 0.0
 
+    // Biome-specific relief, blended softly so there are no hard biome cliffs.
+    val temp0 = temperatureAt(x, z, Terrain.seaLevel + 10)
+    val moist0 = moistureAt(x, z)
+    val savannaReliefBlend = smooth01((temp0 + 0.02f) / 0.32f).toDouble * smooth01((0.18f - moist0) / 0.42f).toDouble * smooth01((desertRegionAt(x, z) + 0.18f) / 0.62f).toDouble * (if desertish then 0.15 else 1.0)
+    val birchReliefBlend = smooth01((moist0 - 0.04f) / 0.46f).toDouble * smooth01((forestRegionAt(x, z) - 0.04f) / 0.48f).toDouble * (1.0 - savannaReliefBlend.min(1.0) * 0.75)
+    val savannaRoll = (ridgedNoise((wx + 320.0) * 0.0045, (wz - 160.0) * 0.0045, 824, 3).toDouble * 7.5 - 2.0) * savannaReliefBlend
+    val birchRoll = fbm2D((wx - 130.0) * 0.0064, (wz + 360.0) * 0.0064, 3, 825).toDouble * 3.4 * birchReliefBlend
+
     val base =
       Terrain.seaLevel + 8.0 +
       continent * 22.0 +
@@ -708,6 +785,8 @@ final class TerrainGenerator(val seed: Long):
       highlands +
       mountains +
       dryRelief +
+      savannaRoll +
+      birchRoll +
       detail -
       valleyCut -
       divots
@@ -753,7 +832,7 @@ final class TerrainGenerator(val seed: Long):
     val spruce = spruceAt(x, z, h)
     val savanna = savannaAt(x, z, h)
     val birch = birchGroveAt(x, z, h)
-    val spacingCell = if spruce then 7 else if savanna then 12 else if birch then 9 else if forestNoise > 0.34f then 8 else 11
+    val spacingCell = if spruce then 7 else if savanna then 10 else if birch then 8 else if forestNoise > 0.34f then 8 else 11
     val cellX = Math.floorDiv(x, spacingCell)
     val cellZ = Math.floorDiv(z, spacingCell)
     val cellGate = hash(cellX, cellZ, 0, 913)
@@ -761,8 +840,8 @@ final class TerrainGenerator(val seed: Long):
     val dense = forestNoise > 0.22f && moistureAt(x, z) > -0.42f
     val threshold =
       if spruce then 0.972f
-      else if savanna then 0.986f
-      else if birch then 0.982f
+      else if savanna then 0.976f
+      else if birch then 0.974f
       else if dense then 0.978f
       else if forestNoise > -0.08f then 0.991f
       else 0.9970f
@@ -1106,6 +1185,29 @@ final class Chunk(val cx: Int, val cz: Int, atlas: TextureAtlas, gen: TerrainGen
   private val waterLevelsLocal = new Array[Byte](Terrain.chunkSize * Terrain.worldHeight * Terrain.chunkSize)
   private val waterExtraMagic = 0x574C5631 // "WLV1"
 
+  // Legacy/freshwater repair: old experimental terrain builds could save static
+  // generated water above sea level. Those blocks render as raised transparent
+  // plates over beaches because static water has no flowing level data. Keep edited
+  // water and dynamic water, but clamp natural raw-level-0 water to sea level.
+  private def normalizeStaticNaturalWater(): Unit =
+    var changed = false
+    var lx = 0
+    while lx < Terrain.chunkSize do
+      var lz = 0
+      while lz < Terrain.chunkSize do
+        var y = Terrain.seaLevel + 1
+        while y < Terrain.worldHeight do
+          val i = localIndex(lx, y, lz)
+          if blocks(i) == Block.Water.id && waterLevelsLocal(i) == 0.toByte then
+            val edited = edits.synchronized { edits.contains((lx, y, lz)) }
+            if !edited then
+              blocks(i) = Block.Air.id
+              changed = true
+          y += 1
+        lz += 1
+      lx += 1
+    if changed then markDirtyMesh()
+
   val baseX = cx * Terrain.chunkSize
   val baseZ = cz * Terrain.chunkSize
 
@@ -1126,6 +1228,8 @@ final class Chunk(val cx: Int, val cz: Int, atlas: TextureAtlas, gen: TerrainGen
   @volatile private var disposed = false
   @volatile private var meshRevision = 0
   private val meshQueued = java.util.concurrent.atomic.AtomicBoolean(false)
+
+  normalizeStaticNaturalWater()
 
   def hasMesh: Boolean =
     opaqueCount > 0 || cutoutCount > 0 || translucentCount > 0 || waterCount > 0
@@ -1167,6 +1271,25 @@ final class Chunk(val cx: Int, val cz: Int, atlas: TextureAtlas, gen: TerrainGen
       val raw = waterLevelsLocal(localIndex(lx, y, lz)).toInt & 0xFF
       if raw <= 0 then 8 else raw.max(1).min(8)
     else 0
+
+  def getWaterRawLevel(lx: Int, y: Int, lz: Int): Int =
+    if validLocal(lx, y, lz) && getBlock(lx, y, lz) == Block.Water then
+      waterLevelsLocal(localIndex(lx, y, lz)).toInt & 0xFF
+    else 0
+
+  def foreachDynamicWaterCell(f: (Int, Int, Int, Int) => Unit): Unit =
+    var y = 0
+    while y < Terrain.worldHeight do
+      var lz = 0
+      while lz < Terrain.chunkSize do
+        var lx = 0
+        while lx < Terrain.chunkSize do
+          val i = localIndex(lx, y, lz)
+          val raw = waterLevelsLocal(i).toInt & 0xFF
+          if raw > 0 && Block.fromId(blocks(i)) == Block.Water then f(lx, y, lz, raw.max(1).min(8))
+          lx += 1
+        lz += 1
+      y += 1
 
   def setWaterLevel(lx: Int, y: Int, lz: Int, level: Int): Unit =
     if validLocal(lx, y, lz) then
@@ -1240,17 +1363,18 @@ final class Chunk(val cx: Int, val cz: Int, atlas: TextureAtlas, gen: TerrainGen
         if raw <= 0 then 8 else raw.max(1).min(8)
 
     def rawWaterTopY(nlx: Int, ny: Int, nlz: Int, fy: Float): Float =
-      val level = localWaterLevel(nlx, ny, nlz)
-      if level <= 0 then fy
+      if ny < 0 || ny >= Terrain.worldHeight || nlx < 0 || nlx >= Terrain.chunkSize || nlz < 0 || nlz >= Terrain.chunkSize then fy
+      else if snapshotBlock(nlx, ny, nlz) != Block.Water then fy
       else
-        val normalized = level.toFloat / 8f
-        // Keep water visually fuller and smoother. Very low, thin water sheets made the
-        // simulation technically correct but visually ugly, with lots of noisy transparent
-        // internal faces and jagged shoreline steps.
-        val surface =
-          if level >= 8 then 0.88f
-          else 0.24f + 0.58f * normalized
-        fy + surface.min(0.88f)
+        val raw = localWaterRawLevel(nlx, ny, nlz)
+        // Generated/static water has raw level 0. Draw it as a full flat block-top
+        // surface so all natural oceans, rivers, ponds and lakes share one exact
+        // plane. Do not use 0.94 or mixed freshwater heights here; tiny offsets plus
+        // transparency caused the visible sheet/step artifacts in large beaches.
+        if raw <= 0 || raw >= 8 then fy + 1f
+        else
+          val level = raw.max(1).min(7).toFloat
+          fy + 0.36f + 0.52f * (level / 7f)
     def waterCornerY(cells: Array[(Int, Int, Int)], fy: Float, fallback: Float): Float =
       var sum = 0f
       var count = 0
@@ -1275,12 +1399,24 @@ final class Chunk(val cx: Int, val cz: Int, atlas: TextureAtlas, gen: TerrainGen
       else
         val nb = localBlock(nlx, ny, nlz)
         nb != Block.Water && (nb == Block.Air || nb.cutout || (nb.translucent && nb != Block.Water))
+
+    def shouldDrawWaterSide(lx: Int, y: Int, lz: Int, nlx: Int, ny: Int, nlz: Int): Boolean =
+      if !isWaterSideVisible(nlx, ny, nlz) then false
+      else
+        val raw = localWaterRawLevel(lx, y, lz)
+        if raw <= 0 then false
+        else
+          // Static generated water keeps clean top-only lakes/oceans. Dynamic water draws
+          // every exposed side, including stacked waterfall sides when water exists above.
+          true
     def isVisible(nlx: Int, ny: Int, nlz: Int, block: Block): Boolean =
       val nb = localBlock(nlx, ny, nlz)
       if nb == Block.Air then true
       else if block == Block.Water then isWaterSideVisible(nlx, ny, nlz)
       else if nb == Block.Water then true
+      else if block.cutout && nb.cutout then false
       else if nb.cutout then block != nb
+      else if block.solid && nb.solid && !block.translucent && !nb.translucent && !block.cutout && !nb.cutout then false
       else nb.translucent && nb != block
     for lx <- 0 until Terrain.chunkSize; lz <- 0 until Terrain.chunkSize; y <- 0 until Terrain.worldHeight do
       val block = snapshotBlock(lx, y, lz)
@@ -1296,7 +1432,11 @@ final class Chunk(val cx: Int, val cz: Int, atlas: TextureAtlas, gen: TerrainGen
         val topY = if block == Block.Water then rawWaterTopY(lx, y, lz, fy) else fy + 1f
         val yNorm = y.toFloat / Terrain.worldHeight.toFloat
         val ambient = 0.45f + yNorm * 0.10f
-        def addFace(shade: Float, corners: Array[(Float, Float, Float, Float, Float)], kind: FaceKind): Unit =
+        def grassCornerTint(cfx: Float, cfz: Float): (Float, Float, Float) =
+          val sx = floor(baseX.toFloat + cfx).toInt
+          val sz = floor(baseZ.toFloat + cfz).toInt
+          gen.grassTintAt(sx, sz, y)
+        def addFace(shade: Float, corners: Array[(Float, Float, Float, Float, Float)], kind: FaceKind, tintGrass: Boolean = false): Unit =
           val buf = if block.cutout then cutoutVerts
             else if block == Block.Water then waterVerts
             else if block.translucent then translucentVerts
@@ -1306,17 +1446,36 @@ final class Chunk(val cx: Int, val cz: Int, atlas: TextureAtlas, gen: TerrainGen
           for i <- idx do
             val (cfx, cfy, cfz, tu, tv) = corners(i)
             val (u, v) = atlasRef.uv(block, kind, tu, tv)
+            val (tintR, tintG, tintB) = if tintGrass then grassCornerTint(cfx, cfz) else (1f, 1f, 1f)
             val alpha = block match
-              case Block.Water => 0.43f
+              case Block.Water => 1f
               case Block.Glass => 0.68f
               case _ => 1f
             buf += cfx; buf += cfy; buf += cfz
-            buf += light; buf += light; buf += light; buf += alpha
+            buf += (light * tintR).min(1.35f); buf += (light * tintG).min(1.35f); buf += (light * tintB).min(1.35f); buf += alpha
             buf += u; buf += v
+        def addGrassSide(shade: Float, corners: Array[(Float, Float, Float, Float, Float)], kind: FaceKind): Unit =
+          val bottomA = corners(0)
+          val bottomB = corners(1)
+          val topB = corners(2)
+          val topA = corners(3)
+          def band(bottom: (Float, Float, Float, Float, Float), top: (Float, Float, Float, Float, Float)): (Float, Float, Float, Float, Float) =
+            val t = 0.75f
+            (
+              bottom._1 + (top._1 - bottom._1) * t,
+              bottom._2 + (top._2 - bottom._2) * t,
+              bottom._3 + (top._3 - bottom._3) * t,
+              bottom._4,
+              0.25f
+            )
+          val bandA = band(bottomA, topA)
+          val bandB = band(bottomB, topB)
+          addFace(shade, Array(bottomA, bottomB, bandB, bandA), kind, false)
+          addFace(shade, Array(bandA, bandB, topB, topA), kind, true)
         if block == Block.Water then
-          // Render water as one smoother continuous volume. The simulation can keep its
-          // block-level logic, but the mesh should avoid exposing a bunch of internal
-          // stair-step faces through transparency.
+          // Render dynamic water as actual block-volume water with internal culling.
+          // Neighboring water cells hide shared faces; exposed streams and waterfalls show
+          // full-height sides like Minecraft-style flowing water.
           val fullAbove = localBlock(lx, y + 1, lz) == Block.Water
           val nwTop = if fullAbove then fy + 1f else waterCornerY(Array((lx, y, lz), (lx - 1, y, lz), (lx, y, lz - 1), (lx - 1, y, lz - 1)), fy, topY)
           val neTop = if fullAbove then fy + 1f else waterCornerY(Array((lx, y, lz), (lx + 1, y, lz), (lx, y, lz - 1), (lx + 1, y, lz - 1)), fy, topY)
@@ -1324,32 +1483,33 @@ final class Chunk(val cx: Int, val cz: Int, atlas: TextureAtlas, gen: TerrainGen
           val swTop = if fullAbove then fy + 1f else waterCornerY(Array((lx, y, lz), (lx - 1, y, lz), (lx, y, lz + 1), (lx - 1, y, lz + 1)), fy, topY)
           if !fullAbove then
             addFace(1.00f, Array((fx, nwTop, fz, 0f, 0f), (fx + 1, neTop, fz, 1f, 0f), (fx + 1, seTop, fz + 1, 1f, 1f), (fx, swTop, fz + 1, 0f, 1f)), FaceKind.Top)
-          // Static generated oceans/lakes are drawn as clean surface water only. Rendering
-          // every static water side face through transparency creates the ugly blue sheets
-          // seen in large beaches and lakes. Dynamic/flowing water still gets side faces so
-          // waterfalls and player-updated flows remain readable.
-          val dynamicWater = localWaterRawLevel(lx, y, lz) > 0
-          if dynamicWater && isWaterSideVisible(lx + 1, y, lz) then
+          // Static generated oceans/lakes are drawn as clean surface water only. Dynamic
+          // placed/flowing water gets full sides so waterfalls and streams read as volume.
+          if shouldDrawWaterSide(lx, y, lz, lx + 1, y, lz) then
             addFace(0.82f, Array((fx + 1, fy, fz, 0f, 1f), (fx + 1, fy, fz + 1, 1f, 1f), (fx + 1, seTop, fz + 1, 1f, 0f), (fx + 1, neTop, fz, 0f, 0f)), FaceKind.East)
-          if dynamicWater && isWaterSideVisible(lx - 1, y, lz) then
+          if shouldDrawWaterSide(lx, y, lz, lx - 1, y, lz) then
             addFace(0.55f, Array((fx, fy, fz + 1, 0f, 1f), (fx, fy, fz, 1f, 1f), (fx, nwTop, fz, 1f, 0f), (fx, swTop, fz + 1, 0f, 0f)), FaceKind.West)
-          if dynamicWater && isWaterSideVisible(lx, y, lz + 1) then
+          if shouldDrawWaterSide(lx, y, lz, lx, y, lz + 1) then
             addFace(0.74f, Array((fx + 1, fy, fz + 1, 0f, 1f), (fx, fy, fz + 1, 1f, 1f), (fx, swTop, fz + 1, 1f, 0f), (fx + 1, seTop, fz + 1, 0f, 0f)), FaceKind.South)
-          if dynamicWater && isWaterSideVisible(lx, y, lz - 1) then
+          if shouldDrawWaterSide(lx, y, lz, lx, y, lz - 1) then
             addFace(0.52f, Array((fx, fy, fz, 0f, 1f), (fx + 1, fy, fz, 1f, 1f), (fx + 1, neTop, fz, 1f, 0f), (fx, nwTop, fz, 0f, 0f)), FaceKind.North)
         else
           if isVisible(lx, y + 1, lz, block) then
-            addFace(1.00f, Array((fx, topY, fz, 0f, 0f), (fx + 1, topY, fz, 1f, 0f), (fx + 1, topY, fz + 1, 1f, 1f), (fx, topY, fz + 1, 0f, 1f)), FaceKind.Top)
+            addFace(1.00f, Array((fx, topY, fz, 0f, 0f), (fx + 1, topY, fz, 1f, 0f), (fx + 1, topY, fz + 1, 1f, 1f), (fx, topY, fz + 1, 0f, 1f)), FaceKind.Top, block == Block.Grass)
           if isVisible(lx, y - 1, lz, block) then
             addFace(0.38f, Array((fx, fy, fz + 1, 0f, 0f), (fx + 1, fy, fz + 1, 1f, 0f), (fx + 1, fy, fz, 1f, 1f), (fx, fy, fz, 0f, 1f)), FaceKind.Bottom)
           if isVisible(lx + 1, y, lz, block) then
-            addFace(0.82f, Array((fx + 1, fy, fz, 0f, 1f), (fx + 1, fy, fz + 1, 1f, 1f), (fx + 1, topY, fz + 1, 1f, 0f), (fx + 1, topY, fz, 0f, 0f)), FaceKind.East)
+            val corners = Array((fx + 1, fy, fz, 0f, 1f), (fx + 1, fy, fz + 1, 1f, 1f), (fx + 1, topY, fz + 1, 1f, 0f), (fx + 1, topY, fz, 0f, 0f))
+            if block == Block.Grass then addGrassSide(0.82f, corners, FaceKind.East) else addFace(0.82f, corners, FaceKind.East)
           if isVisible(lx - 1, y, lz, block) then
-            addFace(0.55f, Array((fx, fy, fz + 1, 0f, 1f), (fx, fy, fz, 1f, 1f), (fx, topY, fz, 1f, 0f), (fx, topY, fz + 1, 0f, 0f)), FaceKind.West)
+            val corners = Array((fx, fy, fz + 1, 0f, 1f), (fx, fy, fz, 1f, 1f), (fx, topY, fz, 1f, 0f), (fx, topY, fz + 1, 0f, 0f))
+            if block == Block.Grass then addGrassSide(0.55f, corners, FaceKind.West) else addFace(0.55f, corners, FaceKind.West)
           if isVisible(lx, y, lz + 1, block) then
-            addFace(0.74f, Array((fx + 1, fy, fz + 1, 0f, 1f), (fx, fy, fz + 1, 1f, 1f), (fx, topY, fz + 1, 1f, 0f), (fx + 1, topY, fz + 1, 0f, 0f)), FaceKind.South)
+            val corners = Array((fx + 1, fy, fz + 1, 0f, 1f), (fx, fy, fz + 1, 1f, 1f), (fx, topY, fz + 1, 1f, 0f), (fx + 1, topY, fz + 1, 0f, 0f))
+            if block == Block.Grass then addGrassSide(0.74f, corners, FaceKind.South) else addFace(0.74f, corners, FaceKind.South)
           if isVisible(lx, y, lz - 1, block) then
-            addFace(0.52f, Array((fx, fy, fz, 0f, 1f), (fx + 1, fy, fz, 1f, 1f), (fx + 1, topY, fz, 1f, 0f), (fx, topY, fz, 0f, 0f)), FaceKind.North)
+            val corners = Array((fx, fy, fz, 0f, 1f), (fx + 1, fy, fz, 1f, 1f), (fx + 1, topY, fz, 1f, 0f), (fx, topY, fz, 0f, 0f))
+            if block == Block.Grass then addGrassSide(0.52f, corners, FaceKind.North) else addFace(0.52f, corners, FaceKind.North)
     if disposed then
       pendingData = null
       pendingRevision = -1
@@ -1485,6 +1645,7 @@ final class Chunk(val cx: Int, val cz: Int, atlas: TextureAtlas, gen: TerrainGen
               val wi = in.readInt()
               val level = in.readByte()
               if wi >= 0 && wi < waterLevelsLocal.length then waterLevelsLocal(wi) = (level.toInt & 0xFF).max(0).min(8).toByte
+        normalizeStaticNaturalWater()
         markDirtyMesh()
       finally in.close()
 
@@ -2426,23 +2587,26 @@ final class Blockbox:
   private var modLeftClickedThisFrame = false
   private var breakingBlock: (Int, Int, Int) | Null = null
   private var breakingProgress = 0f
-  private val placeableBlocks = Array(Block.Grass, Block.Dirt, Block.Stone, Block.Sand, Block.Cactus, Block.Wood, Block.Planks, Block.Leaves, Block.BirchWood, Block.BirchLeaves, Block.PineWood, Block.PineLeaves, Block.AcaciaWood, Block.AcaciaLeaves, Block.Brick, Block.Glass, Block.Snow, Block.Clay, Block.Coal, Block.Copper, Block.IronOre, Block.GoldOre, Block.Diamond, Block.RainbowBlock, Block.Furnace)
+  private val placeableBlocks = Array(Block.Grass, Block.Dirt, Block.Stone, Block.Sand, Block.Cactus, Block.Wood, Block.Planks, Block.BirchPlanks, Block.PinePlanks, Block.AcaciaPlanks, Block.Leaves, Block.BirchWood, Block.BirchLeaves, Block.PineWood, Block.PineLeaves, Block.AcaciaWood, Block.AcaciaLeaves, Block.Brick, Block.Glass, Block.Snow, Block.Clay, Block.Coal, Block.Copper, Block.IronOre, Block.GoldOre, Block.Diamond, Block.RainbowBlock, Block.Furnace)
   private val inventory = Array.fill(Block.values.length)(0)
   private val hotbarBlocks: Array[Block] = Array.fill(10)(Block.Air)
   private val hotbarCounts: Array[Int] = Array.fill(10)(0)
   private val maxStackSize = 64
   private var selectedBlock = 0
   private var heldInventoryBlock: Block = Block.Air
+  private var heldInventoryCount = 0
+  private var heldFromHotbar = false
   private var catalogScroll = 0
   private var craftingScroll = 0
+  private val craftGridBlocks: Array[Block] = Array.fill(9)(Block.Air)
   private var furnaceInput: Block = Block.Air
   private var furnaceFuel: Block = Block.Air
   private var furnaceProgress = 0f
   private var furnaceFuelRemaining = 0f
   private var furnaceOutput: Block = Block.Air
   private var furnaceOutputCount = 0
-  private val smeltableInputs: Array[Block] = Array(Block.Sand, Block.Clay, Block.Stone, Block.Wood, Block.IronOre, Block.GoldOre)
-  private val fuelBlocks: Array[Block] = Array(Block.Coal, Block.Wood)
+  private val smeltableInputs: Array[Block] = Array(Block.Sand, Block.Clay, Block.Stone, Block.Wood, Block.BirchWood, Block.PineWood, Block.AcaciaWood, Block.IronOre, Block.GoldOre)
+  private val fuelBlocks: Array[Block] = Array(Block.Coal, Block.Wood, Block.BirchWood, Block.PineWood, Block.AcaciaWood, Block.Planks, Block.BirchPlanks, Block.PinePlanks, Block.AcaciaPlanks)
   private var debugMode = false
   private var wireframeMode = false
   private var showChunkBorders = false
@@ -2489,8 +2653,10 @@ final class Blockbox:
   private var multiplayerMode = false
   private var joinIpInput = ""
   private var lastPosSend = 0.0
-  private var renderDistance = 40
-  private val maxRenderDistance = 192
+  private var renderDistance = 6 // chunks
+  private val minRenderDistance = 2
+  private val maxRenderDistance = 18
+  private def renderDistanceBlocks: Int = renderDistance * Terrain.chunkSize
   private var worldSeed = 0L
   private var createWorldMode = GameMode.Survival
   private var createWorldCheats = false
@@ -2500,6 +2666,13 @@ final class Blockbox:
   private var textureAtlas: TextureAtlas | Null = null
   private var playerHealth = 20f
   private var playerFood = 20f
+  private val maxPlayerHealth = 20f
+  private val maxPlayerFood = 20f
+  private val healthRegenDelay = 7.0f
+  private val healthRegenRate = 0.85f
+  private var timeSinceLastDamage = healthRegenDelay
+  private var fallPeakY = camera.y
+  private var cactusDamageCooldown = 0f
   private var errorCallback: GLFWErrorCallback | Null = null
   private var worldName = "World"
   private var worldNameInput = "New World"
@@ -2638,6 +2811,7 @@ final class Blockbox:
       applyWorldSeed(freshWorldSeed(), freshWorldName = false)
       val spawn = findSpawn()
       camera = spawn
+      fallPeakY = camera.y
       lastTime = glfwGetTime()
       startChunkGenThread()
       while !glfwWindowShouldClose(window) do loop()
@@ -2691,6 +2865,9 @@ final class Blockbox:
     })
     glfwSetCharCallback(window, new GLFWCharCallback {
       override def invoke(window: Long, codepoint: Int): Unit = onChar(codepoint)
+    })
+    glfwSetScrollCallback(window, new GLFWScrollCallback {
+      override def invoke(window: Long, xoffset: Double, yoffset: Double): Unit = onScroll(xoffset, yoffset)
     })
 
   private def queryWindowPos(): Unit =
@@ -2752,6 +2929,18 @@ final class Blockbox:
     else if screen == Screen.HostGame then
       if codepoint >= 32 && codepoint <= 126 then appendPlayerNameChar(codepoint.toChar)
 
+  private def onScroll(xoffset: Double, yoffset: Double): Unit =
+    val delta = if yoffset > 0 then -1 else if yoffset < 0 then 1 else 0
+    if delta == 0 then return
+    screen match
+      case Screen.Playing =>
+        selectedBlock = Math.floorMod(selectedBlock + delta, hotbarBlocks.length)
+      case Screen.Catalog =>
+        catalogScroll = (catalogScroll + delta).max(0)
+      case Screen.Mods =>
+        modsScreenScroll = (modsScreenScroll + delta).max(0)
+      case _ => ()
+
   private def onKey(key: Int): Unit =
     if key == GLFW_KEY_F11 then toggleFullscreen()
     else screen match
@@ -2801,8 +2990,8 @@ final class Blockbox:
         else if key == GLFW_KEY_V then
           vsync = !vsync
           glfwSwapInterval(if vsync then 1 else 0)
-        else if key == GLFW_KEY_LEFT || key == GLFW_KEY_MINUS then changeRenderDistance(-8)
-        else if key == GLFW_KEY_RIGHT || key == GLFW_KEY_EQUAL then changeRenderDistance(8)
+        else if key == GLFW_KEY_LEFT || key == GLFW_KEY_MINUS then changeRenderDistance(-1)
+        else if key == GLFW_KEY_RIGHT || key == GLFW_KEY_EQUAL then changeRenderDistance(1)
         else if key == GLFW_KEY_M && canUseCheatAuthority && worldCheatsEnabled then toggleGameMode()
         else if key == GLFW_KEY_P then pauseEscReturnsToGame = !pauseEscReturnsToGame
       case Screen.Playing =>
@@ -2912,9 +3101,9 @@ final class Blockbox:
     val value = ((mx - settingX) / (440f * s)).max(0f).min(1f)
     sliderActive match
       case "rd" =>
-        val next = (32 + value * (maxRenderDistance - 32)).round / 8 * 8
+        val next = (minRenderDistance.toFloat + value * (maxRenderDistance - minRenderDistance)).round
         if next != renderDistance then
-          renderDistance = next.max(32).min(maxRenderDistance)
+          renderDistance = next.max(minRenderDistance).min(maxRenderDistance)
           // Do not nuke/reload every chunk while the slider is being dragged.
           // Rapid render-distance changes used to save/dispose/recreate the whole world
           // repeatedly, which could leave workers fighting stale chunks and make terrain
@@ -2994,7 +3183,7 @@ final class Blockbox:
     rect(x, y, w, h, 0.055f, 0.070f, 0.105f, 0.96f)
     rect(x + 2f * s, y + 2f * s, w - 4f * s, 2f * s, 0.22f, 0.25f, 0.32f, 0.18f)
     val shown = value.trim
-    val display = if shown.isEmpty then "..." else shown
+    val display = if shown.isEmpty then "..." else if shown.length > 34 then shown.take(16) + "..." + shown.takeRight(14) else shown
     centeredTextFit(x + w / 2f, y + h / 2f - 6f * s, display, 0.92f, 0.96f, 1f, (0.98f * s).max(0.86f), w - 18f * s)
 
   private def renderHostGame(): Unit =
@@ -3167,11 +3356,11 @@ final class Blockbox:
 
     val bottomH = (34f * s).min(ph * 0.08f).max(28f)
     if inRect(mx, my, px + 22f * s, py + ph - 46f * s, 130f * s, bottomH) then
-      heldInventoryBlock = Block.Air
+      releaseHeldItem()
       openFurnace()
       return
     else if inRect(mx, my, px + pw - 104f * s, py + ph - 46f * s, 82f * s, bottomH) then
-      heldInventoryBlock = Block.Air
+      releaseHeldItem()
       enterGame()
       return
 
@@ -3186,10 +3375,10 @@ final class Blockbox:
       val sx = hotStartX + i * (hotSlot + hotGap)
       if inRect(mx, my, sx, hotbarY, hotSlot, hotSlot) then
         if heldInventoryBlock != Block.Air then
-          assignBlockToHotbar(heldInventoryBlock, i)
-          heldInventoryBlock = Block.Air
+          placeHeldItemInHotbar(i)
         else
           selectedBlock = i
+          takeHotbarSlot(i)
         return
 
     val gridW = pw * 0.56f
@@ -3205,23 +3394,46 @@ final class Blockbox:
       val sx = invX + col * (slot + gap)
       val sy = invY + row * (slot + gap)
       if inRect(mx, my, sx, sy, slot, slot) then
-        if i < items.length then
+        if heldInventoryBlock != Block.Air then
+          if gameMode == GameMode.Survival && heldFromHotbar then
+            addBackpackItem(heldInventoryBlock, heldInventoryCount.max(1))
+          clearHeldItem()
+          return
+        else if i < items.length then
           val block = items(i)
-          heldInventoryBlock = block
+          setHeldItem(block, if gameMode == GameMode.Creative then maxStackSize else inventory(block.ordinal).min(maxStackSize))
         else
-          heldInventoryBlock = Block.Air
+          clearHeldItem()
         return
 
     val craftPanelW = (pw - gridW - 78f * s).max(210f * s)
     val craftX = px + pw - 28f * s - craftPanelW
     val craftY = py + 76f * s
-    val craftSlotH = (58f * s).min(ph / 9f).max(38f * s)
-    val maxCraftVisible = ((ph - 146f * s) / craftSlotH).toInt.max(2)
-    for i <- craftingRecipes.indices.drop(craftingScroll).take(maxCraftVisible) do
-      val by = craftY + (i - craftingScroll) * craftSlotH
-      if inRect(mx, my, craftX, by, craftPanelW, craftSlotH - 5f * s) then
-        tryCraft(i)
+    val cGap = 6f * s
+    val cSlot = ((craftPanelW - 56f * s) / 4f).min(42f * s).max(28f)
+    val gridStartX = craftX + 12f * s
+    val gridStartY = craftY + 26f * s
+    var ci = 0
+    while ci < 9 do
+      val col = ci % 3
+      val row0 = ci / 3
+      val sx = gridStartX + col * (cSlot + cGap)
+      val sy = gridStartY + row0 * (cSlot + cGap)
+      if inRect(mx, my, sx, sy, cSlot, cSlot) then
+        if heldInventoryBlock != Block.Air && validHotbarBlock(heldInventoryBlock) then
+          craftGridBlocks(ci) = heldInventoryBlock
+          if gameMode == GameMode.Survival && heldFromHotbar then
+            addBackpackItem(heldInventoryBlock, heldInventoryCount.max(1))
+            clearHeldItem()
+        else craftGridBlocks(ci) = Block.Air
         return
+      ci += 1
+    val outSize = cSlot * 1.16f
+    val outX = craftX + craftPanelW - outSize - 16f * s
+    val outY = gridStartY + cSlot + cGap
+    if inRect(mx, my, outX, outY, outSize, outSize) then
+      tryCraftGrid()
+      return
 
   private def handleCatalogClick(mx: Float, my: Float): Unit =
     val cx = framebufferWidth / 2f
@@ -3235,7 +3447,7 @@ final class Blockbox:
     val closeH = 28f * s
     if inRect(mx, my, panelX + panelW - 88f * s, panelY + 12f * s, closeW, closeH) then
       catalogScroll = 0
-      heldInventoryBlock = Block.Air
+      releaseHeldItem()
       enterGame()
       return
 
@@ -3250,8 +3462,7 @@ final class Blockbox:
       val sx = hotStartX + i * (hotSlot + hotGap)
       if inRect(mx, my, sx, hotbarY, hotSlot, hotSlot) then
         if heldInventoryBlock != Block.Air then
-          assignBlockToHotbar(heldInventoryBlock, i)
-          heldInventoryBlock = Block.Air
+          placeHeldItemInHotbar(i)
         else selectedBlock = i
         return
 
@@ -3270,7 +3481,7 @@ final class Blockbox:
       val sx = gridX + col * slotSize
       val sy = gridY + row * slotSize
       if inRect(mx, my, sx, sy, slotSize, slotSize) then
-        heldInventoryBlock = items(i)
+        setHeldItem(items(i), maxStackSize)
         return
     val scrollUp = inRect(mx, my, panelX + panelW - 18f * s, panelY + 50f * s, 14f * s, 20f * s)
     val scrollDown = inRect(mx, my, panelX + panelW - 18f * s, hotbarY - 26f * s, 14f * s, 20f * s)
@@ -3295,6 +3506,7 @@ final class Blockbox:
     worldName = uniqueWorldFolderName(worldNameInput)
     clearLoadedChunks(saveFirst = false)
     camera = findSpawn()
+    fallPeakY = camera.y
     velocity = Vec3(0f, 0f, 0f)
     onGround = false
     yaw = 0f
@@ -3406,6 +3618,7 @@ final class Blockbox:
       worldName = uniqueWorldFolderName(if worldNameInput.trim.nonEmpty then worldNameInput else "Hosted World")
       clearLoadedChunks(saveFirst = false)
       camera = findSpawn()
+      fallPeakY = camera.y
       yaw = 0f
       pitch = 0f
       gameMode = createWorldMode
@@ -3572,7 +3785,9 @@ final class Blockbox:
     firstMouse = true
     glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED)
 
-  private def enterGame(): Unit = startGame()
+  private def enterGame(): Unit =
+    if screen == Screen.Inventory || screen == Screen.Catalog || screen == Screen.FurnaceUI then releaseHeldItem()
+    startGame()
 
   private def leaveGame(next: Screen): Unit =
     saveWorld()
@@ -3788,7 +4003,7 @@ final class Blockbox:
       hotbarCounts(i) = 0
       i += 1
     selectedBlock = selectedBlock.max(0).min(hotbarBlocks.length - 1)
-    heldInventoryBlock = Block.Air
+    clearHeldItem()
 
   private def resetInventory(): Unit =
     java.util.Arrays.fill(inventory, 0)
@@ -3802,9 +4017,29 @@ final class Blockbox:
     furnaceFuelRemaining = 0f
     furnaceOutput = Block.Air
     furnaceOutputCount = 0
+    var cg = 0
+    while cg < craftGridBlocks.length do
+      craftGridBlocks(cg) = Block.Air
+      cg += 1
 
   private def validHotbarBlock(block: Block): Boolean =
     block != Block.Air && block != Block.Water && block != Block.Bedrock && block != Block.FurnaceLit
+
+  private def clearHeldItem(): Unit =
+    heldInventoryBlock = Block.Air
+    heldInventoryCount = 0
+    heldFromHotbar = false
+
+  private def releaseHeldItem(): Unit =
+    if gameMode == GameMode.Survival && heldFromHotbar && heldInventoryBlock != Block.Air then addBackpackItem(heldInventoryBlock, heldInventoryCount.max(1))
+    clearHeldItem()
+
+  private def setHeldItem(block: Block, count: Int, fromHotbar: Boolean = false): Unit =
+    if validHotbarBlock(block) && count > 0 then
+      heldInventoryBlock = block
+      heldInventoryCount = count.min(maxStackSize)
+      heldFromHotbar = fromHotbar
+    else clearHeldItem()
 
   private def addBackpackItem(block: Block, amount: Int): Int =
     if !validHotbarBlock(block) || amount <= 0 then 0
@@ -3856,7 +4091,7 @@ final class Blockbox:
         seen += b
         hotbarCounts(i) = hotbarCounts(i).min(maxStackSize)
       i += 1
-    if gameMode == GameMode.Survival && heldInventoryBlock != Block.Air && inventory(heldInventoryBlock.ordinal) <= 0 then heldInventoryBlock = Block.Air
+    if gameMode == GameMode.Survival && heldInventoryBlock != Block.Air && heldInventoryCount <= 0 then clearHeldItem()
 
   private def assignBlockToHotbar(block: Block, preferredSlot: Int): Unit =
     if validHotbarBlock(block) then
@@ -3939,23 +4174,145 @@ final class Blockbox:
         compactHotbarAssignments()
         true
 
-  private type Recipe = (Block, Int, Block, Int, String)
-  private val craftingRecipes: Array[Recipe] = Array(
-    (Block.Wood, 1, Block.Planks, 4, "Wood -> 4 Planks"),
-    (Block.Stone, 3, Block.Brick, 6, "Stone -> 6 Brick"),
-    (Block.Coal, 1, Block.Coal, 4, "Coal -> 4 Coal (compress)"),
-    (Block.Dirt, 2, Block.Grass, 1, "2 Dirt -> Grass"),
-    (Block.Sand, 2, Block.Glass, 2, "2 Sand -> 2 Glass"),
-    (Block.Copper, 2, Block.Copper, 1, "2 Copper -> Block"),
+  private def takeHotbarSlot(slot0: Int): Unit =
+    val slot = slot0.max(0).min(hotbarBlocks.length - 1)
+    val block = hotbarBlocks(slot)
+    val count = if gameMode == GameMode.Creative then maxStackSize else hotbarCounts(slot)
+    if validHotbarBlock(block) && count > 0 then
+      setHeldItem(block, count, fromHotbar = gameMode == GameMode.Survival)
+      if gameMode == GameMode.Survival then
+        hotbarBlocks(slot) = Block.Air
+        hotbarCounts(slot) = 0
+        compactHotbarAssignments()
+
+  private def placeHeldItemInHotbar(slot0: Int): Unit =
+    if heldInventoryBlock == Block.Air then return
+    val slot = slot0.max(0).min(hotbarBlocks.length - 1)
+    val oldBlock = hotbarBlocks(slot)
+    val oldCount = hotbarCounts(slot)
+    if gameMode == GameMode.Creative then
+      hotbarBlocks(slot) = heldInventoryBlock
+      hotbarCounts(slot) = maxStackSize
+      selectedBlock = slot
+      clearHeldItem()
+    else
+      if validHotbarBlock(oldBlock) && oldCount > 0 then addBackpackItem(oldBlock, oldCount)
+      val moveCount = heldInventoryCount.max(1).min(maxStackSize)
+      val canMove = heldFromHotbar || consumeInventory(heldInventoryBlock, moveCount)
+      if canMove then
+        hotbarBlocks(slot) = heldInventoryBlock
+        hotbarCounts(slot) = moveCount
+        selectedBlock = slot
+        clearHeldItem()
+        compactHotbarAssignments()
+      else addChatMessage("Missing item stack")
+
+  private final case class CraftShape(width: Int, height: Int, cells: Vector[Block])
+  private final case class CraftRecipe(width: Int, height: Int, cells: Vector[Block], output: Block, outputCount: Int, label: String)
+
+  private def craftRecipe(rows: Seq[Seq[Block]], output: Block, outputCount: Int, label: String): CraftRecipe =
+    val h = rows.length.max(1)
+    val w = rows.map(_.length).max.max(1)
+    val cells = (0 until h).flatMap { y =>
+      val row = rows(y)
+      (0 until w).map(x => if x < row.length then row(x) else Block.Air)
+    }.toVector
+    CraftRecipe(w, h, cells, output, outputCount, label)
+
+  private def row(blocks: Block*): Seq[Block] = blocks
+
+  private val craftingRecipes: Array[CraftRecipe] = Array(
+    craftRecipe(Seq(row(Block.Wood)), Block.Planks, 4, "oak wood -> planks"),
+    craftRecipe(Seq(row(Block.BirchWood)), Block.BirchPlanks, 4, "birch wood -> planks"),
+    craftRecipe(Seq(row(Block.PineWood)), Block.PinePlanks, 4, "pine wood -> planks"),
+    craftRecipe(Seq(row(Block.AcaciaWood)), Block.AcaciaPlanks, 4, "acacia wood -> planks"),
+    craftRecipe(Seq(row(Block.Wood, Block.Wood), row(Block.Wood, Block.Wood)), Block.Planks, 18, "oak log pack -> planks"),
+    craftRecipe(Seq(row(Block.BirchWood, Block.BirchWood), row(Block.BirchWood, Block.BirchWood)), Block.BirchPlanks, 18, "birch log pack -> planks"),
+    craftRecipe(Seq(row(Block.PineWood, Block.PineWood), row(Block.PineWood, Block.PineWood)), Block.PinePlanks, 18, "pine log pack -> planks"),
+    craftRecipe(Seq(row(Block.AcaciaWood, Block.AcaciaWood), row(Block.AcaciaWood, Block.AcaciaWood)), Block.AcaciaPlanks, 18, "acacia log pack -> planks"),
+    craftRecipe(Seq(row(Block.Stone, Block.Stone), row(Block.Stone, Block.Stone)), Block.Brick, 8, "stone square -> brick"),
+    craftRecipe(Seq(row(Block.Clay, Block.Clay), row(Block.Clay, Block.Clay)), Block.Brick, 6, "clay square -> brick"),
+    craftRecipe(Seq(row(Block.Sand, Block.Clay), row(Block.Clay, Block.Sand)), Block.Brick, 4, "sand clay mix -> brick"),
+    craftRecipe(Seq(row(Block.Sand, Block.Sand), row(Block.Sand, Block.Sand)), Block.Glass, 4, "sand square -> glass"),
+    craftRecipe(Seq(row(Block.Glass, Block.Glass), row(Block.Glass, Block.Glass)), Block.Glass, 4, "glass polish"),
+    craftRecipe(Seq(row(Block.Sand, Block.Sand, Block.Sand), row(Block.Sand, Block.Clay, Block.Sand), row(Block.Sand, Block.Sand, Block.Sand)), Block.Glass, 12, "clear glass batch"),
+    craftRecipe(Seq(row(Block.Stone, Block.Stone, Block.Stone), row(Block.Stone, Block.Air, Block.Stone), row(Block.Stone, Block.Stone, Block.Stone)), Block.Furnace, 1, "stone furnace"),
+    craftRecipe(Seq(row(Block.Planks, Block.Planks), row(Block.Planks, Block.Planks)), Block.Furnace, 1, "plank crate -> furnace"),
+    craftRecipe(Seq(row(Block.BirchPlanks, Block.BirchPlanks), row(Block.BirchPlanks, Block.BirchPlanks)), Block.Furnace, 1, "birch crate -> furnace"),
+    craftRecipe(Seq(row(Block.PinePlanks, Block.PinePlanks), row(Block.PinePlanks, Block.PinePlanks)), Block.Furnace, 1, "pine crate -> furnace"),
+    craftRecipe(Seq(row(Block.AcaciaPlanks, Block.AcaciaPlanks), row(Block.AcaciaPlanks, Block.AcaciaPlanks)), Block.Furnace, 1, "acacia crate -> furnace"),
+    craftRecipe(Seq(row(Block.Dirt, Block.Dirt), row(Block.Dirt, Block.Dirt)), Block.Grass, 1, "dirt patch -> grass"),
+    craftRecipe(Seq(row(Block.Grass), row(Block.Dirt)), Block.Dirt, 2, "turn grass to dirt"),
+    craftRecipe(Seq(row(Block.Snow, Block.Snow), row(Block.Snow, Block.Snow)), Block.Snow, 4, "packed snow"),
+    craftRecipe(Seq(row(Block.Cactus, Block.Cactus), row(Block.Cactus, Block.Cactus)), Block.Cactus, 4, "cactus bundle"),
+    craftRecipe(Seq(row(Block.Coal, Block.Coal), row(Block.Coal, Block.Coal)), Block.Coal, 4, "coal bundle"),
+    craftRecipe(Seq(row(Block.Copper, Block.Copper), row(Block.Copper, Block.Copper)), Block.Copper, 4, "copper pack"),
+    craftRecipe(Seq(row(Block.IronOre, Block.IronOre), row(Block.IronOre, Block.IronOre)), Block.IronOre, 4, "iron ore pack"),
+    craftRecipe(Seq(row(Block.GoldOre, Block.GoldOre), row(Block.GoldOre, Block.GoldOre)), Block.GoldOre, 4, "gold ore pack"),
+    craftRecipe(Seq(row(Block.Diamond, Block.Diamond), row(Block.Diamond, Block.Diamond)), Block.Diamond, 4, "diamond cluster"),
+    craftRecipe(Seq(row(Block.IronOre, Block.Coal)), Block.IronIngot, 1, "quick iron bloom"),
+    craftRecipe(Seq(row(Block.GoldOre, Block.Coal)), Block.GoldIngot, 1, "quick gold bloom"),
+    craftRecipe(Seq(row(Block.IronIngot, Block.IronIngot), row(Block.IronIngot, Block.IronIngot)), Block.IronOre, 1, "iron blocky ore pack"),
+    craftRecipe(Seq(row(Block.GoldIngot, Block.GoldIngot), row(Block.GoldIngot, Block.GoldIngot)), Block.GoldOre, 1, "gold blocky ore pack"),
+    craftRecipe(Seq(row(Block.Brick, Block.Brick), row(Block.Brick, Block.Brick)), Block.Brick, 4, "brick stack"),
+    craftRecipe(Seq(row(Block.RainbowBlock, Block.Glass), row(Block.Glass, Block.RainbowBlock)), Block.RainbowBlock, 4, "rainbow glass mix"),
+    craftRecipe(Seq(row(Block.Leaves, Block.Leaves), row(Block.Leaves, Block.Leaves)), Block.Leaves, 4, "leaf bundle"),
+    craftRecipe(Seq(row(Block.BirchLeaves, Block.BirchLeaves), row(Block.BirchLeaves, Block.BirchLeaves)), Block.BirchLeaves, 4, "birch leaf bundle"),
+    craftRecipe(Seq(row(Block.PineLeaves, Block.PineLeaves), row(Block.PineLeaves, Block.PineLeaves)), Block.PineLeaves, 4, "pine leaf bundle"),
+    craftRecipe(Seq(row(Block.AcaciaLeaves, Block.AcaciaLeaves), row(Block.AcaciaLeaves, Block.AcaciaLeaves)), Block.AcaciaLeaves, 4, "acacia leaf bundle")
   )
 
-  private def tryCraft(index: Int): Unit =
-    if index >= 0 && index < craftingRecipes.length then
-      val (input, inputCount, output, outputCount, _) = craftingRecipes(index)
-      if totalItemCount(input) >= inputCount then
-        consumeInventory(input, inputCount)
-        gainItem(output, outputCount)
-        playPlaceSound()
+  private def normalizeCraftGrid(cells: Array[Block]): Option[CraftShape] =
+    var minX = 3; var minY = 3; var maxX = -1; var maxY = -1
+    var i = 0
+    while i < cells.length do
+      if cells(i) != Block.Air then
+        val x = i % 3; val y = i / 3
+        minX = minX.min(x); minY = minY.min(y); maxX = maxX.max(x); maxY = maxY.max(y)
+      i += 1
+    if maxX < 0 then None
+    else
+      val w = maxX - minX + 1
+      val h = maxY - minY + 1
+      val out = ArrayBuffer.empty[Block]
+      var y = minY
+      while y <= maxY do
+        var x = minX
+        while x <= maxX do
+          out += cells(y * 3 + x)
+          x += 1
+        y += 1
+      Some(CraftShape(w, h, out.toVector))
+
+  private def currentCraftingResult: Option[CraftRecipe] =
+    normalizeCraftGrid(craftGridBlocks).flatMap { shape =>
+      craftingRecipes.find(r => r.width == shape.width && r.height == shape.height && r.cells == shape.cells)
+    }
+
+  private def craftInputCounts: Map[Block, Int] =
+    val counts = scala.collection.mutable.HashMap.empty[Block, Int]
+    var i = 0
+    while i < craftGridBlocks.length do
+      val b = craftGridBlocks(i)
+      if b != Block.Air then counts(b) = counts.getOrElse(b, 0) + 1
+      i += 1
+    counts.toMap
+
+  private def canCraftCurrent(recipe: CraftRecipe): Boolean =
+    gameMode == GameMode.Creative || craftInputCounts.forall { case (b, n) => totalItemCount(b) >= n }
+
+  private def tryCraftGrid(): Unit =
+    currentCraftingResult match
+      case Some(recipe) if canCraftCurrent(recipe) =>
+        val counts = craftInputCounts
+        var ok = true
+        counts.foreach { case (b, n) => if !consumeInventory(b, n) then ok = false }
+        if ok then
+          gainItem(recipe.output, recipe.outputCount)
+          playPlaceSound()
+        else addChatMessage("Missing crafting ingredients")
+      case Some(_) => addChatMessage("Missing crafting ingredients")
+      case None => addChatMessage("No matching recipe")
 
   private def submitChat(): Unit =
     val text = chatInput.trim
@@ -3995,7 +4352,11 @@ final class Blockbox:
     else
       val raw = input.drop(1)
       val parts = raw.split("\\s+", -1)
-      val commands = (Seq("/help", "/enablecheats", "/op", "/deop", "/gamemode", "/gm", "/timeset", "/fly", "/tp", "/teleport") ++ modManager.commandNames.map("/" + _)).distinct
+      val commands = (Seq(
+        "/help", "/enablecheats", "/op", "/deop", "/gamemode", "/gm",
+        "/timeset", "/time", "/fly", "/tp", "/teleport", "/spawn",
+        "/give", "/heal", "/feed", "/where", "/biome", "/seed", "/save", "/clear"
+      ) ++ modManager.commandNames.map("/" + _)).distinct
       if !raw.contains(" ") then
         val prefix = "/" + raw.toLowerCase
         commands.filter(_.startsWith(prefix)).take(8)
@@ -4004,14 +4365,20 @@ final class Blockbox:
           case "gamemode" | "gm" =>
             val prefix = parts.lastOption.getOrElse("").toLowerCase
             Seq("survival", "creative").filter(_.startsWith(prefix)).map(m => "/" + parts.head + " " + m)
-          case "timeset" =>
+          case "timeset" | "time" =>
             val prefix = parts.lastOption.getOrElse("").toLowerCase
-            Seq("day", "night", "reset").filter(_.startsWith(prefix)).map(v => "/" + parts.head + " " + v)
+            Seq("day", "noon", "sunset", "night", "midnight", "sunrise", "reset").filter(_.startsWith(prefix)).map(v => "/" + parts.head + " " + v)
+          case "give" =>
+            if parts.length <= 2 then
+              val last = parts.lastOption.getOrElse("")
+              val prefix = last.toLowerCase
+              Block.all.filter(validHotbarBlock).map(_.toString.toLowerCase).filter(_.startsWith(prefix)).take(8).map(name => "/" + raw.dropRight(last.length) + name)
+            else Seq("/" + parts.head + " " + parts(1) + " 64")
           case "op" | "deop" =>
             val last = parts.lastOption.getOrElse("")
             val prefix = last.toLowerCase
             allPlayerNames.filter(_.toLowerCase.startsWith(prefix)).take(8).map(name => "/" + raw.dropRight(last.length) + name)
-          case "tp" | "teleport" =>
+          case "tp" | "teleport" | "spawn" | "heal" | "feed" =>
             val last = parts.lastOption.getOrElse("")
             val prefix = last.toLowerCase
             allPlayerNames.filter(_.toLowerCase.startsWith(prefix)).take(8).map(name => "/" + raw.dropRight(last.length) + name)
@@ -4049,7 +4416,9 @@ final class Blockbox:
 
   private def setGameModeForPlayer(name: String, mode: GameMode): Unit =
     val safe = networkSafeName(name)
-    if safe.equalsIgnoreCase(playerName) then toggleTo(mode)
+    if safe.equalsIgnoreCase(playerName) then
+      if gameMode == mode then addChatMessage(s"Already in $mode mode")
+      else toggleTo(mode)
     else if gameServer != null then
       gameServer.broadcast("GMODE|" + networkEscape(safe) + "|" + mode.ordinal.toString)
       addChatMessage(s"Set $safe to $mode")
@@ -4065,27 +4434,94 @@ final class Blockbox:
           velocity = Vec3(0f, 0f, 0f)
           addChatMessage("Flight enabled")
         else
-          onGround = true
-          velocity = Vec3(0f, 0f, 0f)
+          onGround = false
+          velocity = Vec3(0f, -0.5f, 0f)
           addChatMessage("Flight disabled")
     else if gameServer != null then
       gameServer.broadcast("FLY|" + networkEscape(safe) + "|TOGGLE")
       addChatMessage(s"Toggled flight for $safe")
     else addChatMessage("Only the host can toggle another player's flight")
 
-  private def setTimeCommand(mode: String): Unit =
-    mode match
+  private def setTimeCommand(mode: String): Boolean =
+    val normalized = Option(mode).getOrElse("").trim.toLowerCase
+    val applied = normalized match
+      case "sunrise" =>
+        timeOverride = Some(0f)
+        addChatMessage("Set time to sunrise")
+        true
       case "day" =>
         timeOverride = Some(dayLengthSeconds * 0.25f)
         addChatMessage("Set time to day")
+        true
+      case "noon" =>
+        timeOverride = Some(dayLengthSeconds * 0.50f)
+        addChatMessage("Set time to noon")
+        true
+      case "sunset" =>
+        timeOverride = Some(dayLengthSeconds * 0.92f)
+        addChatMessage("Set time to sunset")
+        true
       case "night" =>
-        timeOverride = Some(dayLengthSeconds + nightLengthSeconds * 0.25f)
+        timeOverride = Some(dayLengthSeconds + nightLengthSeconds * 0.18f)
         addChatMessage("Set time to night")
+        true
+      case "midnight" =>
+        timeOverride = Some(dayLengthSeconds + nightLengthSeconds * 0.50f)
+        addChatMessage("Set time to midnight")
+        true
       case "reset" =>
         timeOverride = None
         addChatMessage("Time override cleared")
-      case _ => ()
-    if gameServer != null then gameServer.broadcast("TIME|" + mode)
+        true
+      case _ => false
+    if applied && gameServer != null then gameServer.broadcast("TIME|" + normalized)
+    applied
+
+  private def parseGiveBlock(text: String): Option[Block] =
+    Block.find(text).filter(validHotbarBlock)
+
+  private def giveItemForPlayer(target: String, block: Block, count: Int): Unit =
+    val safe = networkSafeName(target)
+    val amount = count.max(1).min(999)
+    if safe.equalsIgnoreCase(playerName) then
+      gainItem(block, amount)
+      addChatMessage(s"Gave $amount ${blockName(block)} to $safe")
+    else if gameServer != null then
+      gameServer.broadcast("GIVE|" + networkEscape(safe) + "|" + block.id.toInt.toString + "|" + amount.toString)
+      addChatMessage(s"Gave $amount ${blockName(block)} to $safe")
+    else addChatMessage("Only the host can give items to another player")
+
+  private def setVitalsForPlayer(target: String, health: Option[Float], food: Option[Float], label: String): Unit =
+    val safe = networkSafeName(target)
+    val hp = health.map(_.max(0f).min(maxPlayerHealth))
+    val fd = food.map(_.max(0f).min(maxPlayerFood))
+    if safe.equalsIgnoreCase(playerName) then
+      hp.foreach(v => playerHealth = v)
+      fd.foreach(v => playerFood = v)
+      addChatMessage(label + " " + safe)
+    else if gameServer != null then
+      val hpText = hp.map(v => f"$v%.2f").getOrElse("-1")
+      val foodText = fd.map(v => f"$v%.2f").getOrElse("-1")
+      gameServer.broadcast("VITAL|" + networkEscape(safe) + "|" + hpText + "|" + foodText + "|" + networkEscape(label))
+      addChatMessage(label + " " + safe)
+    else addChatMessage("Only the host can change another player's health or food")
+
+  private def biomeNameAt(x: Int, z: Int, y: Int): String =
+    val savanna = terrainGen.savannaBlendAt(x, z, y)
+    val birch = terrainGen.birchBlendAt(x, z, y)
+    if savanna > 0.58f && savanna >= birch then "Savanna"
+    else if birch > 0.58f && birch > savanna then "Birch Grove"
+    else if savanna > 0.24f && birch > 0.24f then "Mixed Grassland"
+    else if savanna > 0.24f then "Savanna Edge"
+    else if birch > 0.24f then "Birch Edge"
+    else "Plains"
+
+  private def addPositionReport(name: String, pos: Vec3): Unit =
+    val bx = floor(pos.x).toInt
+    val by = floor(pos.y).toInt
+    val bz = floor(pos.z).toInt
+    val biome = biomeNameAt(bx, bz, by)
+    addChatMessage(s"$name: x=$bx y=$by z=$bz chunk=(${chunkCoordBlock(bx)}, ${chunkCoordBlock(bz)}) biome=$biome")
 
   private def parseCoord(text: String, current: Float): Option[Float] =
     try
@@ -4110,21 +4546,24 @@ final class Blockbox:
       if remoteSender.isEmpty && gameClient != null && gameServer == null && modManager.commandIsServerInteractive(command) then
         if isOppedName(playerName) then
           gameClient.send("CMD|" + networkEscape(trimmed))
-          addChatMessage("Mod command sent to host")
         else addChatMessage("That mod command is server-side. Ask the host for /op.")
       else modManager.executeCommand(command, args.drop(1), actorName, remoteSender.nonEmpty)
       return
-    val isCheat = Set("gamemode", "gm", "timeset", "fly", "tp", "teleport", "op", "deop").contains(command)
+    val isCheat = Set(
+      "gamemode", "gm", "timeset", "time", "fly", "tp", "teleport",
+      "spawn", "give", "heal", "feed", "op", "deop"
+    ).contains(command)
 
     if remoteSender.isEmpty && isClientOnlyOperator && isCheat && command != "enablecheats" && command != "cheats" && command != "op" && command != "deop" then
       gameClient.send("CMD|" + networkEscape(trimmed))
-      addChatMessage("Command sent to host")
       return
 
     if command == "enablecheats" || command == "cheats" then
       if actorIsHostLocal then
-        worldCheatsEnabled = true
-        addChatMessage("Cheats enabled")
+        if worldCheatsEnabled then addChatMessage("Cheats are already enabled")
+        else
+          worldCheatsEnabled = true
+          addChatMessage("Cheats enabled")
       else addChatMessage("Only the host can enable cheats")
       return
 
@@ -4140,8 +4579,11 @@ final class Blockbox:
         return
       val target = findPlayerName(args(1)).getOrElse(networkSafeName(args(1)))
       val value = command == "op"
-      setOppedName(target, value)
-      broadcastOpState(target, value)
+      if value && isOppedName(target) then addChatMessage(s"$target is already an operator")
+      else if !value && !isOppedName(target) then addChatMessage(s"$target is not an operator")
+      else
+        setOppedName(target, value)
+        broadcastOpState(target, value)
       return
 
     if isCheat && !actorIsOp then
@@ -4162,19 +4604,30 @@ final class Blockbox:
         parsedMode match
           case Some(nextMode) => setGameModeForPlayer(targetName, nextMode)
           case None => addChatMessage("Usage: /gamemode <survival|creative> [player]")
-      case "timeset" =>
+      case "timeset" | "time" =>
         val when = if args.length > 1 then args(1).toLowerCase else ""
-        when match
-          case "day" =>
-            setTimeCommand("day")
-          case "night" =>
-            setTimeCommand("night")
-          case "reset" =>
-            setTimeCommand("reset")
-          case _ => addChatMessage("Usage: /timeset <day|night|reset>")
+        if !setTimeCommand(when) then addChatMessage("Usage: /time <sunrise|day|noon|sunset|night|midnight|reset>")
       case "fly" =>
         val targetName = if args.length > 1 then findPlayerName(args(1)).getOrElse(networkSafeName(args(1))) else actorName
         toggleFlyForPlayer(targetName)
+      case "spawn" =>
+        val targetName = if args.length > 1 then findPlayerName(args(1)).getOrElse(networkSafeName(args(1))) else actorName
+        teleportPlayer(targetName, findSpawn())
+      case "give" =>
+        if args.length < 2 then addChatMessage("Usage: /give <block> [count] [player]")
+        else
+          parseGiveBlock(args(1)) match
+            case Some(block) =>
+              val amount = if args.length > 2 then args(2).toIntOption.getOrElse(64) else 64
+              val targetName = if args.length > 3 then findPlayerName(args(3)).getOrElse(networkSafeName(args(3))) else actorName
+              giveItemForPlayer(targetName, block, amount)
+            case None => addChatMessage("Unknown or ungiveable block: " + args(1))
+      case "heal" =>
+        val targetName = if args.length > 1 then findPlayerName(args(1)).getOrElse(networkSafeName(args(1))) else actorName
+        setVitalsForPlayer(targetName, Some(maxPlayerHealth), None, "Healed")
+      case "feed" =>
+        val targetName = if args.length > 1 then findPlayerName(args(1)).getOrElse(networkSafeName(args(1))) else actorName
+        setVitalsForPlayer(targetName, None, Some(maxPlayerFood), "Fed")
       case "tp" | "teleport" =>
         if args.length == 2 then
           findPlayerName(args(1)).flatMap(positionOfPlayer) match
@@ -4204,13 +4657,38 @@ final class Blockbox:
             case (Some(target), Some(px), Some(py), Some(pz)) => teleportPlayer(target, Vec3(px, py, pz))
             case _ => addChatMessage("Usage: /tp <target> <x> <y> <z>")
         else addChatMessage("Usage: /tp <player> | /tp <target> <destination> | /tp <x> <y> <z>")
+      case "where" =>
+        val targetName = if args.length > 1 then findPlayerName(args(1)).getOrElse(networkSafeName(args(1))) else actorName
+        positionOfPlayer(targetName) match
+          case Some(pos) => addPositionReport(targetName, pos)
+          case None => addChatMessage("Unknown player: " + targetName)
+      case "biome" =>
+        val pos = positionOfPlayer(actorName).getOrElse(camera)
+        val bx = floor(pos.x).toInt
+        val by = floor(pos.y).toInt
+        val bz = floor(pos.z).toInt
+        val savanna = terrainGen.savannaBlendAt(bx, bz, by)
+        val birch = terrainGen.birchBlendAt(bx, bz, by)
+        val tint = terrainGen.grassTintAt(bx, bz, by)
+        addChatMessage(f"Biome: ${biomeNameAt(bx, bz, by)} savanna=$savanna%.2f birch=$birch%.2f grassRGB=${tint._1}%.2f/${tint._2}%.2f/${tint._3}%.2f")
+      case "seed" =>
+        addChatMessage(s"World: $worldName seed=$worldSeed")
+      case "save" =>
+        if !actorIsHostLocal then addChatMessage("Only the host can save the world")
+        else
+          saveWorld()
+          addChatMessage(s"Saved world: $worldName")
+      case "clear" =>
+        chatMessages.clear()
       case "help" =>
-        addChatMessage("Commands: /help, /enablecheats, /op, /deop, /gamemode, /timeset, /fly, /tp")
+        addChatMessage("Commands: /help, /where, /biome, /seed, /clear, /save")
+        addChatMessage("Admin: /enablecheats, /op, /deop, /gamemode, /time, /fly, /tp, /spawn, /give, /heal, /feed")
       case _ =>
         addChatMessage(s"Unknown command: /${args(0)}")
 
   private def toggleTo(mode: GameMode): Unit =
     gameMode = mode
+    if mode == GameMode.Survival then flyEnabled = false
     velocity = Vec3(0f, 0f, 0f); onGround = false
     addChatMessage(s"Game mode set to $mode")
 
@@ -4327,8 +4805,8 @@ final class Blockbox:
               velocity = Vec3(0f, 0f, 0f)
               addChatMessage("Flight enabled")
             else
-              onGround = true
-              velocity = Vec3(0f, 0f, 0f)
+              onGround = false
+              velocity = Vec3(0f, -0.5f, 0f)
               addChatMessage("Flight disabled")
           lastSpacePressTime = now
         if flyEnabled then
@@ -4337,14 +4815,25 @@ final class Blockbox:
           if down(GLFW_KEY_LEFT_SHIFT) then move -= Vec3(0, 1, 0)
           camera = camera + move.normalized * speed * dt
         else
-          val speed = if fastMove then 16f else 9f
+          val submerged = waterSubmersion
+          val headInWater = blockAt(camera) == Block.Water
+          val bodyInWater = blockAt(camera - Vec3(0f, 0.8f, 0f)) == Block.Water
+          val swimming = headInWater || bodyInWater || submerged > 0f
+          val speed =
+            if swimming then if fastMove then 6.5f else 3.0f
+            else if fastMove then 16f else 9f
           val hMove = move.normalized * speed * dt
           movePlayer(hMove.x, 0f, hMove.z)
-          if spacePressed && onGround then
-            velocity = Vec3(0f, 12.5f, 0f)
+          if swimming then
+            updateSwimming(dt, swimming, headInWater, bodyInWater, submerged)
+            moveVertical(velocity.y * dt)
             onGround = false
-          velocity = Vec3(0f, (velocity.y - 52f * dt).max(-78f), 0f)
-          moveVertical(velocity.y * dt)
+          else
+            if spacePressed && onGround then
+              velocity = Vec3(0f, 12.5f, 0f)
+              onGround = false
+            velocity = Vec3(0f, (velocity.y - 52f * dt).max(-78f), 0f)
+            moveVertical(velocity.y * dt)
       case GameMode.Survival =>
         val submerged = waterSubmersion
         val headInWater = blockAt(camera) == Block.Water
@@ -4353,7 +4842,7 @@ final class Blockbox:
         val speed =
           if fastMove then 13f
           else if crouching then 3.2f
-          else if swimming then if sprinting then 5.0f else 3.5f
+          else if swimming then if sprinting then 3.8f else 2.8f
           else if sprinting then 7.2f
           else 5.5f
         val airControl = if onGround || swimming then 1f else 0.72f
@@ -4366,6 +4855,9 @@ final class Blockbox:
           movePlayer(horizontal.x, 0f, horizontal.z)
         updateSwimming(dt, swimming, headInWater, bodyInWater, submerged)
         moveVertical(velocity.y * dt)
+        if swimming then onGround = false
+    updateEnvironmentalDamage(dt)
+    updateHealthRegen(dt)
     updateWater(dt)
     updateBubbles(dt)
     updateSandFalling()
@@ -4433,7 +4925,7 @@ final class Blockbox:
         onGround = false
       else
         velocity = Vec3(0f, (velocity.y * 0.85f - 1f * dt).max(-2f).min(2f), 0f)
-        if abs(velocity.y) < 0.3f then onGround = velocity.y >= -0.1f
+        onGround = false
     else
       velocity = Vec3(0f, (velocity.y - 52f * dt).max(-78f), 0f)
       if onGround && swimUp then velocity = Vec3(0f, 8.4f, 0f)
@@ -4492,6 +4984,15 @@ final class Blockbox:
         case Some(chunk) =>
           val cx = chunkCoordBlock(x); val cz = chunkCoordBlock(z)
           chunk.getWaterLevel(x - cx * Terrain.chunkSize, y, z - cz * Terrain.chunkSize)
+        case None => 0
+
+  private def waterRawLevelAt(x: Int, y: Int, z: Int): Int =
+    if y < 0 || y >= Terrain.worldHeight then 0
+    else
+      loadedChunkForBlock(x, z) match
+        case Some(chunk) =>
+          val cx = chunkCoordBlock(x); val cz = chunkCoordBlock(z)
+          chunk.getWaterRawLevel(x - cx * Terrain.chunkSize, y, z - cz * Terrain.chunkSize)
         case None => 0
 
   private def setWaterLevelAt(x: Int, y: Int, z: Int, level: Int): Unit =
@@ -4562,36 +5063,49 @@ final class Blockbox:
       waterLevels.remove((wx, wy, wz))
       return
 
-    val level = waterLevelAt(wx, wy, wz).max(1).min(8)
-    val source = level >= 8
+    val rawLevel = waterRawLevelAt(wx, wy, wz)
+    val level = (if rawLevel <= 0 then 8 else rawLevel).max(1).min(8)
+    val supportedFromAbove = activeBlockAt(wx, wy + 1, wz) == Block.Water
+    val source = rawLevel <= 0 || (rawLevel >= 8 && !supportedFromAbove)
+    val dirs = Array((1, 0), (-1, 0), (0, 1), (0, -1))
+    def fedByHorizontalFlow: Boolean =
+      dirs.exists { case (dx, dz) =>
+        val nx = wx + dx
+        val nz = wz + dz
+        activeBlockAt(nx, wy, nz) == Block.Water && waterLevelAt(nx, wy, nz) > level
+      }
 
     if wy > 0 then
       val below = activeBlockAt(wx, wy - 1, wz)
       if below == Block.Air then
-        val downLevel = if source then 8 else level
+        val downLevel = if source then 7 else level
         setFlowWater(wx, wy - 1, wz, downLevel)
-        if !source then clearFlowWater(wx, wy, wz)
+        if !source && !supportedFromAbove && !fedByHorizontalFlow then
+          clearFlowWater(wx, wy, wz)
+          wakeWaterAround(wx, wy - 1, wz)
+          return
+        else if !source && supportedFromAbove && !fedByHorizontalFlow then
+          setWaterLevelAt(wx, wy, wz, level)
+          markWaterActive(wx, wy, wz)
+          wakeWaterAround(wx, wy - 1, wz)
+          return
         else
-          setWaterLevelAt(wx, wy, wz, 8)
+          setWaterLevelAt(wx, wy, wz, if source then 8 else level)
           markWaterActive(wx, wy, wz)
         wakeWaterAround(wx, wy - 1, wz)
-        return
       else if below == Block.Water then
         val belowLevel = waterLevelAt(wx, wy - 1, wz)
-        if belowLevel > 0 && belowLevel < 8 then
-          val add = (8 - belowLevel).min(if source then 8 else (level - 1).max(0))
-          if add > 0 then
-            setWaterLevelAt(wx, wy - 1, wz, belowLevel + add)
-            if !source then
-              val remaining = level - add
-              if remaining <= 0 then clearFlowWater(wx, wy, wz)
-              else setWaterLevelAt(wx, wy, wz, remaining)
-            dirtyChunkAt(wx, wz)
-            markWaterActive(wx, wy - 1, wz)
-            if source || waterLevelAt(wx, wy, wz) > 1 then markWaterActive(wx, wy, wz)
-            return
+        val desiredBelow = if source then 7 else level
+        if belowLevel > 0 && belowLevel < desiredBelow then
+          setWaterLevelAt(wx, wy - 1, wz, desiredBelow)
+          dirtyChunkAt(wx, wz)
+          markWaterActive(wx, wy - 1, wz)
+          if source || supportedFromAbove || waterLevelAt(wx, wy, wz) > 1 then markWaterActive(wx, wy, wz)
+          return
+        if !source && supportedFromAbove && !fedByHorizontalFlow then
+          markWaterActive(wx, wy, wz)
+          return
 
-    val dirs = Array((1, 0), (-1, 0), (0, 1), (0, -1))
     val targetLevel = if source then 7 else level - 1
     var changed = false
     if targetLevel > 0 then
@@ -4620,7 +5134,7 @@ final class Blockbox:
       // Drain disconnected non-source water gradually when it has no stronger neighbor.
       // This keeps old flows from hovering forever after a source is removed.
       val supported =
-        activeBlockAt(wx, wy + 1, wz) == Block.Water ||
+        supportedFromAbove ||
         dirs.exists { case (dx, dz) =>
           val nx = wx + dx; val nz = wz + dz
           activeBlockAt(nx, wy, nz) == Block.Water && waterLevelAt(nx, wy, nz) > level
@@ -4643,9 +5157,9 @@ final class Blockbox:
     fallingSandParticles.clear()
 
   private def blockHardness(block: Block): Float = block match
-    case Block.Leaves | Block.Snow => 0.18f
+    case Block.Leaves | Block.BirchLeaves | Block.PineLeaves | Block.AcaciaLeaves | Block.Snow => 0.18f
     case Block.Dirt | Block.Sand | Block.Grass => 0.42f
-    case Block.Wood | Block.Planks => 0.75f
+    case Block.Wood | Block.BirchWood | Block.PineWood | Block.AcaciaWood | Block.Planks | Block.BirchPlanks | Block.PinePlanks | Block.AcaciaPlanks => 0.75f
     case Block.Glass => 0.35f
     case Block.Stone | Block.Coal | Block.Copper | Block.Clay | Block.IronOre => 1.15f
     case Block.GoldOre => 1.50f
@@ -4653,6 +5167,52 @@ final class Blockbox:
     case Block.Diamond => 2.50f
     case Block.Bedrock => 9999f
     case _ => 0.5f
+
+  private def damagePlayer(amount: Float, reason: String): Unit =
+    if gameMode == GameMode.Survival && amount > 0f then
+      val old = playerHealth
+      playerHealth = (playerHealth - amount).max(0f)
+      if old > playerHealth then
+        timeSinceLastDamage = 0f
+        val shown = (math.ceil(amount.toDouble * 2.0) / 2.0).toFloat
+        addChatMessage(s"Took $shown damage${if reason.nonEmpty then s" from $reason" else ""}")
+      if playerHealth <= 0f then
+        val spawn = findSpawn()
+        camera = spawn
+        velocity = Vec3(0f, 0f, 0f)
+        onGround = false
+        fallPeakY = camera.y
+        playerHealth = maxPlayerHealth
+        playerFood = 20f
+        timeSinceLastDamage = healthRegenDelay
+        addChatMessage("You woke up at spawn")
+
+  private def updateHealthRegen(dt: Float): Unit =
+    if gameMode == GameMode.Survival && playerHealth > 0f && playerHealth < maxPlayerHealth then
+      timeSinceLastDamage += dt
+      if timeSinceLastDamage >= healthRegenDelay then playerHealth = (playerHealth + healthRegenRate * dt).min(maxPlayerHealth)
+    else if playerHealth >= maxPlayerHealth then
+      playerHealth = maxPlayerHealth
+      timeSinceLastDamage = healthRegenDelay
+
+  private def handleLandingImpact(): Unit =
+    if gameMode == GameMode.Survival && waterSubmersion < 0.25f then
+      val distance = (fallPeakY - camera.y).max(0f)
+      if distance > 4.2f then
+        damagePlayer((distance - 3.2f) * 0.85f, "falling")
+
+  private def playerTouching(block: Block, extra: Float = 0.05f): Boolean =
+    val half = 0.32f + extra
+    val minX = floor(camera.x - half).toInt; val maxX = floor(camera.x + half).toInt
+    val minY = floor(camera.y - 1.62f).toInt; val maxY = floor(camera.y + 0.20f).toInt
+    val minZ = floor(camera.z - half).toInt; val maxZ = floor(camera.z + half).toInt
+    (minX to maxX).exists(x => (minY to maxY).exists(y => (minZ to maxZ).exists(z => activeBlockAt(x, y, z) == block)))
+
+  private def updateEnvironmentalDamage(dt: Float): Unit =
+    if cactusDamageCooldown > 0f then cactusDamageCooldown = (cactusDamageCooldown - dt).max(0f)
+    if gameMode == GameMode.Survival && cactusDamageCooldown <= 0f && playerTouching(Block.Cactus, 0.08f) then
+      cactusDamageCooldown = 0.70f
+      damagePlayer(1f, "cactus")
 
   private def movePlayer(dx: Float, dy: Float, dz: Float): Unit =
     val step = 0.35f
@@ -4676,9 +5236,13 @@ final class Blockbox:
       val next = camera + Vec3(0f, dy, 0f)
       if !collidesPlayer(next) then
         camera = next
+        if dy > 0f || velocity.y > 0f then fallPeakY = camera.y.max(fallPeakY)
+        else if !onGround then fallPeakY = camera.y.max(fallPeakY)
         onGround = false
       else if dy < 0f then
+        handleLandingImpact()
         onGround = true
+        fallPeakY = camera.y
         velocity = Vec3(0f, 0f, 0f)
       else
         velocity = Vec3(0f, 0f, 0f)
@@ -4707,6 +5271,7 @@ final class Blockbox:
 
   private def toggleGameMode(): Unit =
     gameMode = if gameMode == GameMode.Survival then GameMode.Creative else GameMode.Survival
+    if gameMode == GameMode.Survival then flyEnabled = false
     velocity = Vec3(0f, 0f, 0f); onGround = false
 
   private def toggleFullscreen(): Unit =
@@ -4803,6 +5368,7 @@ final class Blockbox:
               waterFlowQueued.clear()
               clearLoadedChunks(saveFirst = false)
             camera = Vec3(sx, sy, sz)
+            fallPeakY = camera.y
             velocity = Vec3(0f, 0f, 0f); onGround = false
             syncChunks()
             forceCameraChunkRing(0)
@@ -4850,6 +5416,24 @@ final class Blockbox:
           if parts.length >= 3 then
             val name = networkSafeName(parts(1))
             if name.equalsIgnoreCase(playerName) then toggleFlyForPlayer(playerName)
+        else if line.startsWith("GIVE|") then
+          if parts.length >= 4 then
+            val name = networkSafeName(parts(1))
+            if name.equalsIgnoreCase(playerName) then
+              val block = Block.fromId(parts(2).toInt.toByte)
+              val count = parts(3).toInt.max(1).min(999)
+              gainItem(block, count)
+              addChatMessage(s"Received $count ${blockName(block)}")
+        else if line.startsWith("VITAL|") then
+          if parts.length >= 4 then
+            val name = networkSafeName(parts(1))
+            if name.equalsIgnoreCase(playerName) then
+              val hp = parts(2).toFloat
+              val food = parts(3).toFloat
+              if hp >= 0f then playerHealth = hp.max(0f).min(maxPlayerHealth)
+              if food >= 0f then playerFood = food.max(0f).min(maxPlayerFood)
+              val label = if parts.length >= 5 then networkUnescape(parts.drop(4).mkString("|")) else "Updated"
+              addChatMessage(label + " " + playerName)
         else if line.startsWith("TIME|") then
           if parts.length >= 2 then setTimeCommand(parts(1).toLowerCase)
         else if line.startsWith("RCMD|") then
@@ -4873,6 +5457,7 @@ final class Blockbox:
             val x = parts(2).toFloat; val y = parts(3).toFloat; val z = parts(4).toFloat
             if name.equalsIgnoreCase(playerName) then
               camera = Vec3(x, y, z)
+              fallPeakY = camera.y
               velocity = Vec3(0f, 0f, 0f)
               addChatMessage("Teleported")
             else
@@ -5001,7 +5586,7 @@ final class Blockbox:
     if isUnder then
       glFogi(GL_FOG_MODE, GL_LINEAR); glFogf(GL_FOG_START, 2f); glFogf(GL_FOG_END, 18f)
     else
-      val visibleDist = renderDistance.toFloat
+      val visibleDist = renderDistanceBlocks.toFloat
       glFogi(GL_FOG_MODE, GL_LINEAR)
       glFogf(GL_FOG_START, visibleDist * 0.65f)
       glFogf(GL_FOG_END, visibleDist * 0.95f)
@@ -5010,7 +5595,7 @@ final class Blockbox:
     val aspect = framebufferWidth.toDouble / framebufferHeight.toDouble
     // Keep the near plane away from zero so the depth buffer has useful
     // precision. Tiny near values caused early z-fighting at distance.
-    val near = 0.25; val far = (renderDistance + 24).toDouble
+    val near = 0.25; val far = (renderDistanceBlocks + Terrain.chunkSize * 2).toDouble
     val sprintFov = if screen == Screen.Playing then
       val moving = down(GLFW_KEY_W) || down(GLFW_KEY_S) || down(GLFW_KEY_A) || down(GLFW_KEY_D)
       if moving && (down(GLFW_KEY_LEFT_CONTROL) || down(GLFW_KEY_RIGHT_CONTROL)) then 8.5f else 0f
@@ -5050,7 +5635,11 @@ final class Blockbox:
       -(dx * dx + dz * dz)
     }
     farToNearChunks.foreach(_.drawTranslucent(camera))
-    farToNearChunks.foreach(_.drawWater(camera))
+    // Water should read as a solid block volume. Keep the same texture/color, but draw
+    // it depth-writing and unblended so stacked water cannot show internal faces.
+    glDisable(GL_BLEND)
+    glDepthMask(true)
+    chunkList.foreach(_.drawWater(camera))
     glDepthMask(true)
     glDisableClientState(GL_TEXTURE_COORD_ARRAY); glDisableClientState(GL_COLOR_ARRAY); glDisableClientState(GL_VERTEX_ARRAY)
     glBindBuffer(GL_ARRAY_BUFFER, 0); glBindTexture(GL_TEXTURE_2D, 0)
@@ -5089,7 +5678,7 @@ final class Blockbox:
     if isUnder then
       glFogi(GL_FOG_MODE, GL_LINEAR); glFogf(GL_FOG_START, 2f); glFogf(GL_FOG_END, 18f)
     else
-      val visibleDist = renderDistance.toFloat
+      val visibleDist = renderDistanceBlocks.toFloat
       glFogi(GL_FOG_MODE, GL_LINEAR)
       glFogf(GL_FOG_START, visibleDist * 0.65f)
       glFogf(GL_FOG_END, visibleDist * 0.95f)
@@ -5177,7 +5766,7 @@ final class Blockbox:
     val hudScale = (1.10f * s).max(1.02f)
     // Intentionally no translucent panel here: it was the source of an intermittent stray world-space sheet artifact.
     renderTextShadow(18f * s, 16f * s, hudText, 1f, 1f, 1f, hudScale)
-    if gameMode == GameMode.Survival then renderHealthAndFood()
+    if gameMode == GameMode.Survival then renderHealth()
     renderBlockInfo()
     if down(GLFW_KEY_TAB) then renderPlayerListOverlay()
 
@@ -5247,17 +5836,16 @@ final class Blockbox:
         rx += 1
       ry += 1
 
-  private def renderHealthAndFood(): Unit =
+  private def renderHealth(): Unit =
     glDisable(GL_DEPTH_TEST); glDisable(GL_CULL_FACE); setupOrtho()
     val s = uiScale
     val unit = (18f * s).max(14f).min(22f)
     val gap = (unit + 4f * s).max(unit + 3f).min(unit + 7f)
-    val spacer = (34f * s).max(22f).min(38f)
-    val totalWidth = 10f * gap - (gap - unit) + spacer + 10f * gap - (gap - unit)
+    val totalWidth = 10f * gap - (gap - unit)
     val startX = framebufferWidth / 2f - totalWidth / 2f
     val hotbarSlot = (46f * s).min(((framebufferWidth.toFloat - 36f * s) / 10f - 5f * s).max(24f)).max(30f)
     val barY = framebufferHeight.toFloat - hotbarSlot - 42f * s
-    val bgAlpha = 0.38f
+    val bgAlpha = 0.46f
     for i <- 0 until 10 do
       val x = startX + i * gap
       val threshold = i * 2 + 2
@@ -5266,16 +5854,6 @@ final class Blockbox:
         else if playerHealth == threshold - 1 then 0.5f
         else 0f
       drawHeartIcon(x, barY, unit, fill, bgAlpha)
-    val foodStartX = startX + 10f * gap - (gap - unit) + spacer
-    for i <- 0 until 10 do
-      val x = foodStartX + i * gap
-      val threshold = i * 2 + 2
-      rect(x - 1f * s, barY - 1f * s, unit + 2f * s, unit + 2f * s, 0f, 0f, 0f, 0.30f)
-      if playerFood >= threshold then
-        rect(x, barY, unit, unit, 0.85f, 0.70f, 0.12f, 0.90f)
-        rect(x + 2f * s, barY + 2f * s, unit - 4f * s, 2.5f * s, 1f, 0.85f, 0.40f, 0.28f)
-      else if playerFood >= threshold - 1 then rect(x, barY, unit / 2f, unit, 0.85f, 0.60f, 0.08f, 0.70f)
-      else rect(x, barY, unit, unit, 0.10f, 0.07f, 0.02f, bgAlpha)
 
   private def renderBlockInfo(): Unit =
     if framebufferHeight < 200 then return
@@ -5311,7 +5889,7 @@ final class Blockbox:
     renderTextShadow(lx, ly, s"FPS: $fpsDisplay  Frame: ${(lastFrameTime * 1000).toInt}ms  Chunks: ${chunks.size}", 0.4f, 1f, 0.4f, 0.88f * uiScale); ly += (19 * uiScale).toInt.max(16)
     renderTextShadow(lx, ly, s"XYZ: ${camera.x}%.3f / ${camera.y}%.3f / ${camera.z}%.3f", 0.4f, 1f, 0.4f, 0.88f * uiScale); ly += (19 * uiScale).toInt.max(16)
     renderTextShadow(lx, ly, s"Yaw: $yaw%.2f  Pitch: $pitch%.2f", 0.4f, 1f, 0.4f, 0.88f * uiScale); ly += (19 * uiScale).toInt.max(16)
-    renderTextShadow(lx, ly, s"Chunk: ($ccx, $ccz)  Seed: $worldSeed  RD: $renderDistance", 0.4f, 1f, 0.4f, 0.88f * uiScale); ly += (19 * uiScale).toInt.max(16)
+    renderTextShadow(lx, ly, s"Chunk: ($ccx, $ccz)  Seed: $worldSeed  RD: ${renderDistance}ch/${renderDistanceBlocks}b", 0.4f, 1f, 0.4f, 0.88f * uiScale); ly += (19 * uiScale).toInt.max(16)
     renderTextShadow(lx, ly, s"World: $worldName", 0.4f, 1f, 0.4f, 0.72f * uiScale); ly += (17 * uiScale).toInt.max(14)
     renderTextShadow(lx, ly, s"Forward: (${fwd.x}%.4f, ${fwd.y}%.4f, ${fwd.z}%.4f)", 0.4f, 1f, 0.4f, 0.88f * uiScale); ly += (19 * uiScale).toInt.max(16)
     raycast(8f).foreach { hit =>
@@ -5448,13 +6026,9 @@ final class Blockbox:
     else 0.5f + ((t - dayLengthSeconds) / nightLengthSeconds) * 0.5f
 
   private def daylightFactor: Float =
-    val t = cycleClock
-    if t < dayLengthSeconds then
-      val p = (t / dayLengthSeconds).max(0f).min(1f)
-      (0.55f + 0.45f * sin(p * Pi).toFloat).max(0.48f).min(1f)
-    else
-      val p = ((t - dayLengthSeconds) / nightLengthSeconds).max(0f).min(1f)
-      (0.18f + 0.10f * sin(p * Pi).toFloat).max(0.18f).min(0.34f)
+    val sun = sin(dayPhase * Pi.toFloat * 2f).toFloat
+    val eased = smooth01((sun + 0.18f) / 0.58f)
+    (0.18f + 0.82f * eased).max(0.18f).min(1f)
 
   private def smooth01(v: Float): Float =
     val t = v.max(0f).min(1f); t * t * (3f - 2f * t)
@@ -5974,8 +6548,8 @@ final class Blockbox:
       val hover = inRect(smx, smy, settingX, y, rowW, rowH)
       rect(settingX, y, rowW, rowH, if hover then 0.18f else 0.10f, if hover then 0.20f else 0.12f, if hover then 0.26f else 0.16f, 0.85f)
       renderTextShadow(settingX + 12 * s, y + 5 * s, label, 1f, 1f, 1f, (0.82f * s).min(rowH / 15f))
-    clickRow(pY + 85 * s, s"Render distance: $renderDistance blocks")
-    slider(settingX, pY + 118 * s, rowW, (renderDistance - 32).toFloat / (maxRenderDistance - 32).toFloat)
+    clickRow(pY + 85 * s, s"Render distance: $renderDistance chunks (${renderDistanceBlocks} blocks)")
+    slider(settingX, pY + 118 * s, rowW, (renderDistance - minRenderDistance).toFloat / (maxRenderDistance - minRenderDistance).toFloat)
     clickRow(pY + 150 * s, s"Fog density: $fogDensity%.2f")
     slider(settingX, pY + 185 * s, rowW, (fogDensity - 0.6f) / 2.4f)
     clickRow(pY + 218 * s, f"FOV: $fov%.0f")
@@ -6071,24 +6645,47 @@ final class Blockbox:
     val craftX = px + pw - 28f * s - craftPanelW
     val craftY = py + 76f * s
     rect(craftX - 10f * s, craftY - 28f * s, craftPanelW + 18f * s, ph - 140f * s, 0.045f, 0.060f, 0.085f, 0.68f)
-    centeredTextFit(craftX + craftPanelW / 2f, craftY - 20f * s, "Crafting", 0.82f, 0.88f, 1f, 0.70f * s, craftPanelW)
-    val craftSlotH = (58f * s).min(ph / 9f).max(38f * s)
-    val maxCraftVisible = ((ph - 146f * s) / craftSlotH).toInt.max(2)
-    val craftMaxScroll = (craftingRecipes.length - maxCraftVisible).max(0)
-    if craftingScroll > craftMaxScroll then craftingScroll = craftMaxScroll
-    for i <- craftingRecipes.indices.drop(craftingScroll).take(maxCraftVisible) do
-      val (input, inputCount, output, outputCount, label) = craftingRecipes(i)
-      val by = craftY + (i - craftingScroll) * craftSlotH
-      val canCraft = totalItemCount(input) >= inputCount
-      val hoverCraft = inRect(mx, my, craftX, by, craftPanelW, craftSlotH - 5f * s)
-      val br = if canCraft then (if hoverCraft then 0.32f else 0.22f) else (if hoverCraft then 0.16f else 0.10f)
-      rect(craftX, by, craftPanelW, craftSlotH - 5f * s, br, br * 1.04f, br * 1.10f, 0.90f)
-      rect(craftX + 1f * s, by + 1f * s, craftPanelW - 2f * s, 2f * s, 1f, 1f, 1f, 0.05f)
-      renderTextShadow(craftX + 8f * s, by + 5f * s, label, 0.88f, 0.88f, 0.82f, (0.60f * s).min(craftPanelW / 34f))
-      renderTextShadow(craftX + 8f * s, by + 26f * s, s"${inputCount}x ${blockName(input)} (${totalItemCount(input)})", if canCraft then 0.68f else 0.40f, if canCraft then 0.72f else 0.45f, if canCraft then 0.78f else 0.50f, (0.50f * s).min(craftPanelW / 42f))
-      centeredTextFit(craftX + craftPanelW - 22f * s, by + 9f * s, s"+$outputCount", 0.82f, 0.88f, 0.78f, 0.55f * s, 38f * s)
-    if craftMaxScroll > 0 then
-      centeredTextFit(craftX + craftPanelW / 2f, craftY + maxCraftVisible * craftSlotH + 2f * s, s"${craftingScroll + 1}-${(craftingScroll + maxCraftVisible).min(craftingRecipes.length)}/${craftingRecipes.length}", 0.50f, 0.55f, 0.65f, 0.50f * s, craftPanelW)
+    centeredTextFit(craftX + craftPanelW / 2f, craftY - 20f * s, "Free-form Crafting", 0.82f, 0.88f, 1f, 0.70f * s, craftPanelW)
+    centeredTextFit(craftX + craftPanelW / 2f, craftY - 3f * s, "click item, fill any grid shape, click output", 0.52f, 0.58f, 0.68f, 0.43f * s, craftPanelW)
+    val cGap = 6f * s
+    val cSlot = ((craftPanelW - 56f * s) / 4f).min(42f * s).max(28f)
+    val gridStartX = craftX + 12f * s
+    val gridStartY = craftY + 28f * s
+    var ci = 0
+    while ci < 9 do
+      val col = ci % 3
+      val row0 = ci / 3
+      val sx = gridStartX + col * (cSlot + cGap)
+      val sy = gridStartY + row0 * (cSlot + cGap)
+      val b = craftGridBlocks(ci)
+      val hoverCraft = inRect(mx, my, sx, sy, cSlot, cSlot)
+      rect(sx - 1f * s, sy - 1f * s, cSlot + 2f * s, cSlot + 2f * s, 0.01f, 0.012f, 0.018f, 0.82f)
+      rect(sx, sy, cSlot, cSlot, if hoverCraft then 0.15f else 0.085f, if hoverCraft then 0.16f else 0.095f, if hoverCraft then 0.19f else 0.125f, 0.92f)
+      if b != Block.Air then
+        val icon = (cSlot * 0.60f).min(25f * s).max(16f)
+        renderBlockIcon(b, sx + (cSlot - icon) / 2f, sy + (cSlot - icon) / 2f, icon)
+        if hoverCraft then
+          hoveredBlock = b; hoveredX = sx + cSlot / 2f; hoveredY = sy
+      ci += 1
+    val outSize = cSlot * 1.16f
+    val outX = craftX + craftPanelW - outSize - 16f * s
+    val outY = gridStartY + cSlot + cGap
+    val result = currentCraftingResult
+    val canCraft = result.exists(canCraftCurrent)
+    val hoverOut = inRect(mx, my, outX, outY, outSize, outSize)
+    rect(outX - 1f * s, outY - 1f * s, outSize + 2f * s, outSize + 2f * s, 0f, 0f, 0f, 0.86f)
+    rect(outX, outY, outSize, outSize, if canCraft then (if hoverOut then 0.26f else 0.18f) else 0.08f, if canCraft then (if hoverOut then 0.30f else 0.22f) else 0.09f, if canCraft then (if hoverOut then 0.24f else 0.16f) else 0.11f, 0.95f)
+    centeredTextFit(outX + outSize / 2f, outY - 15f * s, "output", 0.62f, 0.66f, 0.74f, 0.44f * s, outSize + 26f * s)
+    result.foreach { r =>
+      val icon = (outSize * 0.58f).min(27f * s).max(16f)
+      renderBlockIcon(r.output, outX + (outSize - icon) / 2f, outY + (outSize - icon) / 2f, icon)
+      centeredTextFit(outX + outSize / 2f, outY + outSize + 8f * s, s"${r.outputCount}x ${blockName(r.output)}", if canCraft then 0.80f else 0.45f, if canCraft then 0.86f else 0.48f, if canCraft then 0.72f else 0.50f, 0.48f * s, craftPanelW * 0.46f)
+      if hoverOut then renderTooltip(outX + outSize / 2f, outY - 6f * s, r.label)
+    }
+    if result.isEmpty && normalizeCraftGrid(craftGridBlocks).nonEmpty then
+      centeredTextFit(craftX + craftPanelW / 2f, craftY + 178f * s, "no matching recipe", 0.72f, 0.48f, 0.45f, 0.48f * s, craftPanelW - 18f * s)
+    else if result.nonEmpty && !canCraft then
+      centeredTextFit(craftX + craftPanelW / 2f, craftY + 178f * s, "missing ingredients", 0.72f, 0.48f, 0.45f, 0.48f * s, craftPanelW - 18f * s)
 
     val hotbarPanelY = py + ph - 104f * s
     drawInventoryHotbar(px + 28f * s, hotbarPanelY, pw - 56f * s, s, mx, my)
@@ -6172,7 +6769,7 @@ final class Blockbox:
     val slot = ((panelW - gap * (total - 1)) / total).min(44f * s).max(28f)
     val barW = slot * total + gap * (total - 1)
     val startX = panelX + (panelW - barW) / 2f
-    renderTextShadow(panelX, panelY - 19f * s, "Hotbar: click an item, then click a slot", 0.70f, 0.78f, 0.95f, 0.56f * s)
+    renderTextShadow(panelX, panelY - 19f * s, "Hotbar: click item/slot to assign, mouse wheel cycles in-game", 0.70f, 0.78f, 0.95f, 0.56f * s)
     var i = 0
     while i < total do
       val sx = startX + i * (slot + gap)
@@ -6193,9 +6790,13 @@ final class Blockbox:
         renderBlockIcon(block, sx + (slot - icon) / 2f, panelY + (slot - icon) / 2f, icon)
         if gameMode == GameMode.Survival then
           val ns = hotbarCounts(i).toString
-          val cs = (0.58f * s).max(0.46f)
+          val cs = (0.66f * s).max(0.52f).min(slot / 27f)
           val tw = textWidth(ns, cs)
-          renderTextShadow(sx + slot - tw - 4f * s, panelY + slot - 13f * s, ns, 1f, 1f, 1f, cs)
+          val tx = (sx + slot - tw - 5f * s).max(sx + 3f * s)
+          val ty = panelY + slot - 12f * cs - 2f * s
+          rect(tx - 2f * s, ty - 1f * s, tw + 4f * s, 11f * cs + 3f * s, 0f, 0f, 0f, 0.66f)
+          renderText(tx, ty, ns, 1f, 1f, 1f, cs)
+        if hover && heldInventoryBlock == Block.Air then renderTooltip(sx + slot / 2f, panelY - 6f * s, blockName(block))
       centeredTextFit(sx + slot / 2f, panelY + 3f * s, hotbarLabel(i), 0.96f, 0.96f, 0.98f, 0.54f * s, slot - 6f * s)
       i += 1
 
@@ -6205,6 +6806,11 @@ final class Blockbox:
       val size = (34f * s).max(24f)
       rect(mx + 10f * s, my + 10f * s, size + 8f * s, size + 8f * s, 0f, 0f, 0f, 0.45f)
       renderBlockIcon(heldInventoryBlock, mx + 14f * s, my + 14f * s, size)
+      if gameMode == GameMode.Survival && heldInventoryCount > 1 then
+        val ns = heldInventoryCount.toString
+        val cs = (0.72f * s).max(0.56f)
+        val tw = textWidth(ns, cs)
+        renderTextShadow(mx + 14f * s + size - tw - 2f * s, my + 14f * s + size - 12f * cs, ns, 1f, 1f, 1f, cs)
       renderTooltip(mx + 34f * s, my + 12f * s, s"Holding ${blockName(heldInventoryBlock)}")
 
   private def renderTooltip(anchorX: Float, anchorY: Float, text: String): Unit =
@@ -6297,7 +6903,8 @@ final class Blockbox:
 
     val fuelY = py + 212f * s
     rect(workX + 8f * s, fuelY, workW - 16f * s, 58f * s, 0.045f, 0.060f, 0.085f, 0.72f)
-    renderTextShadow(workX + 18f * s, fuelY + 10f * s, s"Fuel: Coal ${totalItemCount(Block.Coal)} | Wood ${totalItemCount(Block.Wood)}", 0.76f, 0.82f, 0.92f, 0.58f * s)
+    val woodFuelCount = fuelBlocks.filter(_ != Block.Coal).map(totalItemCount).sum
+    renderTextShadow(workX + 18f * s, fuelY + 10f * s, s"Fuel: Coal ${totalItemCount(Block.Coal)} | Wood/Planks $woodFuelCount", 0.76f, 0.82f, 0.92f, 0.58f * s)
     val fuelText = if furnaceFuelRemaining > 0f then f"Buffered fuel: $furnaceFuelRemaining%.0f ticks" else "Buffered fuel: empty"
     renderTextShadow(workX + 18f * s, fuelY + 32f * s, fuelText, 0.62f, 0.68f, 0.78f, 0.52f * s)
     val recipeText = furnaceInput match
@@ -6378,13 +6985,13 @@ final class Blockbox:
     case Block.Sand => Some((Block.Glass, 1))
     case Block.Clay => Some((Block.Brick, 1))
     case Block.Stone => Some((Block.Brick, 2))
-    case Block.Wood => Some((Block.Coal, 1))
+    case Block.Wood | Block.BirchWood | Block.PineWood | Block.AcaciaWood => Some((Block.Coal, 1))
     case Block.IronOre => Some((Block.IronIngot, 1))
     case Block.GoldOre => Some((Block.GoldIngot, 1))
     case _ => None
 
   private def canConsumeFuelFor(input: Block): Boolean =
-    totalItemCount(Block.Coal) > 0 || totalItemCount(Block.Wood) > (if input == Block.Wood then 1 else 0)
+    totalItemCount(Block.Coal) > 0 || fuelBlocks.exists(b => b != Block.Coal && totalItemCount(b) > (if b == input then 1 else 0))
 
   private def consumeFuelFor(input: Block): Boolean =
     if furnaceFuelRemaining > 0f then true
@@ -6393,12 +7000,15 @@ final class Blockbox:
       furnaceFuel = Block.Coal
       furnaceFuelRemaining = 8f
       true
-    else if totalItemCount(Block.Wood) > (if input == Block.Wood then 1 else 0) then
-      consumeInventory(Block.Wood, 1)
-      furnaceFuel = Block.Wood
-      furnaceFuelRemaining = 4f
-      true
-    else false
+    else
+      val picked = fuelBlocks.find(b => b != Block.Coal && totalItemCount(b) > (if b == input then 1 else 0))
+      picked match
+        case Some(fuel) =>
+          consumeInventory(fuel, 1)
+          furnaceFuel = fuel
+          furnaceFuelRemaining = if fuel == Block.Planks || fuel == Block.BirchPlanks || fuel == Block.PinePlanks || fuel == Block.AcaciaPlanks then 3f else 4f
+          true
+        case None => false
 
   private def takeFurnaceOutput(): Unit =
     if furnaceOutput != Block.Air && furnaceOutputCount > 0 then
@@ -6488,7 +7098,7 @@ final class Blockbox:
     // Slightly larger global UI scale so small labels stay readable without blowing up layouts.
     val byWidth = framebufferWidth.toFloat / 1280f
     val byHeight = framebufferHeight.toFloat / 720f
-    math.min(byWidth, byHeight).max(0.90f).min(1.34f)
+    math.min(byWidth, byHeight).max(0.98f).min(1.38f)
 
   private def dimBackground(): Unit = rect(0, 0, framebufferWidth, framebufferHeight, 0f, 0f, 0f, 0.55f)
 
@@ -6567,7 +7177,7 @@ final class Blockbox:
   private def onOff(value: Boolean): String = if value then "ON" else "OFF"
 
   private def changeRenderDistance(delta: Int): Unit =
-    val next = (renderDistance + delta).max(32).min(maxRenderDistance)
+    val next = (renderDistance + delta).max(minRenderDistance).min(maxRenderDistance)
     if next != renderDistance then
       renderDistance = next
       // Keep existing chunk objects/meshes. Only stream in newly visible chunks and
@@ -6673,10 +7283,10 @@ final class Blockbox:
     if changed then chunk.markDirtyMesh()
 
   private def loadChunks(ccx: Int, ccz: Int): Unit =
-    val worldRadius = renderDistance + 16
+    val worldRadius = renderDistanceBlocks + Terrain.chunkSize
     val radiusSq = worldRadius * worldRadius
     val chunkRadius = (worldRadius / 16) + 2
-    val maxPerFrame = if chunks.isEmpty then 6 else if renderDistance >= 160 then 2 else if renderDistance >= 104 then 3 else 4
+    val maxPerFrame = if chunks.isEmpty then 6 else if renderDistance >= 14 then 2 else if renderDistance >= 10 then 3 else 4
     val wanted = collection.mutable.Set.empty[(Int, Int)]
     var loaded = 0
     for ring <- 0 to chunkRadius; dx <- -ring to ring; dz <- -ring to ring do
@@ -6955,7 +7565,14 @@ final class Blockbox:
   private def initChunkWaterLevels(cx: Int, cz: Int): Unit =
     // Do not register generated oceans/lakes into the dynamic water simulator.
     // Natural water is static terrain. Only player-placed/flowing water enters waterLevels.
-    ()
+    chunks.get((cx, cz)).foreach { chunk =>
+      chunk.foreachDynamicWaterCell { (lx, y, lz, level) =>
+        val wx = cx * Terrain.chunkSize + lx
+        val wz = cz * Terrain.chunkSize + lz
+        waterLevels((wx, y, wz)) = level.toByte
+        markWaterActive(wx, y, wz)
+      }
+    }
 
   private def saveChunk(cx: Int, cz: Int): Unit =
     if !canUseLocalChunkSaves then return
