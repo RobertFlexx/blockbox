@@ -189,6 +189,13 @@ if ($Exit -ne 0) {
   Write-Host "Blockbox failed. Full log saved to:"
   Write-Host "  $LogFile"
   Write-Host ""
-  Write-Host "Send blockbox-last-run.log, especially the FIRST [error] lines."
-  throw "scala-cli exited with code $Exit"
+  Write-Host "Last log lines:"
+  Write-Host ""
+  Get-Content -Path $LogFile -Tail 80 -ErrorAction SilentlyContinue | ForEach-Object { Write-Host $_ }
+  Write-Host ""
+  Write-Host "Send blockbox-last-run.log, especially the FIRST [error] lines above."
+  Write-Host "scala-cli exited with code $Exit"
+  exit $Exit
 }
+
+exit 0
