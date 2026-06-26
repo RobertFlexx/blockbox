@@ -4,6 +4,27 @@ set -euo pipefail
 LWJGL_VERSION="3.4.1"
 LWJGL_CACHE="${HOME}/.cache/coursier/v1/https/repo1.maven.org/maven2/org/lwjgl"
 JAVA_CLASSES=".blockbox-java-classes"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
+SCALA_SOURCE="${PROJECT_ROOT}/src/main/scala"
+JAVA_SOURCE="${PROJECT_ROOT}/src/main/java"
+JAVA_CMD="${BLOCKBOX_JAVA:-java}"
+if [[ -n "${BLOCKBOX_JVM_ARGS_FILE:-}" && -f "${BLOCKBOX_JVM_ARGS_FILE}" ]]; then
+  mapfile -t BLOCKBOX_JVM_ARGS_ARRAY < "${BLOCKBOX_JVM_ARGS_FILE}"
+else
+  read -r -a BLOCKBOX_JVM_ARGS_ARRAY <<< "${BLOCKBOX_JVM_ARGS:--Xmx4G}"
+fi
+if [[ -n "${BLOCKBOX_GAME_ARGS_FILE:-}" && -f "${BLOCKBOX_GAME_ARGS_FILE}" ]]; then
+  mapfile -t BLOCKBOX_GAME_ARGS_ARRAY < "${BLOCKBOX_GAME_ARGS_FILE}"
+else
+  read -r -a BLOCKBOX_GAME_ARGS_ARRAY <<< "${BLOCKBOX_GAME_ARGS:-}"
+fi
+for i in "${!BLOCKBOX_JVM_ARGS_ARRAY[@]}"; do
+  [[ -n "${BLOCKBOX_JVM_ARGS_ARRAY[$i]}" ]] || unset 'BLOCKBOX_JVM_ARGS_ARRAY[$i]'
+done
+for i in "${!BLOCKBOX_GAME_ARGS_ARRAY[@]}"; do
+  [[ -n "${BLOCKBOX_GAME_ARGS_ARRAY[$i]}" ]] || unset 'BLOCKBOX_GAME_ARGS_ARRAY[$i]'
+done
 
 if [[ -z "${GLFW_PLATFORM:-}" ]]; then
   if [[ -n "${DISPLAY:-}" ]]; then
@@ -32,8 +53,8 @@ for jar in "${native_jars[@]}"; do
   fi
 done
 
-if [[ -d "src/main/java" ]]; then
-  mapfile -t java_sources < <(find "src/main/java" -name '*.java' -type f | sort)
+if [[ -d "${JAVA_SOURCE}" ]]; then
+  mapfile -t java_sources < <(find "${JAVA_SOURCE}" -name '*.java' -type f | sort)
   if [[ "${#java_sources[@]}" -gt 0 ]]; then
     mkdir -p "${JAVA_CLASSES}"
     javac --release 21 -encoding UTF-8 -d "${JAVA_CLASSES}" "${java_sources[@]}"
@@ -41,7 +62,7 @@ if [[ -d "src/main/java" ]]; then
 fi
 
 if [[ "${missing_native}" == "true" ]]; then
-  scala-cli compile "src/main/scala" \
+  scala-cli compile "${SCALA_SOURCE}" \
     --server=false \
     --extra-jar "${JAVA_CLASSES}" \
     --dependency "org.lwjgl:lwjgl:${LWJGL_VERSION},classifier=natives-linux" \
@@ -50,12 +71,14 @@ if [[ "${missing_native}" == "true" ]]; then
     --dependency "org.lwjgl:lwjgl-stb:${LWJGL_VERSION},classifier=natives-linux"
 fi
 
-scala-cli run "src/main/scala" \
+scala-cli run "${SCALA_SOURCE}" \
   --server=false \
-  --java-opt "-Xmx4G" \
+  --java-home "$(dirname -- "$(dirname -- "$(readlink -f "$(command -v "${JAVA_CMD}")")")")" \
+  "${BLOCKBOX_JVM_ARGS_ARRAY[@]/#/--java-opt=}" \
   --java-opt "--enable-native-access=ALL-UNNAMED" \
   --extra-jar "${JAVA_CLASSES}" \
   --extra-jar "${native_jars[0]}" \
   --extra-jar "${native_jars[1]}" \
   --extra-jar "${native_jars[2]}" \
-  --extra-jar "${native_jars[3]}"
+  --extra-jar "${native_jars[3]}" \
+  -- "${BLOCKBOX_GAME_ARGS_ARRAY[@]}"

@@ -8,3 +8,12 @@ out/
 *.log
 *.hprof
 .DS_Store
+.gradle/
+build/
+.blockbox-java-classes/
+launcher/.gradle/
+launcher/build/
+launcher/instances/
+launcher/exports/
+launcher/*.log
+*.bbpack

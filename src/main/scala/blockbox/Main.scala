@@ -37,7 +37,7 @@ import scala.collection.mutable.{ArrayBuffer, Queue, HashSet}
 import scala.math.*
 import scala.util.Random
 
-@main def runBlockbox(): Unit = Blockbox().run()
+@main def runBlockbox(args: String*): Unit = Blockbox().run()
 
 final class Blockbox:
   private val width = 1280

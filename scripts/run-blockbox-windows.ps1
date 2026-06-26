@@ -11,6 +11,7 @@ $LWJGL_MODULES = @("lwjgl", "lwjgl-glfw", "lwjgl-opengl", "lwjgl-stb")
 $ScriptPath = $MyInvocation.MyCommand.Path
 $ScriptDir = Split-Path -Parent $ScriptPath
 $CurrentDir = (Get-Location).Path
+$LaunchDir = $CurrentDir
 
 function Add-UniqueRoot([System.Collections.Generic.List[string]]$List, [string]$PathValue) {
   if ([string]::IsNullOrWhiteSpace($PathValue)) { return }
@@ -67,7 +68,11 @@ $($roots -join "`n")
 $Resolved = Resolve-BlockboxRootAndSource
 $ProjectRoot = $Resolved.Root
 $SourceFile = $Resolved.Source
-Set-Location $ProjectRoot
+if ([string]::IsNullOrWhiteSpace($env:BLOCKBOX_INSTANCE)) {
+  Set-Location $ProjectRoot
+} else {
+  Set-Location $LaunchDir
+}
 
 # Run from a clean mirror so scala-cli cannot accidentally compile old extra files nearby.
 $RunDir = Join-Path $ProjectRoot ".blockbox-run"
@@ -227,7 +232,22 @@ $Deps = @(
 $NativeJars = Get-LwjglNativeJars (Join-Path $RunDir "lwjgl-natives")
 $JavaClasses = Compile-JavaSources (Join-Path $RunDir "src") (Join-Path $RunDir "java-classes")
 
-$ArgsList = @("run", $RunTarget, "--server=false", "--java-opt", "-Xmx4G", "--java-opt", "--enable-native-access=ALL-UNNAMED")
+$ArgsList = @("run", $RunTarget, "--server=false")
+if ((-not [string]::IsNullOrWhiteSpace($env:BLOCKBOX_JVM_ARGS_FILE)) -and (Test-Path $env:BLOCKBOX_JVM_ARGS_FILE)) {
+  foreach ($jvmArg in (Get-Content -Path $env:BLOCKBOX_JVM_ARGS_FILE -ErrorAction SilentlyContinue)) {
+    if (-not [string]::IsNullOrWhiteSpace($jvmArg)) {
+      $ArgsList += @("--java-opt", $jvmArg)
+    }
+  }
+} else {
+  $JvmArgText = if ([string]::IsNullOrWhiteSpace($env:BLOCKBOX_JVM_ARGS)) { "-Xmx4G" } else { $env:BLOCKBOX_JVM_ARGS }
+  foreach ($jvmArg in ($JvmArgText -split '\s+')) {
+    if (-not [string]::IsNullOrWhiteSpace($jvmArg)) {
+      $ArgsList += @("--java-opt", $jvmArg)
+    }
+  }
+}
+$ArgsList += @("--java-opt", "--enable-native-access=ALL-UNNAMED")
 foreach ($dep in $Deps) {
   $ArgsList += "--dependency=$dep"
 }
@@ -237,7 +257,22 @@ if ($JavaClasses -ne $null) {
 foreach ($jar in $NativeJars) {
   $ArgsList += @("--extra-jar", $jar)
 }
-
+if ((-not [string]::IsNullOrWhiteSpace($env:BLOCKBOX_GAME_ARGS_FILE)) -and (Test-Path $env:BLOCKBOX_GAME_ARGS_FILE)) {
+  $GameArgs = @(Get-Content -Path $env:BLOCKBOX_GAME_ARGS_FILE -ErrorAction SilentlyContinue | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+  if ($GameArgs.Length -gt 0) {
+    $ArgsList += "--"
+    foreach ($gameArg in $GameArgs) {
+      $ArgsList += $gameArg
+    }
+  }
+} elseif (-not [string]::IsNullOrWhiteSpace($env:BLOCKBOX_GAME_ARGS)) {
+  $ArgsList += "--"
+  foreach ($gameArg in ($env:BLOCKBOX_GAME_ARGS -split '\s+')) {
+    if (-not [string]::IsNullOrWhiteSpace($gameArg)) {
+      $ArgsList += $gameArg
+    }
+  }
+}
 Write-Host "Blockbox: running..."
 "Blockbox command: scala-cli $($ArgsList -join ' ')" | Out-File -FilePath $LogFile -Encoding utf8
 $Exit = Invoke-NativeLogged "scala-cli" $ArgsList $LogFile
