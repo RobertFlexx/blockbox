@@ -7,6 +7,7 @@
 
 package blockbox
 
+import blockbox.net.BlockboxNet
 import org.lwjgl.BufferUtils
 import org.lwjgl.glfw.GLFW.*
 import org.lwjgl.glfw.GLFWErrorCallback
@@ -137,6 +138,7 @@ final class Blockbox:
   private var multiplayerMode = false
   private var joinIpInput = ""
   private var lastPosSend = 0.0
+  private var lastMultiplayerHeartbeat = 0.0
   private var renderDistance = 6 // chunks
   private val minRenderDistance = 2
   private val maxRenderDistance = 18
@@ -1011,14 +1013,17 @@ final class Blockbox:
     if cleaned.nonEmpty then cleaned else s"Player${((System.currentTimeMillis() / 1000) % 999).toInt}"
 
   private def networkEscape(value: String): String =
-    value.replace("%", "%25").replace("|", "%7C").replace("\n", " ").replace("\r", " ")
+    BlockboxNet.escape(value)
 
   private def networkUnescape(value: String): String =
-    value.replace("%7C", "|").replace("%25", "%")
+    BlockboxNet.unescape(value)
+
+  private def networkFloat(value: Float): String = BlockboxNet.floatText(value)
+
+  private def parseNetworkFloat(value: String): Float = BlockboxNet.parseFloat(value)
 
   private def networkSafeName(value: String): String =
-    val cleaned = networkUnescape(value).trim.filter(ch => ch.isLetterOrDigit || ch == '_' || ch == '-').take(16)
-    if cleaned.nonEmpty then cleaned else "Player"
+    BlockboxNet.safeName(value)
 
   private def normalizeColorId(id: Int): Int = Math.floorMod(id, playerColorPalette.length)
 
@@ -1158,6 +1163,8 @@ final class Blockbox:
         () => snapshotWorldEditsForNetwork(),
         () => oppedPlayerNames.toSeq,
         () => camera,
+        () => yaw,
+        () => pitch,
         modManager.serverModpackHash,
         modManager.serverModpackList
       )
@@ -1254,6 +1261,7 @@ final class Blockbox:
     pendingNetworkBlocks.clear()
     networkBlockOverrides.clear()
     networkWaterLevelOverrides.clear()
+    lastMultiplayerHeartbeat = 0.0
     multiplayerMode = false
 
   private def startGame(): Unit =
@@ -1892,7 +1900,7 @@ final class Blockbox:
       velocity = Vec3(0f, 0f, 0f)
       addChatMessage(s"Teleported $clean")
     else if gameServer != null then
-      val msg = "TPOS|" + networkEscape(clean) + "|" + f"${dest.x}%.3f" + "|" + f"${dest.y}%.3f" + "|" + f"${dest.z}%.3f"
+      val msg = "TPOS|" + networkEscape(clean) + "|" + networkFloat(dest.x) + "|" + networkFloat(dest.y) + "|" + networkFloat(dest.z)
       gameServer.broadcast(msg)
       addChatMessage(s"Teleported $clean")
     else addChatMessage("Only the host can teleport other players")
@@ -1984,8 +1992,8 @@ final class Blockbox:
       fd.foreach(v => playerFood = v)
       addChatMessage(label + " " + safe)
     else if gameServer != null then
-      val hpText = hp.map(v => f"$v%.2f").getOrElse("-1")
-      val foodText = fd.map(v => f"$v%.2f").getOrElse("-1")
+      val hpText = hp.map(networkFloat).getOrElse("-1")
+      val foodText = fd.map(networkFloat).getOrElse("-1")
       gameServer.broadcast("VITAL|" + networkEscape(safe) + "|" + hpText + "|" + foodText + "|" + networkEscape(label))
       addChatMessage(label + " " + safe)
     else addChatMessage("Only the host can change another player's health or food")
@@ -2514,7 +2522,7 @@ final class Blockbox:
       setWaterLevelAt(x, y, z, nextLevel)
       networkBlockOverrides((x, y, z)) = Block.Water
       networkWaterLevelOverrides((x, y, z)) = nextLevel.toByte
-      if multiplayerMode && gameServer != null then gameServer.broadcast(s"BLOC|$x|$y|$z|${Block.Water.id}|$nextLevel")
+      if multiplayerMode && gameServer != null then gameServer.broadcastBlockChange(x, y, z, Block.Water.id, nextLevel)
       markWaterActive(x, y, z)
       dirtyChunkAt(x, z)
 
@@ -2524,7 +2532,7 @@ final class Blockbox:
       setActiveBlock(x, y, z, Block.Air)
       networkBlockOverrides((x, y, z)) = Block.Air
       networkWaterLevelOverrides.remove((x, y, z))
-      if multiplayerMode && gameServer != null then gameServer.broadcast(s"BLOC|$x|$y|$z|0")
+      if multiplayerMode && gameServer != null then gameServer.broadcastBlockChange(x, y, z, Block.Air.id)
       dirtyChunkAt(x, z)
       wakeWaterAround(x, y, z)
 
@@ -2830,7 +2838,7 @@ final class Blockbox:
         if line.startsWith("WORLD|") then
           if parts.length >= 5 && gameServer == null then
             val seed = parts(1).toLong
-            val sx = parts(2).toFloat; val sy = parts(3).toFloat; val sz = parts(4).toFloat
+            val sx = parseNetworkFloat(parts(2)); val sy = parseNetworkFloat(parts(3)); val sz = parseNetworkFloat(parts(4))
             if parts.length >= 6 then
               localColorId = normalizeColorId(parts(5).toInt)
               rememberPlayerColor(playerName, localColorId)
@@ -2912,8 +2920,8 @@ final class Blockbox:
           if parts.length >= 4 then
             val name = networkSafeName(parts(1))
             if name.equalsIgnoreCase(playerName) then
-              val hp = parts(2).toFloat
-              val food = parts(3).toFloat
+              val hp = parseNetworkFloat(parts(2))
+              val food = parseNetworkFloat(parts(3))
               if hp >= 0f then playerHealth = hp.max(0f).min(maxPlayerHealth)
               if food >= 0f then playerFood = food.max(0f).min(maxPlayerFood)
               val label = if parts.length >= 5 then networkUnescape(parts.drop(4).mkString("|")) else "Updated"
@@ -2930,15 +2938,15 @@ final class Blockbox:
             val name = networkSafeName(parts(1))
             if name.nonEmpty then knownPlayerNames += name
             if name != playerName then
-              val x = parts(2).toFloat; val y = parts(3).toFloat; val z = parts(4).toFloat
-              val pyaw = parts(5).toFloat; val ppitch = parts(6).toFloat
+              val x = parseNetworkFloat(parts(2)); val y = parseNetworkFloat(parts(3)); val z = parseNetworkFloat(parts(4))
+              val pyaw = parseNetworkFloat(parts(5)); val ppitch = parseNetworkFloat(parts(6))
               val colorId = if parts.length >= 8 then normalizeColorId(parts(7).toInt) else colorForPlayer(name)
               rememberPlayerColor(name, colorId)
               remotePlayers(name) = RemotePlayer(name, Vec3(x, y, z), pyaw, ppitch, glfwGetTime(), colorId)
         else if line.startsWith("TPOS|") then
           if parts.length >= 5 then
             val name = networkSafeName(parts(1))
-            val x = parts(2).toFloat; val y = parts(3).toFloat; val z = parts(4).toFloat
+            val x = parseNetworkFloat(parts(2)); val y = parseNetworkFloat(parts(3)); val z = parseNetworkFloat(parts(4))
             if name.equalsIgnoreCase(playerName) then
               camera = Vec3(x, y, z)
               fallPeakY = camera.y
@@ -2973,7 +2981,8 @@ final class Blockbox:
             knownPlayerNames -= name
             remotePlayers.remove(name)
             if name != playerName then addChatMessage(s"$name left the game")
-      catch case _: Exception => ()
+      catch
+        case e: Exception => System.err.println(s"Ignored bad network packet '$line': ${Option(e.getMessage).getOrElse(e.getClass.getSimpleName)}")
 
     if gameClient != null then
       var msg = gameClient.pollMessage()
@@ -2992,9 +3001,12 @@ final class Blockbox:
       val now = glfwGetTime()
       if now - lastPosSend >= 0.10 then
         lastPosSend = now
-        val msg = "POS|" + networkEscape(playerName) + "|" + f"${camera.x}%.3f" + "|" + f"${camera.y}%.3f" + "|" + f"${camera.z}%.3f" + "|" + f"$yaw%.2f" + "|" + f"$pitch%.2f" + "|" + localColorId.toString
+        val msg = "POS|" + networkEscape(playerName) + "|" + networkFloat(camera.x) + "|" + networkFloat(camera.y) + "|" + networkFloat(camera.z) + "|" + networkFloat(yaw) + "|" + networkFloat(pitch) + "|" + localColorId.toString
         if gameClient != null && gameClient.isConnected then gameClient.send(msg)
         else if gameServer != null then gameServer.broadcast(msg)
+      if gameServer != null && now - lastMultiplayerHeartbeat >= 2.0 then
+        lastMultiplayerHeartbeat = now
+        gameServer.broadcastPlayerList()
 
   private def cleanupRemotePlayers(): Unit =
     val now = glfwGetTime()

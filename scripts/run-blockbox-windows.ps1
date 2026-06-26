@@ -76,7 +76,7 @@ New-Item -ItemType Directory -Force -Path $RunDir | Out-Null
 $ProjectMain = Join-Path $ProjectRoot "src\main\scala\blockbox\Main.scala"
 if ([System.IO.Path]::GetFullPath($SourceFile) -eq [System.IO.Path]::GetFullPath($ProjectMain)) {
   Copy-Item -Recurse -Force (Join-Path $ProjectRoot "src") (Join-Path $RunDir "src")
-  $RunTarget = Join-Path $RunDir "src\main\scala"
+  $RunTarget = Join-Path $RunDir "src\main"
   $RunFile = Join-Path $RunDir "src\main\scala\blockbox\Main.scala"
 } else {
   $RunFile = Join-Path $RunDir "Main.scala"
@@ -147,6 +147,19 @@ function Get-LwjglNativeJars([string]$NativeDir) {
   return $jars.ToArray()
 }
 
+function Compile-JavaSources([string]$SourceRoot, [string]$ClassesDir) {
+  $javaRoot = Join-Path $SourceRoot "main\java"
+  if (-not (Test-Path $javaRoot)) { return $null }
+  $sources = @(Get-ChildItem -Path $javaRoot -Filter "*.java" -Recurse -File -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })
+  if ($sources.Length -eq 0) { return $null }
+  if (-not (Test-Command javac)) { throw "javac is missing. Install JDK 21, not just a JRE, then rerun this script." }
+  New-Item -ItemType Directory -Force -Path $ClassesDir | Out-Null
+  Write-Host "Blockbox: compiling Java networking helpers..."
+  & javac --release 21 -encoding UTF-8 -d $ClassesDir @sources
+  if ($LASTEXITCODE -ne 0) { throw "javac failed with code $LASTEXITCODE" }
+  return $ClassesDir
+}
+
 function Show-ScalaCliStacktraces([string]$Text) {
   $matches = [regex]::Matches($Text, "'([^']*\\.scala-build\\stacktraces\\[^']+\.log)'")
   foreach ($match in $matches) {
@@ -212,10 +225,14 @@ $Deps = @(
 )
 
 $NativeJars = Get-LwjglNativeJars (Join-Path $RunDir "lwjgl-natives")
+$JavaClasses = Compile-JavaSources (Join-Path $RunDir "src") (Join-Path $RunDir "java-classes")
 
 $ArgsList = @("run", $RunTarget, "--server=false", "--java-opt", "-Xmx4G", "--java-opt", "--enable-native-access=ALL-UNNAMED")
 foreach ($dep in $Deps) {
   $ArgsList += "--dependency=$dep"
+}
+if ($JavaClasses -ne $null) {
+  $ArgsList += @("--extra-jar", $JavaClasses)
 }
 foreach ($jar in $NativeJars) {
   $ArgsList += @("--extra-jar", $jar)
