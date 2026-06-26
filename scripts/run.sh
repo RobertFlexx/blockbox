@@ -9,6 +9,29 @@ PROJECT_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 SCALA_SOURCE="${PROJECT_ROOT}/src/main/scala"
 JAVA_SOURCE="${PROJECT_ROOT}/src/main/java"
 JAVA_CMD="${BLOCKBOX_JAVA:-java}"
+BREW_PREFIXES=("${HOME}/.linuxbrew" "/home/linuxbrew/.linuxbrew" "/opt/homebrew" "/usr/local")
+for prefix in "${BREW_PREFIXES[@]}"; do
+  if [[ -d "${prefix}/bin" ]]; then
+    export PATH="${prefix}/bin:${prefix}/sbin:${PATH}"
+  fi
+done
+
+if ! command -v scala-cli >/dev/null 2>&1; then
+  printf 'Blockbox: scala-cli was not found in PATH.\n' >&2
+  printf 'Blockbox: current PATH=%s\n' "${PATH}" >&2
+  printf 'Blockbox: if scala-cli is installed with Homebrew, make sure ~/.linuxbrew/bin, /home/linuxbrew/.linuxbrew/bin, /opt/homebrew/bin, or /usr/local/bin is reachable.\n' >&2
+  exit 127
+fi
+
+if ! command -v "${JAVA_CMD}" >/dev/null 2>&1; then
+  printf 'Blockbox: java command not found: %s\n' "${JAVA_CMD}" >&2
+  exit 127
+fi
+
+if ! command -v javac >/dev/null 2>&1; then
+  printf 'Blockbox: javac was not found in PATH. Install JDK 21 or newer, not just a JRE.\n' >&2
+  exit 127
+fi
 if [[ -n "${BLOCKBOX_JVM_ARGS_FILE:-}" && -f "${BLOCKBOX_JVM_ARGS_FILE}" ]]; then
   mapfile -t BLOCKBOX_JVM_ARGS_ARRAY < "${BLOCKBOX_JVM_ARGS_FILE}"
 else
