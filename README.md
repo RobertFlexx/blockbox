@@ -7,6 +7,7 @@ this is not some giant studio project. it is made by one guy, robertflexx. i wor
 the goal is to have a familiar blocky sandbox feeling, but not just be a cheap copy of anything. blockbox has its own codebase, its own messy little history, and its own direction.
 
 it is still early, still rough, and still changing a lot, but it is already playable.
+(again, like i said, its VERY early, like early early beta and i have a lot done already. im not very good at UI, please dont bash me for it. expect tons of bugs, but im working on it)
 
 ## what it is right now
 
