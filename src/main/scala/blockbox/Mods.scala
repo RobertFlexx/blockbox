@@ -1,11 +1,11 @@
 package blockbox
 
+import blockbox.io.BlockboxFiles
 import groovy.lang.GroovyClassLoader
 import groovy.lang.Closure
 import java.io.*
 import java.net.*
 import java.nio.charset.StandardCharsets
-import java.security.MessageDigest
 import java.util.jar.JarFile
 import java.util.function.Consumer
 import scala.collection.mutable.ArrayBuffer
@@ -31,13 +31,61 @@ final case class ModDescriptor(
 ):
   def sideLabel: String = if serverInteractive then s"$side/server" else side
 
-final case class ModBlockBreakEvent(api: ModApi, playerName: String, x: Int, y: Int, z: Int, block: Block, var cancelled: Boolean = false, var dropItem: Boolean = true)
-final case class ModBlockPlaceEvent(api: ModApi, playerName: String, x: Int, y: Int, z: Int, var block: Block, var cancelled: Boolean = false)
-final case class ModWorldTickEvent(api: ModApi, dt: Float)
-final case class ModHudRenderEvent(api: ModApi, gui: ModGuiApi, dt: Float)
-final case class ModMouseClickEvent(api: ModApi, gui: ModGuiApi, mouseX: Float, mouseY: Float, button: Int, var consumed: Boolean = false)
-final case class ModKeyEvent(api: ModApi, key: Int, screen: String, var cancelled: Boolean = false)
-final case class ModChatEvent(api: ModApi, playerName: String, var message: String, var cancelled: Boolean = false)
+final case class ModBlockBreakEvent(api: ModApi, playerName: String, x: Int, y: Int, z: Int, block: Block, var cancelled: Boolean = false, var dropItem: Boolean = true):
+  def getApi: ModApi = api
+  def getPlayerName: String = playerName
+  def getX: Int = x
+  def getY: Int = y
+  def getZ: Int = z
+  def getBlock: Block = block
+  def getCancelled: Boolean = cancelled
+  def isCancelled: Boolean = cancelled
+  def setCancelled(value: Boolean): Unit = cancelled = value
+  def getDropItem: Boolean = dropItem
+  def isDropItem: Boolean = dropItem
+  def setDropItem(value: Boolean): Unit = dropItem = value
+final case class ModBlockPlaceEvent(api: ModApi, playerName: String, x: Int, y: Int, z: Int, var block: Block, var cancelled: Boolean = false):
+  def getApi: ModApi = api
+  def getPlayerName: String = playerName
+  def getX: Int = x
+  def getY: Int = y
+  def getZ: Int = z
+  def getBlock: Block = block
+  def setBlock(value: Block): Unit = block = if value == null then Block.Air else value
+  def getCancelled: Boolean = cancelled
+  def isCancelled: Boolean = cancelled
+  def setCancelled(value: Boolean): Unit = cancelled = value
+final case class ModWorldTickEvent(api: ModApi, dt: Float):
+  def getApi: ModApi = api
+  def getDt: Float = dt
+final case class ModHudRenderEvent(api: ModApi, gui: ModGuiApi, dt: Float):
+  def getApi: ModApi = api
+  def getGui: ModGuiApi = gui
+  def getDt: Float = dt
+final case class ModMouseClickEvent(api: ModApi, gui: ModGuiApi, mouseX: Float, mouseY: Float, button: Int, var consumed: Boolean = false):
+  def getApi: ModApi = api
+  def getGui: ModGuiApi = gui
+  def getMouseX: Float = mouseX
+  def getMouseY: Float = mouseY
+  def getButton: Int = button
+  def getConsumed: Boolean = consumed
+  def isConsumed: Boolean = consumed
+  def setConsumed(value: Boolean): Unit = consumed = value
+final case class ModKeyEvent(api: ModApi, key: Int, screen: String, var cancelled: Boolean = false):
+  def getApi: ModApi = api
+  def getKey: Int = key
+  def getScreen: String = screen
+  def getCancelled: Boolean = cancelled
+  def isCancelled: Boolean = cancelled
+  def setCancelled(value: Boolean): Unit = cancelled = value
+final case class ModChatEvent(api: ModApi, playerName: String, var message: String, var cancelled: Boolean = false):
+  def getApi: ModApi = api
+  def getPlayerName: String = playerName
+  def getMessage: String = message
+  def setMessage(value: String): Unit = message = Option(value).getOrElse("")
+  def getCancelled: Boolean = cancelled
+  def isCancelled: Boolean = cancelled
+  def setCancelled(value: Boolean): Unit = cancelled = value
 
 final class ModEventBus:
   private final case class Handler[A](fn: Consumer[A], label: String, var failures: Int = 0, var disabled: Boolean = false)
@@ -87,8 +135,15 @@ final class ModEventBus:
   def fireChat(event: ModChatEvent): ModChatEvent = safeRun(chatHandlers, event)
 
 final class CommandContext(val api: ModApi, val command: String, val args: Array[String], val playerName: String, val remote: Boolean):
+  def getApi: ModApi = api
+  def getCommand: String = command
+  def getArgs: Array[String] = args
+  def getPlayerName: String = playerName
+  def isRemote: Boolean = remote
+  def getRemote: Boolean = remote
   def reply(message: String): Unit = api.say(Option(message).getOrElse(""))
   def player: PlayerRef = api.player(playerName)
+  def getPlayer: PlayerRef = player
   def arg(index: Int, defaultValue: String = ""): String = if index >= 0 && index < args.length then args(index) else defaultValue
   def intArg(index: Int, defaultValue: Int = 0): Int = scala.util.Try(arg(index).toInt).getOrElse(defaultValue)
   def floatArg(index: Int, defaultValue: Float = 0f): Float = scala.util.Try(arg(index).toFloat).getOrElse(defaultValue)
@@ -136,6 +191,7 @@ final class ModCommandRegistry(manager: ModManager):
       case None => false
 
 final class PlayerRef(private val api0: ModApi, val name: String):
+  def getName: String = name
   def sendMessage(message: String): Unit = api0.say("[mod] " + Option(message).getOrElse(""))
   def give(block: Block, count: Int): Unit = api0.game.modGiveItem(block, count)
   def give(blockName: String, count: Int): Unit = give(api0.block(blockName), count)
@@ -150,14 +206,24 @@ final class PlayerRef(private val api0: ModApi, val name: String):
   def blockX: Int = floor(x).toInt
   def blockY: Int = floor(y).toInt
   def blockZ: Int = floor(z).toInt
+  def getX: Float = x
+  def getY: Float = y
+  def getZ: Float = z
+  def getBlockX: Int = blockX
+  def getBlockY: Int = blockY
+  def getBlockZ: Int = blockZ
   def position: Vec3 = Vec3(x, y, z)
+  def getPosition: Vec3 = position
   def teleport(x: Float, y: Float, z: Float): Unit = api0.game.modTeleportSelf(Vec3(x, y, z))
   def teleport(x: Number, y: Number, z: Number): Unit = teleport(x.floatValue(), y.floatValue(), z.floatValue())
   def health: Float = api0.game.modHealth
+  def getHealth: Float = health
   def setHealth(value: Number): Unit = api0.game.modSetHealth(if value == null then 20f else value.floatValue())
   def food: Float = api0.game.modFood
+  def getFood: Float = food
   def setFood(value: Number): Unit = api0.game.modSetFood(if value == null then 20f else value.floatValue())
   def isOp: Boolean = api0.game.modIsOpped(name)
+  def getOp: Boolean = isOp
 
 final class WorldApi(private[blockbox] val game: Blockbox):
   private def i(value: Number): Int = if value == null then 0 else value.intValue()
@@ -188,7 +254,9 @@ final class WorldApi(private[blockbox] val game: Blockbox):
     changed
   def fill(x1: Number, y1: Number, z1: Number, x2: Number, y2: Number, z2: Number, blockName: String): Int = fill(i(x1), i(y1), i(z1), i(x2), i(y2), i(z2), game.modResolveBlock(blockName))
   def seed: Long = game.modWorldSeed
+  def getSeed: Long = seed
   def name: String = game.modWorldName
+  def getName: String = name
 
 final class ModGuiApi(private[blockbox] val game: Blockbox):
   private def f(value: Number): Float = if value == null then 0f else value.floatValue()
@@ -200,9 +268,21 @@ final class ModGuiApi(private[blockbox] val game: Blockbox):
   def leftDown: Boolean = game.modLeftDown
   def leftClicked: Boolean = game.modLeftClicked
   def cursorMode: Boolean = game.modCursorMode
+  def getWidth: Float = width
+  def getHeight: Float = height
+  def getScale: Float = scale
+  def getMouseX: Float = mouseX
+  def getMouseY: Float = mouseY
+  def getLeftDown: Boolean = leftDown
+  def isLeftDown: Boolean = leftDown
+  def getLeftClicked: Boolean = leftClicked
+  def isLeftClicked: Boolean = leftClicked
+  def getCursorMode: Boolean = cursorMode
+  def isCursorMode: Boolean = cursorMode
   def setCursorMode(enabled: Boolean): Unit = game.modSetCursorMode(enabled)
   def toggleCursorMode(): Unit = game.modSetCursorMode(!game.modCursorMode)
   def isPlaying: Boolean = game.modScreenName == "playing"
+  def getPlaying: Boolean = isPlaying
   def rect(x: Float, y: Float, w: Float, h: Float, r: Float, g: Float, b: Float, a: Float): Unit = game.modDrawRect(x, y, w, h, r, g, b, a)
   def rect(x: Number, y: Number, w: Number, h: Number, r: Number, g: Number, b: Number, a: Number): Unit = rect(f(x), f(y), f(w), f(h), f(r), f(g), f(b), f(a))
   def text(x: Float, y: Float, text: String, r: Float, g: Float, b: Float, scale: Float): Unit = game.modDrawText(x, y, Option(text).getOrElse(""), r, g, b, scale)
@@ -234,25 +314,25 @@ final class ModContentRegistry(private val manager: ModManager):
     defn
   def registerBlock(id: String, name: String, description: String, backingName: String): ModBlockDef = registerBlock(id, name, description, manager.resolveBlockName(backingName))
   def blocks: Seq[ModBlockDef] = manager.registeredBlocks
+  def getBlocks: Seq[ModBlockDef] = blocks
   def blockIds: Seq[String] = blocks.map(_.id)
+  def getBlockIds: Seq[String] = blockIds
 
 final class ModFilesApi:
   private def safeId(id: String): String = ModRuntime.normalizeId(id)
   def modsDir: File = File("mods")
+  def getModsDir: File = modsDir
   def configDir(modId: String): File =
-    val d = File(File("config"), "blockbox-mods/" + safeId(modId))
-    d.mkdirs(); d
+    val d = BlockboxFiles.safeChild(File("config/blockbox-mods").toPath, safeId(modId)).toFile
+    BlockboxFiles.ensureDirectory(d.toPath); d
   def dataDir(modId: String): File =
-    val d = File(File("worlds/moddata"), safeId(modId))
-    d.mkdirs(); d
+    val d = BlockboxFiles.safeChild(File("worlds/moddata").toPath, safeId(modId)).toFile
+    BlockboxFiles.ensureDirectory(d.toPath); d
   def readText(file: File, defaultValue: String = ""): String =
-    try if file != null && file.isFile then String(java.nio.file.Files.readAllBytes(file.toPath), StandardCharsets.UTF_8) else defaultValue
+    try if file != null && file.isFile then BlockboxFiles.readText(file.toPath, defaultValue) else defaultValue
     catch case _: Throwable => defaultValue
   def writeText(file: File, text: String): Unit =
-    if file != null then
-      val parent = file.getParentFile
-      if parent != null then parent.mkdirs()
-      java.nio.file.Files.writeString(file.toPath, Option(text).getOrElse(""), StandardCharsets.UTF_8)
+    if file != null then BlockboxFiles.writeTextAtomic(file.toPath, Option(text).getOrElse(""))
 
 final class ModTask(private val cancelImpl: () => Unit):
   def cancel(): Unit = cancelImpl()
@@ -297,16 +377,28 @@ final class ModApi(private[blockbox] val game: Blockbox, private val manager: Mo
   def files: ModFilesApi = manager.files
   def scheduler: ModScheduler = manager.scheduler
   def log: ModLogger = manager.log
+  def getWorld: WorldApi = world
+  def getGui: ModGuiApi = gui
+  def getEvents: ModEventBus = events
+  def getCommands: ModCommandRegistry = commands
+  def getContent: ModContentRegistry = content
+  def getFiles: ModFilesApi = files
+  def getScheduler: ModScheduler = scheduler
+  def getLog: ModLogger = log
   def block(name: String): Block = manager.resolveBlockName(name)
   def blocks: Array[Block] = Block.all
   def blockNames: Array[String] = Block.names
   def registeredBlocks: Seq[ModBlockDef] = manager.registeredBlocks
   def player(name: String): PlayerRef = PlayerRef(this, name)
   def localPlayer: PlayerRef = PlayerRef(this, game.modLocalPlayerName)
+  def getLocalPlayer: PlayerRef = localPlayer
   def say(message: String): Unit = game.modAddChatMessage(Option(message).getOrElse(""))
   def loadedMods: Seq[ModDescriptor] = manager.loadedMods
+  def getLoadedMods: Seq[ModDescriptor] = loadedMods
   def serverModpackHash: String = manager.serverModpackHash
+  def getServerModpackHash: String = serverModpackHash
   def apiVersion: String = "v51"
+  def getApiVersion: String = apiVersion
 
 object ModJson:
   private def unescape(s: String): String = s.replace("\\\"", "\"").replace("\\n", "\n").replace("\\r", "\r").replace("\\\\", "\\")
@@ -319,20 +411,8 @@ object ModJson:
 
 object ModRuntime:
   val VanillaHash = "vanilla"
-  def sha256Bytes(bytes: Array[Byte]): String =
-    val md = MessageDigest.getInstance("SHA-256")
-    md.digest(bytes).map(b => f"${b & 0xff}%02x").mkString
-  def sha256File(file: File): String =
-    val md = MessageDigest.getInstance("SHA-256")
-    val in = BufferedInputStream(FileInputStream(file))
-    val buf = new Array[Byte](8192)
-    try
-      var n = in.read(buf)
-      while n >= 0 do
-        if n > 0 then md.update(buf, 0, n)
-        n = in.read(buf)
-    finally in.close()
-    md.digest().map(b => f"${b & 0xff}%02x").mkString
+  def sha256Bytes(bytes: Array[Byte]): String = BlockboxFiles.sha256Bytes(bytes)
+  def sha256File(file: File): String = BlockboxFiles.sha256File(file.toPath)
   def normalizeId(raw: String): String =
     val clean = Option(raw).getOrElse("mod").trim.toLowerCase.filter(ch => ch.isLetterOrDigit || ch == '_' || ch == '-' || ch == '.')
     if clean.nonEmpty then clean.take(64) else "mod"
@@ -378,7 +458,7 @@ final class ModManager(private val game: Blockbox):
     if loaded then return
     loaded = true
     val root = File("mods")
-    root.mkdirs()
+    BlockboxFiles.ensureDirectory(root.toPath)
     writeTemplate(root)
     val entries = Option(root.listFiles()).getOrElse(Array.empty[File]).sortBy(_.getName.toLowerCase)
     entries.foreach { f =>
@@ -409,12 +489,7 @@ final class ModManager(private val game: Blockbox):
   def executeCommand(name: String, args: Array[String], playerName: String, remote: Boolean): Boolean = commands.execute(name, args, playerName, remote)
   def commandNames: Seq[String] = commands.names
   private def hashPath(f: File): String =
-    if f.isFile then ModRuntime.sha256File(f)
-    else
-      val bytes = Option(f.listFiles()).getOrElse(Array.empty[File]).sortBy(_.getName).flatMap { c =>
-        if c.isFile then (c.getName + ":" + ModRuntime.sha256File(c)).getBytes(StandardCharsets.UTF_8) else Array.emptyByteArray
-      }
-      ModRuntime.sha256Bytes(bytes)
+    BlockboxFiles.sha256Tree(f.toPath)
   private def readAll(in: InputStream): String =
     try String(in.readAllBytes(), StandardCharsets.UTF_8) finally in.close()
   private def descriptorFromJson(json: String, source: String, fallbackId: String, fallbackHash: String): ModDescriptor =
@@ -464,7 +539,8 @@ final class ModManager(private val game: Blockbox):
     catch
       case e: Throwable =>
         desc.loaded = false
-        val msg = Option(e.getMessage).getOrElse(e.getClass.getSimpleName)
+        val root = Option(e.getCause).getOrElse(e)
+        val msg = Option(root.getMessage).filter(_.nonEmpty).getOrElse(root.getClass.getSimpleName)
         val hint = if msg.contains("Unsupported class file major version") then " (Groovy/JVM classfile mismatch; Blockbox requires Groovy 5+ on Java 25)" else ""
         desc.status = "jar groovy load failed: " + msg + hint
     finally jf.close()
@@ -473,15 +549,15 @@ final class ModManager(private val game: Blockbox):
     val altJson = File(dir, "mod.json")
     val metaFile = if jsonFile.isFile then jsonFile else altJson
     if metaFile.isFile then
-      val json = String(java.nio.file.Files.readAllBytes(metaFile.toPath), StandardCharsets.UTF_8)
+      val json = BlockboxFiles.readText(metaFile.toPath, "{}")
       val main = ModJson.string(json, "main").getOrElse("main.groovy")
-      loadGroovyFile(File(dir, main), Some((json, dir.getPath, hashPath(dir))))
+      loadGroovyFile(BlockboxFiles.safeChild(dir.toPath, main).toFile, Some((json, dir.getPath, hashPath(dir))))
   private def loadGroovyFile(file: File, meta: Option[(String, String, String)]): Unit =
     if !file.isFile then return
     val hash = meta.map(_._3).getOrElse(ModRuntime.sha256File(file))
     val fallback = file.getName.stripSuffix(".groovy")
     val desc = meta.map(m => descriptorFromJson(m._1, m._2, fallback, hash)).getOrElse {
-      val text = String(java.nio.file.Files.readAllBytes(file.toPath), StandardCharsets.UTF_8)
+      val text = BlockboxFiles.readText(file.toPath, "")
       val side = if text.contains("blockbox-side: client") then "client" else "both"
       ModDescriptor(ModRuntime.normalizeId(fallback), fallback, "1.0.0", "Loose Groovy script mod", side, side != "client", file.getPath, file.getName, hash)
     }
@@ -491,7 +567,8 @@ final class ModManager(private val game: Blockbox):
     catch
       case e: Throwable =>
         desc.loaded = false
-        val msg = Option(e.getMessage).getOrElse(e.getClass.getSimpleName)
+        val root = Option(e.getCause).getOrElse(e)
+        val msg = Option(root.getMessage).filter(_.nonEmpty).getOrElse(root.getClass.getSimpleName)
         val hint = if msg.contains("Unsupported class file major version") then " (Groovy/JVM classfile mismatch; Blockbox requires Groovy 5+ on Java 25)" else ""
         desc.status = "loose groovy load failed: " + msg + hint
     descriptors += desc

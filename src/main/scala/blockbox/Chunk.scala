@@ -1,5 +1,6 @@
 package blockbox
 
+import blockbox.io.BlockboxFiles
 import org.lwjgl.BufferUtils
 import org.lwjgl.opengl.GL11.*
 import org.lwjgl.opengl.GL15.*
@@ -412,11 +413,10 @@ final class Chunk(val cx: Int, val cz: Int, atlas: TextureAtlas, gen: TerrainGen
     if waterVbo != 0 then glDeleteBuffers(waterVbo); waterVbo = 0; waterCount = 0
 
   def save(dir: java.io.File): Unit =
-    dir.mkdirs()
+    BlockboxFiles.ensureDirectory(dir.toPath)
     val file = new java.io.File(dir, s"chunk_${cx}_${cz}.dat")
-    val tmp = new java.io.File(dir, s"chunk_${cx}_${cz}.dat.tmp")
-    val out = new java.io.DataOutputStream(new java.io.BufferedOutputStream(new java.io.FileOutputStream(tmp)))
-    try
+    BlockboxFiles.writeAtomic(file.toPath, out0 =>
+      val out = new java.io.DataOutputStream(new java.io.BufferedOutputStream(out0))
       out.write(blocks)
       val editCopy = edits.synchronized { edits.toList }
       out.writeInt(editCopy.size)
@@ -436,12 +436,8 @@ final class Chunk(val cx: Int, val cz: Int, atlas: TextureAtlas, gen: TerrainGen
         out.writeInt(i)
         out.writeByte(level)
       }
-    finally out.close()
-    try
-      java.nio.file.Files.move(tmp.toPath, file.toPath, java.nio.file.StandardCopyOption.REPLACE_EXISTING, java.nio.file.StandardCopyOption.ATOMIC_MOVE)
-    catch
-      case _: Exception =>
-        java.nio.file.Files.move(tmp.toPath, file.toPath, java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+      out.flush()
+    )
 
   def load(dir: java.io.File): Unit =
     val file = new java.io.File(dir, s"chunk_${cx}_${cz}.dat")

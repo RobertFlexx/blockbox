@@ -8,6 +8,7 @@
 package blockbox
 
 import blockbox.net.BlockboxNet
+import blockbox.io.BlockboxFiles
 import org.lwjgl.BufferUtils
 import org.lwjgl.glfw.GLFW.*
 import org.lwjgl.glfw.GLFWErrorCallback
@@ -18,7 +19,6 @@ import org.lwjgl.glfw.GLFWScrollCallback
 import org.lwjgl.opengl.GL
 import org.lwjgl.opengl.GL11.*
 import org.lwjgl.opengl.GL15.*
-import org.lwjgl.stb.STBEasyFont
 import org.lwjgl.system.MemoryUtil.NULL
 import groovy.lang.GroovyClassLoader
 import groovy.lang.Closure
@@ -31,15 +31,15 @@ import java.util.function.Consumer
 import java.io.*
 import java.net.*
 import java.util.concurrent.LinkedBlockingQueue
-import javax.sound.sampled.AudioFormat
-import javax.sound.sampled.AudioSystem
 import scala.collection.mutable.{ArrayBuffer, Queue, HashSet}
 import scala.math.*
 import scala.util.Random
 
-@main def runBlockbox(args: String*): Unit = Blockbox().run()
+@main def runBlockbox(args: String*): Unit =
+  if args.exists(_ == "--check-mods") then Blockbox().checkModsOnly()
+  else Blockbox().run()
 
-final class Blockbox:
+final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxCommands:
   private val width = 1280
   private val height = 720
   private var framebufferWidth = width
@@ -48,14 +48,14 @@ final class Blockbox:
   private var screen = Screen.MainMenu
   private var vsync = true
   private var fastMove = false
-  private var soundEnabled = true
+  protected var soundEnabled = true
   private var fogDensity = 1.6f
-  private var gameMode = GameMode.Survival
+  protected var gameMode = GameMode.Survival
   private var lastTime = 0.0
   private var lastFrameTime = 0.0
-  private var camera = Vec3(96f, 48f, 130f)
-  private var velocity = Vec3(0f, 0f, 0f)
-  private var onGround = false
+  protected var camera = Vec3(96f, 48f, 130f)
+  protected var velocity = Vec3(0f, 0f, 0f)
+  protected var onGround = false
   private var yaw = 0f
   private var pitch = 0f
   private var lastMouseX = width / 2.0
@@ -72,33 +72,31 @@ final class Blockbox:
   private var modLeftClickedThisFrame = false
   private var breakingBlock: (Int, Int, Int) | Null = null
   private var breakingProgress = 0f
-  private val placeableBlocks = Array(Block.Grass, Block.Dirt, Block.Stone, Block.Sand, Block.Cactus, Block.Wood, Block.Planks, Block.BirchPlanks, Block.PinePlanks, Block.AcaciaPlanks, Block.Leaves, Block.BirchWood, Block.BirchLeaves, Block.PineWood, Block.PineLeaves, Block.AcaciaWood, Block.AcaciaLeaves, Block.Brick, Block.Glass, Block.Snow, Block.Clay, Block.Coal, Block.Copper, Block.IronOre, Block.GoldOre, Block.Diamond, Block.RainbowBlock, Block.Furnace)
-  private val inventory = Array.fill(Block.values.length)(0)
-  private val hotbarBlocks: Array[Block] = Array.fill(10)(Block.Air)
-  private val hotbarCounts: Array[Int] = Array.fill(10)(0)
-  private val maxStackSize = 64
-  private var selectedBlock = 0
-  private var heldInventoryBlock: Block = Block.Air
-  private var heldInventoryCount = 0
-  private var heldFromHotbar = false
+  protected val placeableBlocks = Array(Block.Grass, Block.Dirt, Block.Stone, Block.Sand, Block.Cactus, Block.Wood, Block.Planks, Block.BirchPlanks, Block.PinePlanks, Block.AcaciaPlanks, Block.Leaves, Block.BirchWood, Block.BirchLeaves, Block.PineWood, Block.PineLeaves, Block.AcaciaWood, Block.AcaciaLeaves, Block.Brick, Block.Glass, Block.Snow, Block.Clay, Block.Coal, Block.Copper, Block.IronOre, Block.GoldOre, Block.Diamond, Block.RainbowBlock, Block.Furnace)
+  protected val inventory = Array.fill(Block.values.length)(0)
+  protected val hotbarBlocks: Array[Block] = Array.fill(10)(Block.Air)
+  protected val hotbarCounts: Array[Int] = Array.fill(10)(0)
+  protected val maxStackSize = 64
+  protected var selectedBlock = 0
+  protected var heldInventoryBlock: Block = Block.Air
+  protected var heldInventoryCount = 0
+  protected var heldFromHotbar = false
   private var catalogScroll = 0
   private var craftingScroll = 0
-  private val craftGridBlocks: Array[Block] = Array.fill(9)(Block.Air)
-  private var furnaceInput: Block = Block.Air
-  private var furnaceFuel: Block = Block.Air
-  private var furnaceProgress = 0f
-  private var furnaceFuelRemaining = 0f
-  private var furnaceOutput: Block = Block.Air
-  private var furnaceOutputCount = 0
-  private val smeltableInputs: Array[Block] = Array(Block.Sand, Block.Clay, Block.Stone, Block.Wood, Block.BirchWood, Block.PineWood, Block.AcaciaWood, Block.IronOre, Block.GoldOre)
-  private val fuelBlocks: Array[Block] = Array(Block.Coal, Block.Wood, Block.BirchWood, Block.PineWood, Block.AcaciaWood, Block.Planks, Block.BirchPlanks, Block.PinePlanks, Block.AcaciaPlanks)
+  protected val craftGridBlocks: Array[Block] = Array.fill(9)(Block.Air)
+  protected var furnaceInput: Block = Block.Air
+  protected var furnaceFuel: Block = Block.Air
+  protected var furnaceProgress = 0f
+  protected var furnaceFuelRemaining = 0f
+  protected var furnaceOutput: Block = Block.Air
+  protected var furnaceOutputCount = 0
   private var debugMode = false
   private var wireframeMode = false
   private var showChunkBorders = false
-  private var gameServer: GameServer = null
-  private var gameClient: GameClient = null
-  private var playerName = "Player"
-  private val remotePlayers = scala.collection.mutable.HashMap.empty[String, RemotePlayer]
+  protected var gameServer: GameServer = null
+  protected var gameClient: GameClient = null
+  protected var playerName = "Player"
+  protected val remotePlayers = scala.collection.mutable.HashMap.empty[String, RemotePlayer]
   // Multiplayer clients must not load local chunk files for the host seed. BLOC packets can
   // arrive before the matching chunk has streamed in, so keep them here and apply them when
   // that chunk is created. This prevents seed-correct clients from looking different just
@@ -111,7 +109,7 @@ final class Blockbox:
   private val networkWaterLevelOverrides = scala.collection.mutable.HashMap.empty[(Int, Int, Int), Byte]
   private val worldExtraMagic = 0x42425831 // "BBX1": optional tail after old world.dat fields
   private val worldExtraVersion = 2
-  private val knownPlayerNames = scala.collection.mutable.HashSet.empty[String]
+  protected val knownPlayerNames = scala.collection.mutable.HashSet.empty[String]
   private val playerColors = scala.collection.mutable.HashMap.empty[String, Int]
   private val oppedPlayerNames = scala.collection.mutable.HashSet.empty[String]
   private var localColorId = 0
@@ -135,7 +133,7 @@ final class Blockbox:
   private var hostStatusError = false
   private var serverHost = "localhost"
   private var serverPort = 25565
-  private var multiplayerMode = false
+  protected var multiplayerMode = false
   private var joinIpInput = ""
   private var lastPosSend = 0.0
   private var lastMultiplayerHeartbeat = 0.0
@@ -143,24 +141,24 @@ final class Blockbox:
   private val minRenderDistance = 2
   private val maxRenderDistance = 18
   private def renderDistanceBlocks: Int = renderDistance * Terrain.chunkSize
-  private var worldSeed = 0L
+  protected var worldSeed = 0L
   private var createWorldMode = GameMode.Survival
   private var createWorldCheats = false
-  private var worldCheatsEnabled = false
-  private var terrainGen = TerrainGenerator(0L)
+  protected var worldCheatsEnabled = false
+  protected var terrainGen = TerrainGenerator(0L)
   private var chunks = scala.collection.mutable.AnyRefMap.empty[(Int, Int), Chunk]
   private var textureAtlas: TextureAtlas | Null = null
-  private var playerHealth = 20f
-  private var playerFood = 20f
-  private val maxPlayerHealth = 20f
-  private val maxPlayerFood = 20f
+  protected var playerHealth = 20f
+  protected var playerFood = 20f
+  protected val maxPlayerHealth = 20f
+  protected val maxPlayerFood = 20f
   private val healthRegenDelay = 7.0f
   private val healthRegenRate = 0.85f
   private var timeSinceLastDamage = healthRegenDelay
   private var fallPeakY = camera.y
   private var cactusDamageCooldown = 0f
   private var errorCallback: GLFWErrorCallback | Null = null
-  private var worldName = "World"
+  protected var worldName = "World"
   private var worldNameInput = "New World"
   private var createWorldNameFocused = true
   private var customSeedInput = ""
@@ -174,13 +172,13 @@ final class Blockbox:
   private var settingsReturnTo: Screen = Screen.MainMenu
   private var pauseEscReturnsToGame = true
   private var chatOpen = false
-  private var chatInput = ""
+  protected var chatInput = ""
   private var suppressNextChatChar = false
-  private val chatMessages = ArrayBuffer.empty[(String, Float)]
+  protected val chatMessages = ArrayBuffer.empty[(String, Float)]
   private val chatHistory = ArrayBuffer.empty[String]
   private var chatHistoryIndex = -1
-  private var commandSuggestionIndex = 0
-  private val modManager = ModManager(this)
+  protected var commandSuggestionIndex = 0
+  protected val modManager = ModManager(this)
   private var modsScreenScroll = 0
   private val sandFallQueue = Queue.empty[(Int, Int, Int)]
   private val maxSandUpdatesPerFrame = 6
@@ -201,8 +199,8 @@ final class Blockbox:
   private val fallingSandParticles = ArrayBuffer.empty[(Float, Float, Float, Float)]
   private val sandParticleLifetime = 0.25f
   private var sandParticleTimer = 0f
-  private var timeOverride: Option[Float] = None
-  private var flyEnabled = false
+  protected var timeOverride: Option[Float] = None
+  protected var flyEnabled = false
   private var lastSpacePressTime = 0.0
   private val doubleTapInterval = 0.3
   private var wasSpaceDown = false
@@ -223,42 +221,14 @@ final class Blockbox:
   // worlds, hosted worlds, and the Random Seed button all use the same behavior.
   private val seedRng = new java.security.SecureRandom()
 
-  private def mix64(input: Long): Long =
-    var z = input
-    z = (z ^ (z >>> 30)) * -4658895280553007687L
-    z = (z ^ (z >>> 27)) * -7723592293110705685L
-    z ^ (z >>> 31)
-
   private def freshWorldSeed(): Long =
-    val bytes = new Array[Byte](8)
-    seedRng.nextBytes(bytes)
-    var randomPart = 0L
-    bytes.foreach { b => randomPart = (randomPart << 8) ^ (b.toLong & 0xffL) }
-    val uuid = java.util.UUID.randomUUID()
-    val mixed = mix64(
-      randomPart ^
-      System.nanoTime() ^
-      java.lang.Long.rotateLeft(System.currentTimeMillis(), 17) ^
-      java.lang.Long.rotateLeft(uuid.getMostSignificantBits, 29) ^
-      uuid.getLeastSignificantBits ^
-      System.identityHashCode(this).toLong
-    )
-    if mixed == 0L then 0x6a09e667f3bcc909L else mixed
+    BlockboxWorld.freshWorldSeed(seedRng, System.identityHashCode(this).toLong)
 
   private def seedFromText(text: String): Long =
-    val trimmed = Option(text).getOrElse("").trim
-    if trimmed.isEmpty then freshWorldSeed()
-    else
-      var h = -3750763034362895579L // 64-bit FNV offset basis as a signed Long
-      trimmed.foreach { ch =>
-        h ^= ch.toLong
-        h *= 1099511628211L
-      }
-      val mixed = mix64(h ^ java.lang.Long.rotateLeft(trimmed.length.toLong, 32))
-      if mixed == 0L then 0x510e527fade682d1L else mixed
+    BlockboxWorld.seedFromText(text, freshWorldSeed())
 
   private def worldFolderNameForSeed(seed: Long): String =
-    "World-" + java.lang.Long.toUnsignedString(seed, 36).toUpperCase
+    BlockboxWorld.worldFolderNameForSeed(seed)
 
   private def applyWorldSeed(seed: Long, freshWorldName: Boolean): Unit =
     worldSeed = if seed == 0L then freshWorldSeed() else seed
@@ -274,21 +244,10 @@ final class Blockbox:
     applyWorldSeed(freshWorldSeed(), freshWorldName = false)
 
   private def sanitizeWorldName(raw: String): String =
-    val cleaned = Option(raw).getOrElse("").trim
-      .map(ch => if ch.isLetterOrDigit || ch == ' ' || ch == '_' || ch == '-' then ch else '_')
-      .mkString
-      .replaceAll("\\s+", " ")
-      .take(40)
-    if cleaned.nonEmpty then cleaned else "New World"
+    BlockboxWorld.sanitizeWorldName(raw)
 
   private def uniqueWorldFolderName(raw: String): String =
-    val base = sanitizeWorldName(raw)
-    var candidate = base
-    var n = 2
-    while new java.io.File(worldsRootDir, candidate).exists() do
-      candidate = s"$base ($n)"
-      n += 1
-    candidate
+    BlockboxWorld.uniqueWorldFolderName(raw)
 
   def run(): Unit =
     try
@@ -314,22 +273,69 @@ final class Blockbox:
       val cb = errorCallback
       if cb != null then cb.free()
 
+  def checkModsOnly(): Unit =
+    modManager.loadAll()
+    modManager.loadedMods.foreach { m =>
+      println(s"Blockbox mod check: ${m.id} ${m.version} loaded=${m.loaded} status=${m.status} side=${m.sideLabel}")
+    }
+    modManager.shutdown()
+
   private def initWindow(): Unit =
     errorCallback = GLFWErrorCallback.createPrint(System.err)
     glfwSetErrorCallback(errorCallback)
-    configureGlfwPlatform()
+    BlockboxPlatform.configureGlfwPlatform()
     if !glfwInit() then throw RuntimeException("GLFW initialization failed")
-    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 2)
-    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 1)
-    glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE)
-    glfwWindowHint(GLFW_SAMPLES, 4)
-    window = glfwCreateWindow(width, height, "Blockbox - Scala Voxel Sandbox", NULL, NULL)
-    if window == NULL then throw RuntimeException("Window creation failed")
-    glfwMakeContextCurrent(window)
-    glfwSwapInterval(if vsync then 1 else 0)
-    glfwShowWindow(window)
-    GL.createCapabilities()
+    def resetWindowHints(samples: Int, requestLegacy21: Boolean, requestCore33: Boolean = false): Unit =
+      glfwDefaultWindowHints()
+      glfwWindowHint(GLFW_CLIENT_API, GLFW_OPENGL_API)
+      if requestLegacy21 then
+        glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 2)
+        glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 1)
+      else if requestCore33 then
+        glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3)
+        glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3)
+        glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE)
+        glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GLFW_TRUE)
+      glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE)
+      glfwWindowHint(GLFW_SAMPLES, samples)
+      glfwWindowHint(GLFW_SCALE_TO_MONITOR, GLFW_TRUE)
+      glfwWindowHintString(GLFW_WAYLAND_APP_ID, "blockbox")
+
+    def destroyWindowIfNeeded(): Unit =
+      if window != NULL then
+        val failedWindow = window
+        window = NULL
+        if failedWindow != NULL then glfwDestroyWindow(failedWindow)
+
+    def tryCreateCapabilities(samples: Int, requestLegacy21: Boolean = false, requestCore33: Boolean = false): Boolean =
+      destroyWindowIfNeeded()
+      resetWindowHints(samples, requestLegacy21, requestCore33)
+      window = glfwCreateWindow(width, height, "Blockbox - Scala Voxel Sandbox", NULL, NULL)
+      if window == NULL then return false
+      glfwMakeContextCurrent(window)
+      if glfwGetCurrentContext() != window then return false
+      glfwSwapInterval(if vsync then 1 else 0)
+      glfwShowWindow(window)
+      try
+        GL.createCapabilities()
+        true
+      catch case _: IllegalStateException => false
+
+    val contextOk =
+      tryCreateCapabilities(4, true) ||
+      tryCreateCapabilities(0, true) ||
+      tryCreateCapabilities(0, false) ||
+      tryCreateCapabilities(0, requestCore33 = true) ||
+      tryCreateCapabilities(0, requestLegacy21 = true, requestCore33 = false)
+    if !contextOk then
+      destroyWindowIfNeeded()
+      val platform = sys.env.getOrElse("GLFW_PLATFORM", "auto")
+      val session = sys.env.getOrElse("XDG_SESSION_TYPE", "unknown")
+      val info = s"GLFW_PLATFORM=$platform XDG_SESSION_TYPE=$session"
+      System.err.println(s"Blockbox: OpenGL context setup failed after trying all fallbacks. $info")
+      throw IllegalStateException(s"OpenGL context setup failed. $info Try: (1) Software fallback in the launcher display-backend menu, (2) disabling gamemoderun/GameMode, (3) leaving GLFW_PLATFORM unset for auto-detect on Wayland, or (4) updating your GPU driver.")
     glEnable(0x809D)
+    System.err.println(s"Blockbox: OpenGL context created — vendor=${glGetString(GL_VENDOR)} renderer=${glGetString(GL_RENDERER)} version=${glGetString(GL_VERSION)}")
     textureAtlas = TextureAtlas()
     windowedW = width; windowedH = height
     queryWindowPos()
@@ -364,16 +370,7 @@ final class Blockbox:
       windowedX = wx.get(0); windowedY = wy.get(0)
     finally glfwSetErrorCallback(prevCb)
 
-  private def configureGlfwPlatform(): Unit =
-    sys.env.get("GLFW_PLATFORM").map(_.toLowerCase) match
-      case Some("x11") => glfwInitHint(GLFW_PLATFORM, GLFW_PLATFORM_X11)
-      case Some("wayland") =>
-        glfwInitHint(GLFW_PLATFORM, GLFW_PLATFORM_WAYLAND)
-      case Some("null") => glfwInitHint(GLFW_PLATFORM, GLFW_PLATFORM_NULL)
-      case Some(other) => System.err.println(s"Blockbox: unknown GLFW_PLATFORM '$other', using GLFW default")
-      case None => ()
-
-  private def findSpawn(): Vec3 =
+  protected def findSpawn(): Vec3 =
     val x = 0; val z = 0
     val h = terrainGen.heightAt(x, z)
     Vec3(x + 0.5f, (h + 3).max(Terrain.seaLevel + 3).toFloat, z + 0.5f)
@@ -1009,26 +1006,25 @@ final class Blockbox:
       playerName = (playerName + ch).take(16)
 
   private def cleanPlayerName(): String =
-    val cleaned = playerName.trim.filter(ch => ch.isLetterOrDigit || ch == '_' || ch == '-').take(16)
-    if cleaned.nonEmpty then cleaned else s"Player${((System.currentTimeMillis() / 1000) % 999).toInt}"
+    BlockboxNetworkText.cleanPlayerName(playerName, ((System.currentTimeMillis() / 1000) % 999).toInt)
 
-  private def networkEscape(value: String): String =
-    BlockboxNet.escape(value)
+  protected def networkEscape(value: String): String =
+    BlockboxNetworkText.escape(value)
 
   private def networkUnescape(value: String): String =
-    BlockboxNet.unescape(value)
+    BlockboxNetworkText.unescape(value)
 
-  private def networkFloat(value: Float): String = BlockboxNet.floatText(value)
+  protected def networkFloat(value: Float): String = BlockboxNetworkText.floatText(value)
 
-  private def parseNetworkFloat(value: String): Float = BlockboxNet.parseFloat(value)
+  private def parseNetworkFloat(value: String): Float = BlockboxNetworkText.parseFloat(value)
 
-  private def networkSafeName(value: String): String =
-    BlockboxNet.safeName(value)
+  protected def networkSafeName(value: String): String =
+    BlockboxNetworkText.safeName(value)
 
-  private def normalizeColorId(id: Int): Int = Math.floorMod(id, playerColorPalette.length)
+  private def normalizeColorId(id: Int): Int = BlockboxNetworkText.normalizeColorId(id, playerColorPalette.length)
 
   private def fallbackColorForName(name: String): Int =
-    normalizeColorId(Math.floorMod(networkSafeName(name).hashCode, playerColorPalette.length))
+    BlockboxNetworkText.fallbackColorForName(name, playerColorPalette.length)
 
   private def colorForId(id: Int): (Float, Float, Float) = playerColorPalette(normalizeColorId(id))
 
@@ -1040,58 +1036,31 @@ final class Blockbox:
     val safe = networkSafeName(name)
     playerColors.getOrElseUpdate(safe, fallbackColorForName(safe))
 
-  private def isOppedName(name: String): Boolean =
+  protected def isOppedName(name: String): Boolean =
     val safe = networkSafeName(name)
     oppedPlayerNames.exists(_.equalsIgnoreCase(safe))
 
-  private def setOppedName(name: String, value: Boolean, announce: Boolean = true): Unit =
+  protected def setOppedName(name: String, value: Boolean, announce: Boolean = true): Unit =
     val safe = networkSafeName(name)
     if safe.nonEmpty then
       if value then oppedPlayerNames += safe else oppedPlayerNames.find(_.equalsIgnoreCase(safe)).foreach(n => oppedPlayerNames -= n)
       if announce then addChatMessage(if value then s"$safe is now an operator" else s"$safe is no longer an operator")
 
-  private def broadcastOpState(name: String, value: Boolean): Unit =
+  protected def broadcastOpState(name: String, value: Boolean): Unit =
     val safe = networkSafeName(name)
     if gameServer != null && safe.nonEmpty then gameServer.broadcast("OP|" + networkEscape(safe) + "|" + (if value then "1" else "0"))
 
   private def parsePlayerToken(token: String): Option[(String, Int)] =
-    val raw = Option(token).getOrElse("").trim
-    if raw.isEmpty then None
-    else
-      val idx = raw.lastIndexOf(':')
-      if idx > 0 && idx < raw.length - 1 then
-        val name = networkSafeName(raw.substring(0, idx))
-        val color = try normalizeColorId(raw.substring(idx + 1).toInt) catch case _: Exception => fallbackColorForName(name)
-        Some((name, color))
-      else
-        val name = networkSafeName(raw)
-        Some((name, fallbackColorForName(name)))
+    BlockboxNetworkText.parsePlayerToken(token, playerColorPalette.length)
 
   private def chooseRandomLocalColor(): Int =
     normalizeColorId(scala.util.Random.nextInt(playerColorPalette.length))
 
   private def parseServerAddress(rawInput: String): Either[String, (String, Int)] =
-    val raw = Option(rawInput).getOrElse("").trim
-    val value = if raw.isEmpty then "127.0.0.1" else raw
-    if value.startsWith("[") && value.contains("]:") then
-      val close = value.indexOf(']')
-      val host = value.substring(1, close)
-      val portText = value.substring(close + 2)
-      parsePort(portText).map(port => (host, port))
-    else
-      val colon = value.lastIndexOf(':')
-      val singleColon = colon > 0 && value.indexOf(':') == colon
-      if singleColon && colon < value.length - 1 && value.substring(colon + 1).forall(_.isDigit) then
-        val host = value.substring(0, colon).trim
-        val portText = value.substring(colon + 1)
-        if host.isEmpty then Left("Missing host before port.") else parsePort(portText).map(port => (host, port))
-      else Right((value, serverPort))
+    BlockboxNetworkText.parseServerAddress(rawInput, serverPort)
 
   private def parsePort(text: String): Either[String, Int] =
-    try
-      val port = text.toInt
-      if port >= 1 && port <= 65535 then Right(port) else Left("Port must be 1-65535.")
-    catch case _: NumberFormatException => Left("Invalid port number.")
+    BlockboxNetworkText.parsePort(text)
 
   private def prepareWorldForHost(): Unit =
     val saves = worldSaveDirs
@@ -1295,25 +1264,16 @@ final class Blockbox:
 
   private def canUseLocalChunkSaves: Boolean = !isClientOnlyMultiplayer
 
-  private def worldsRootDir: java.io.File = new java.io.File("worlds")
-  private def currentWorldDir: java.io.File = new java.io.File(worldsRootDir, worldName)
-  private def currentChunksDir: java.io.File = new java.io.File(currentWorldDir, "chunks")
+  private def worldsRootDir: java.io.File = BlockboxWorld.worldsRootDir
+  private def currentWorldDir: java.io.File = BlockboxWorld.currentWorldDir(worldName)
+  private def currentChunksDir: java.io.File = BlockboxWorld.currentChunksDir(worldName)
 
   private def worldSaveDirs: List[java.io.File] =
-    val root = worldsRootDir
-    val files = Option(root.listFiles()).getOrElse(Array.empty[java.io.File])
-    files.filter(d => d.isDirectory && new java.io.File(d, "world.dat").isFile).toList.sortWith((a, b) => a.lastModified() > b.lastModified())
+    BlockboxWorld.worldSaveDirs(worldsRootDir)
 
   private def writeWorldIndex(): Unit =
     try
-      val root = worldsRootDir
-      root.mkdirs()
-      val out = new java.io.PrintWriter(new java.io.BufferedWriter(new java.io.FileWriter(new java.io.File(root, "index.txt"))))
-      try
-        worldSaveDirs.foreach { d =>
-          out.println(d.getName + "|" + new java.io.File(d, "world.dat").lastModified().toString)
-        }
-      finally out.close()
+      BlockboxWorld.writeWorldIndex(worldsRootDir)
     catch case e: Exception => System.err.println(s"World index save failed: $e")
 
   private def writeWorldExtras(out: java.io.DataOutputStream): Unit =
@@ -1403,17 +1363,16 @@ final class Blockbox:
     chunks.values.foreach(_.dispose())
     chunks.clear()
 
-  private def saveWorld(): Unit =
+  protected def saveWorld(): Unit =
     if !canUseLocalChunkSaves then return
     try
       val dir = currentWorldDir
-      dir.mkdirs()
+      BlockboxFiles.ensureDirectory(dir.toPath)
       val chunksDir = new java.io.File(dir, "chunks")
-      chunksDir.mkdirs()
+      BlockboxFiles.ensureDirectory(chunksDir.toPath)
       val file = new java.io.File(dir, "world.dat")
-      val tmp = new java.io.File(dir, "world.dat.tmp")
-      val meta = new java.io.DataOutputStream(new java.io.BufferedOutputStream(new java.io.FileOutputStream(tmp)))
-      try
+      BlockboxFiles.writeAtomic(file.toPath, out0 =>
+        val meta = new java.io.DataOutputStream(new java.io.BufferedOutputStream(out0))
         meta.writeLong(worldSeed)
         meta.writeFloat(camera.x); meta.writeFloat(camera.y); meta.writeFloat(camera.z)
         meta.writeFloat(yaw); meta.writeFloat(pitch)
@@ -1425,12 +1384,8 @@ final class Blockbox:
           saveChunk(cx, cz)
         }
         writeWorldExtras(meta)
-      finally meta.close()
-      try
-        java.nio.file.Files.move(tmp.toPath, file.toPath, java.nio.file.StandardCopyOption.REPLACE_EXISTING, java.nio.file.StandardCopyOption.ATOMIC_MOVE)
-      catch
-        case _: Exception =>
-          java.nio.file.Files.move(tmp.toPath, file.toPath, java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+        meta.flush()
+      )
       writeWorldIndex()
     catch case e: Exception => System.err.println(s"Save failed: $e")
 
@@ -1488,133 +1443,11 @@ final class Blockbox:
       addChatMessage(s"Could not load world: ${worldDir.getName}")
       screen = Screen.LoadWorld
 
-  private def resetHotbarDefaults(): Unit =
-    var i = 0
-    while i < hotbarBlocks.length do
-      hotbarBlocks(i) = Block.Air
-      hotbarCounts(i) = 0
-      i += 1
-    selectedBlock = selectedBlock.max(0).min(hotbarBlocks.length - 1)
-    clearHeldItem()
-
-  private def resetInventory(): Unit =
-    java.util.Arrays.fill(inventory, 0)
-    resetHotbarDefaults()
-    if gameMode == GameMode.Creative then
-      for b <- placeableBlocks do inventory(b.ordinal) = maxStackSize
-      inventory(Block.Coal.ordinal) = inventory(Block.Coal.ordinal).max(maxStackSize)
-    furnaceInput = Block.Air
-    furnaceFuel = Block.Air
-    furnaceProgress = 0f
-    furnaceFuelRemaining = 0f
-    furnaceOutput = Block.Air
-    furnaceOutputCount = 0
-    var cg = 0
-    while cg < craftGridBlocks.length do
-      craftGridBlocks(cg) = Block.Air
-      cg += 1
-
-  private def validHotbarBlock(block: Block): Boolean =
-    block != Block.Air && block != Block.Water && block != Block.Bedrock && block != Block.FurnaceLit
-
-  private def clearHeldItem(): Unit =
-    heldInventoryBlock = Block.Air
-    heldInventoryCount = 0
-    heldFromHotbar = false
-
-  private def releaseHeldItem(): Unit =
-    if gameMode == GameMode.Survival && heldFromHotbar && heldInventoryBlock != Block.Air then addBackpackItem(heldInventoryBlock, heldInventoryCount.max(1))
-    clearHeldItem()
-
-  private def setHeldItem(block: Block, count: Int, fromHotbar: Boolean = false): Unit =
-    if validHotbarBlock(block) && count > 0 then
-      heldInventoryBlock = block
-      heldInventoryCount = count.min(maxStackSize)
-      heldFromHotbar = fromHotbar
-    else clearHeldItem()
-
-  private def addBackpackItem(block: Block, amount: Int): Int =
-    if !validHotbarBlock(block) || amount <= 0 then 0
-    else
-      val room = 999 - inventory(block.ordinal)
-      val moved = amount.min(room.max(0))
-      if moved > 0 then inventory(block.ordinal) += moved
-      moved
-
-  private def hotbarItemCount(block: Block): Int =
-    if !validHotbarBlock(block) then 0
-    else
-      var total = 0
-      var i = 0
-      while i < hotbarBlocks.length do
-        if hotbarBlocks(i) == block then total += hotbarCounts(i).max(0)
-        i += 1
-      total
-
-  private def totalItemCount(block: Block): Int =
+  protected def totalItemCount(block: Block): Int =
     if gameMode == GameMode.Creative && validHotbarBlock(block) then maxStackSize
     else if validHotbarBlock(block) then inventory(block.ordinal).max(0) + hotbarItemCount(block) else 0
 
-  private def compactHotbarAssignments(): Unit =
-    // The hotbar is real stack storage now, separate from the backpack inventory.
-    // It should never show a stale ghost item or duplicate shortcut clone.
-    val seen = scala.collection.mutable.HashSet.empty[Block]
-    var i = 0
-    while i < hotbarBlocks.length do
-      val b = hotbarBlocks(i)
-      if !validHotbarBlock(b) then
-        hotbarBlocks(i) = Block.Air
-        hotbarCounts(i) = 0
-      else if gameMode == GameMode.Creative then
-        if seen.contains(b) then
-          hotbarBlocks(i) = Block.Air
-          hotbarCounts(i) = 0
-        else
-          seen += b
-          hotbarCounts(i) = maxStackSize
-      else if hotbarCounts(i) <= 0 then
-        hotbarBlocks(i) = Block.Air
-        hotbarCounts(i) = 0
-      else if seen.contains(b) then
-        addBackpackItem(b, hotbarCounts(i))
-        hotbarBlocks(i) = Block.Air
-        hotbarCounts(i) = 0
-      else
-        seen += b
-        hotbarCounts(i) = hotbarCounts(i).min(maxStackSize)
-      i += 1
-    if gameMode == GameMode.Survival && heldInventoryBlock != Block.Air && heldInventoryCount <= 0 then clearHeldItem()
-
-  private def assignBlockToHotbar(block: Block, preferredSlot: Int): Unit =
-    if validHotbarBlock(block) then
-      val slot = preferredSlot.max(0).min(hotbarBlocks.length - 1)
-      val oldBlock = hotbarBlocks(slot)
-      val oldCount = hotbarCounts(slot)
-      if gameMode == GameMode.Survival && validHotbarBlock(oldBlock) && oldCount > 0 then addBackpackItem(oldBlock, oldCount)
-      var i = 0
-      while i < hotbarBlocks.length do
-        if i != slot && hotbarBlocks(i) == block then
-          if gameMode == GameMode.Survival && hotbarCounts(i) > 0 then addBackpackItem(block, hotbarCounts(i))
-          hotbarBlocks(i) = Block.Air
-          hotbarCounts(i) = 0
-        i += 1
-      if gameMode == GameMode.Creative then
-        hotbarBlocks(slot) = block
-        hotbarCounts(slot) = maxStackSize
-        selectedBlock = slot
-      else
-        val moved = inventory(block.ordinal).max(0).min(maxStackSize)
-        if moved > 0 then
-          inventory(block.ordinal) -= moved
-          hotbarBlocks(slot) = block
-          hotbarCounts(slot) = moved
-          selectedBlock = slot
-        else
-          hotbarBlocks(slot) = Block.Air
-          hotbarCounts(slot) = 0
-      compactHotbarAssignments()
-
-  private def gainItem(block: Block, amount: Int): Unit =
+  protected def gainItem(block: Block, amount: Int): Unit =
     if validHotbarBlock(block) && amount > 0 then
       var remaining = amount
       if gameMode == GameMode.Survival then
@@ -1636,7 +1469,7 @@ final class Blockbox:
       if remaining > 0 then addBackpackItem(block, remaining)
       compactHotbarAssignments()
 
-  private def consumeInventory(block: Block, amount: Int): Boolean =
+  protected def consumeInventory(block: Block, amount: Int): Boolean =
     if amount <= 0 then true
     else if gameMode == GameMode.Creative then true
     else if !validHotbarBlock(block) || totalItemCount(block) < amount then false
@@ -1655,157 +1488,6 @@ final class Blockbox:
       compactHotbarAssignments()
       true
 
-  private def consumeSelectedHotbar(amount: Int): Boolean =
-    if amount <= 0 then true
-    else if gameMode == GameMode.Creative then true
-    else
-      val slot = selectedBlock.max(0).min(hotbarBlocks.length - 1)
-      if hotbarBlocks(slot) == Block.Air || hotbarCounts(slot) < amount then false
-      else
-        hotbarCounts(slot) -= amount
-        compactHotbarAssignments()
-        true
-
-  private def takeHotbarSlot(slot0: Int): Unit =
-    val slot = slot0.max(0).min(hotbarBlocks.length - 1)
-    val block = hotbarBlocks(slot)
-    val count = if gameMode == GameMode.Creative then maxStackSize else hotbarCounts(slot)
-    if validHotbarBlock(block) && count > 0 then
-      setHeldItem(block, count, fromHotbar = gameMode == GameMode.Survival)
-      if gameMode == GameMode.Survival then
-        hotbarBlocks(slot) = Block.Air
-        hotbarCounts(slot) = 0
-        compactHotbarAssignments()
-
-  private def placeHeldItemInHotbar(slot0: Int): Unit =
-    if heldInventoryBlock == Block.Air then return
-    val slot = slot0.max(0).min(hotbarBlocks.length - 1)
-    val oldBlock = hotbarBlocks(slot)
-    val oldCount = hotbarCounts(slot)
-    if gameMode == GameMode.Creative then
-      hotbarBlocks(slot) = heldInventoryBlock
-      hotbarCounts(slot) = maxStackSize
-      selectedBlock = slot
-      clearHeldItem()
-    else
-      if validHotbarBlock(oldBlock) && oldCount > 0 then addBackpackItem(oldBlock, oldCount)
-      val moveCount = heldInventoryCount.max(1).min(maxStackSize)
-      val canMove = heldFromHotbar || consumeInventory(heldInventoryBlock, moveCount)
-      if canMove then
-        hotbarBlocks(slot) = heldInventoryBlock
-        hotbarCounts(slot) = moveCount
-        selectedBlock = slot
-        clearHeldItem()
-        compactHotbarAssignments()
-      else addChatMessage("Missing item stack")
-
-  private final case class CraftShape(width: Int, height: Int, cells: Vector[Block])
-  private final case class CraftRecipe(width: Int, height: Int, cells: Vector[Block], output: Block, outputCount: Int, label: String)
-
-  private def craftRecipe(rows: Seq[Seq[Block]], output: Block, outputCount: Int, label: String): CraftRecipe =
-    val h = rows.length.max(1)
-    val w = rows.map(_.length).max.max(1)
-    val cells = (0 until h).flatMap { y =>
-      val row = rows(y)
-      (0 until w).map(x => if x < row.length then row(x) else Block.Air)
-    }.toVector
-    CraftRecipe(w, h, cells, output, outputCount, label)
-
-  private def row(blocks: Block*): Seq[Block] = blocks
-
-  private val craftingRecipes: Array[CraftRecipe] = Array(
-    craftRecipe(Seq(row(Block.Wood)), Block.Planks, 4, "oak wood -> planks"),
-    craftRecipe(Seq(row(Block.BirchWood)), Block.BirchPlanks, 4, "birch wood -> planks"),
-    craftRecipe(Seq(row(Block.PineWood)), Block.PinePlanks, 4, "pine wood -> planks"),
-    craftRecipe(Seq(row(Block.AcaciaWood)), Block.AcaciaPlanks, 4, "acacia wood -> planks"),
-    craftRecipe(Seq(row(Block.Wood, Block.Wood), row(Block.Wood, Block.Wood)), Block.Planks, 18, "oak log pack -> planks"),
-    craftRecipe(Seq(row(Block.BirchWood, Block.BirchWood), row(Block.BirchWood, Block.BirchWood)), Block.BirchPlanks, 18, "birch log pack -> planks"),
-    craftRecipe(Seq(row(Block.PineWood, Block.PineWood), row(Block.PineWood, Block.PineWood)), Block.PinePlanks, 18, "pine log pack -> planks"),
-    craftRecipe(Seq(row(Block.AcaciaWood, Block.AcaciaWood), row(Block.AcaciaWood, Block.AcaciaWood)), Block.AcaciaPlanks, 18, "acacia log pack -> planks"),
-    craftRecipe(Seq(row(Block.Stone, Block.Stone), row(Block.Stone, Block.Stone)), Block.Brick, 8, "stone square -> brick"),
-    craftRecipe(Seq(row(Block.Clay, Block.Clay), row(Block.Clay, Block.Clay)), Block.Brick, 6, "clay square -> brick"),
-    craftRecipe(Seq(row(Block.Sand, Block.Clay), row(Block.Clay, Block.Sand)), Block.Brick, 4, "sand clay mix -> brick"),
-    craftRecipe(Seq(row(Block.Sand, Block.Sand), row(Block.Sand, Block.Sand)), Block.Glass, 4, "sand square -> glass"),
-    craftRecipe(Seq(row(Block.Glass, Block.Glass), row(Block.Glass, Block.Glass)), Block.Glass, 4, "glass polish"),
-    craftRecipe(Seq(row(Block.Sand, Block.Sand, Block.Sand), row(Block.Sand, Block.Clay, Block.Sand), row(Block.Sand, Block.Sand, Block.Sand)), Block.Glass, 12, "clear glass batch"),
-    craftRecipe(Seq(row(Block.Stone, Block.Stone, Block.Stone), row(Block.Stone, Block.Air, Block.Stone), row(Block.Stone, Block.Stone, Block.Stone)), Block.Furnace, 1, "stone furnace"),
-    craftRecipe(Seq(row(Block.Planks, Block.Planks), row(Block.Planks, Block.Planks)), Block.Furnace, 1, "plank crate -> furnace"),
-    craftRecipe(Seq(row(Block.BirchPlanks, Block.BirchPlanks), row(Block.BirchPlanks, Block.BirchPlanks)), Block.Furnace, 1, "birch crate -> furnace"),
-    craftRecipe(Seq(row(Block.PinePlanks, Block.PinePlanks), row(Block.PinePlanks, Block.PinePlanks)), Block.Furnace, 1, "pine crate -> furnace"),
-    craftRecipe(Seq(row(Block.AcaciaPlanks, Block.AcaciaPlanks), row(Block.AcaciaPlanks, Block.AcaciaPlanks)), Block.Furnace, 1, "acacia crate -> furnace"),
-    craftRecipe(Seq(row(Block.Dirt, Block.Dirt), row(Block.Dirt, Block.Dirt)), Block.Grass, 1, "dirt patch -> grass"),
-    craftRecipe(Seq(row(Block.Grass), row(Block.Dirt)), Block.Dirt, 2, "turn grass to dirt"),
-    craftRecipe(Seq(row(Block.Snow, Block.Snow), row(Block.Snow, Block.Snow)), Block.Snow, 4, "packed snow"),
-    craftRecipe(Seq(row(Block.Cactus, Block.Cactus), row(Block.Cactus, Block.Cactus)), Block.Cactus, 4, "cactus bundle"),
-    craftRecipe(Seq(row(Block.Coal, Block.Coal), row(Block.Coal, Block.Coal)), Block.Coal, 4, "coal bundle"),
-    craftRecipe(Seq(row(Block.Copper, Block.Copper), row(Block.Copper, Block.Copper)), Block.Copper, 4, "copper pack"),
-    craftRecipe(Seq(row(Block.IronOre, Block.IronOre), row(Block.IronOre, Block.IronOre)), Block.IronOre, 4, "iron ore pack"),
-    craftRecipe(Seq(row(Block.GoldOre, Block.GoldOre), row(Block.GoldOre, Block.GoldOre)), Block.GoldOre, 4, "gold ore pack"),
-    craftRecipe(Seq(row(Block.Diamond, Block.Diamond), row(Block.Diamond, Block.Diamond)), Block.Diamond, 4, "diamond cluster"),
-    craftRecipe(Seq(row(Block.IronOre, Block.Coal)), Block.IronIngot, 1, "quick iron bloom"),
-    craftRecipe(Seq(row(Block.GoldOre, Block.Coal)), Block.GoldIngot, 1, "quick gold bloom"),
-    craftRecipe(Seq(row(Block.IronIngot, Block.IronIngot), row(Block.IronIngot, Block.IronIngot)), Block.IronOre, 1, "iron blocky ore pack"),
-    craftRecipe(Seq(row(Block.GoldIngot, Block.GoldIngot), row(Block.GoldIngot, Block.GoldIngot)), Block.GoldOre, 1, "gold blocky ore pack"),
-    craftRecipe(Seq(row(Block.Brick, Block.Brick), row(Block.Brick, Block.Brick)), Block.Brick, 4, "brick stack"),
-    craftRecipe(Seq(row(Block.RainbowBlock, Block.Glass), row(Block.Glass, Block.RainbowBlock)), Block.RainbowBlock, 4, "rainbow glass mix"),
-    craftRecipe(Seq(row(Block.Leaves, Block.Leaves), row(Block.Leaves, Block.Leaves)), Block.Leaves, 4, "leaf bundle"),
-    craftRecipe(Seq(row(Block.BirchLeaves, Block.BirchLeaves), row(Block.BirchLeaves, Block.BirchLeaves)), Block.BirchLeaves, 4, "birch leaf bundle"),
-    craftRecipe(Seq(row(Block.PineLeaves, Block.PineLeaves), row(Block.PineLeaves, Block.PineLeaves)), Block.PineLeaves, 4, "pine leaf bundle"),
-    craftRecipe(Seq(row(Block.AcaciaLeaves, Block.AcaciaLeaves), row(Block.AcaciaLeaves, Block.AcaciaLeaves)), Block.AcaciaLeaves, 4, "acacia leaf bundle")
-  )
-
-  private def normalizeCraftGrid(cells: Array[Block]): Option[CraftShape] =
-    var minX = 3; var minY = 3; var maxX = -1; var maxY = -1
-    var i = 0
-    while i < cells.length do
-      if cells(i) != Block.Air then
-        val x = i % 3; val y = i / 3
-        minX = minX.min(x); minY = minY.min(y); maxX = maxX.max(x); maxY = maxY.max(y)
-      i += 1
-    if maxX < 0 then None
-    else
-      val w = maxX - minX + 1
-      val h = maxY - minY + 1
-      val out = ArrayBuffer.empty[Block]
-      var y = minY
-      while y <= maxY do
-        var x = minX
-        while x <= maxX do
-          out += cells(y * 3 + x)
-          x += 1
-        y += 1
-      Some(CraftShape(w, h, out.toVector))
-
-  private def currentCraftingResult: Option[CraftRecipe] =
-    normalizeCraftGrid(craftGridBlocks).flatMap { shape =>
-      craftingRecipes.find(r => r.width == shape.width && r.height == shape.height && r.cells == shape.cells)
-    }
-
-  private def craftInputCounts: Map[Block, Int] =
-    val counts = scala.collection.mutable.HashMap.empty[Block, Int]
-    var i = 0
-    while i < craftGridBlocks.length do
-      val b = craftGridBlocks(i)
-      if b != Block.Air then counts(b) = counts.getOrElse(b, 0) + 1
-      i += 1
-    counts.toMap
-
-  private def canCraftCurrent(recipe: CraftRecipe): Boolean =
-    gameMode == GameMode.Creative || craftInputCounts.forall { case (b, n) => totalItemCount(b) >= n }
-
-  private def tryCraftGrid(): Unit =
-    currentCraftingResult match
-      case Some(recipe) if canCraftCurrent(recipe) =>
-        val counts = craftInputCounts
-        var ok = true
-        counts.foreach { case (b, n) => if !consumeInventory(b, n) then ok = false }
-        if ok then
-          gainItem(recipe.output, recipe.outputCount)
-          playPlaceSound()
-        else addChatMessage("Missing crafting ingredients")
-      case Some(_) => addChatMessage("Missing crafting ingredients")
-      case None => addChatMessage("No matching recipe")
-
   private def submitChat(): Unit =
     val text = chatInput.trim
     if text.nonEmpty then
@@ -1819,370 +1501,16 @@ final class Blockbox:
     chatOpen = false
     chatInput = ""
 
-  private def sendChatMessage(text: String): Unit =
+  protected def sendChatMessage(text: String): Unit =
     addChatMessage(s"<You> $text")
     if multiplayerMode then
       val msg = s"CHAT|${networkEscape(playerName)}|${networkEscape(text)}"
       if gameClient != null && gameClient.isConnected then gameClient.send(msg)
       else if gameServer != null then gameServer.broadcast(msg)
 
-  private def addChatMessage(msg: String): Unit =
+  protected def addChatMessage(msg: String): Unit =
     chatMessages += ((msg, 8f))
     if chatMessages.length > 100 then chatMessages.remove(0, chatMessages.length - 100)
-
-  private def allPlayerNames: Seq[String] =
-    (Seq(playerName) ++ knownPlayerNames.toSeq ++ remotePlayers.keys.toSeq).map(networkSafeName).filter(_.nonEmpty).distinct
-
-  private def canUseCheatAuthority: Boolean =
-    !multiplayerMode || gameServer != null || isOppedName(playerName)
-
-  private def isClientOnlyOperator: Boolean =
-    multiplayerMode && gameClient != null && gameServer == null && isOppedName(playerName)
-
-  private def commandSuggestions(input: String): Seq[String] =
-    if input == null || !input.startsWith("/") then Seq.empty
-    else
-      val raw = input.drop(1)
-      val parts = raw.split("\\s+", -1)
-      val commands = (Seq(
-        "/help", "/enablecheats", "/op", "/deop", "/gamemode", "/gm",
-        "/timeset", "/time", "/fly", "/tp", "/teleport", "/spawn",
-        "/give", "/heal", "/feed", "/where", "/biome", "/seed", "/save", "/clear"
-      ) ++ modManager.commandNames.map("/" + _)).distinct
-      if !raw.contains(" ") then
-        val prefix = "/" + raw.toLowerCase
-        commands.filter(_.startsWith(prefix)).take(8)
-      else
-        parts.headOption.map(_.toLowerCase).getOrElse("") match
-          case "gamemode" | "gm" =>
-            val prefix = parts.lastOption.getOrElse("").toLowerCase
-            Seq("survival", "creative").filter(_.startsWith(prefix)).map(m => "/" + parts.head + " " + m)
-          case "timeset" | "time" =>
-            val prefix = parts.lastOption.getOrElse("").toLowerCase
-            Seq("day", "noon", "sunset", "night", "midnight", "sunrise", "reset").filter(_.startsWith(prefix)).map(v => "/" + parts.head + " " + v)
-          case "give" =>
-            if parts.length <= 2 then
-              val last = parts.lastOption.getOrElse("")
-              val prefix = last.toLowerCase
-              Block.all.filter(validHotbarBlock).map(_.toString.toLowerCase).filter(_.startsWith(prefix)).take(8).map(name => "/" + raw.dropRight(last.length) + name)
-            else Seq("/" + parts.head + " " + parts(1) + " 64")
-          case "op" | "deop" =>
-            val last = parts.lastOption.getOrElse("")
-            val prefix = last.toLowerCase
-            allPlayerNames.filter(_.toLowerCase.startsWith(prefix)).take(8).map(name => "/" + raw.dropRight(last.length) + name)
-          case "tp" | "teleport" | "spawn" | "heal" | "feed" =>
-            val last = parts.lastOption.getOrElse("")
-            val prefix = last.toLowerCase
-            allPlayerNames.filter(_.toLowerCase.startsWith(prefix)).take(8).map(name => "/" + raw.dropRight(last.length) + name)
-          case _ => Seq.empty
-
-  private def applyCommandSuggestion(): Unit =
-    val suggestions = commandSuggestions(chatInput)
-    if suggestions.nonEmpty then
-      val picked = suggestions(commandSuggestionIndex.max(0).min(suggestions.length - 1))
-      chatInput = picked + (if picked.count(_ == ' ') == 0 then " " else "")
-      commandSuggestionIndex = 0
-
-  private def findPlayerName(query: String): Option[String] =
-    val q = Option(query).getOrElse("").trim.toLowerCase
-    if q.isEmpty then None
-    else allPlayerNames.find(_.toLowerCase == q).orElse(allPlayerNames.find(_.toLowerCase.startsWith(q)))
-
-  private def positionOfPlayer(name: String): Option[Vec3] =
-    val clean = networkSafeName(name)
-    if clean.equalsIgnoreCase(playerName) then Some(camera)
-    else remotePlayers.collectFirst { case (n, rp) if n.equalsIgnoreCase(clean) => rp.pos }
-
-  private def teleportPlayer(target: String, dest: Vec3): Unit =
-    val clean = networkSafeName(target)
-    if clean.equalsIgnoreCase(playerName) then
-      camera = dest
-      velocity = Vec3(0f, 0f, 0f)
-      addChatMessage(s"Teleported $clean")
-    else if gameServer != null then
-      val msg = "TPOS|" + networkEscape(clean) + "|" + networkFloat(dest.x) + "|" + networkFloat(dest.y) + "|" + networkFloat(dest.z)
-      gameServer.broadcast(msg)
-      addChatMessage(s"Teleported $clean")
-    else addChatMessage("Only the host can teleport other players")
-
-
-  private def setGameModeForPlayer(name: String, mode: GameMode): Unit =
-    val safe = networkSafeName(name)
-    if safe.equalsIgnoreCase(playerName) then
-      if gameMode == mode then addChatMessage(s"Already in $mode mode")
-      else toggleTo(mode)
-    else if gameServer != null then
-      gameServer.broadcast("GMODE|" + networkEscape(safe) + "|" + mode.ordinal.toString)
-      addChatMessage(s"Set $safe to $mode")
-    else addChatMessage("Only the host can change another player's gamemode")
-
-  private def toggleFlyForPlayer(name: String): Unit =
-    val safe = networkSafeName(name)
-    if safe.equalsIgnoreCase(playerName) then
-      if gameMode == GameMode.Survival then addChatMessage("Flight is only available in Creative mode")
-      else
-        flyEnabled = !flyEnabled
-        if flyEnabled then
-          velocity = Vec3(0f, 0f, 0f)
-          addChatMessage("Flight enabled")
-        else
-          onGround = false
-          velocity = Vec3(0f, -0.5f, 0f)
-          addChatMessage("Flight disabled")
-    else if gameServer != null then
-      gameServer.broadcast("FLY|" + networkEscape(safe) + "|TOGGLE")
-      addChatMessage(s"Toggled flight for $safe")
-    else addChatMessage("Only the host can toggle another player's flight")
-
-  private def setTimeCommand(mode: String): Boolean =
-    val normalized = Option(mode).getOrElse("").trim.toLowerCase
-    val applied = normalized match
-      case "sunrise" =>
-        timeOverride = Some(0f)
-        addChatMessage("Set time to sunrise")
-        true
-      case "day" =>
-        timeOverride = Some(dayLengthSeconds * 0.25f)
-        addChatMessage("Set time to day")
-        true
-      case "noon" =>
-        timeOverride = Some(dayLengthSeconds * 0.50f)
-        addChatMessage("Set time to noon")
-        true
-      case "sunset" =>
-        timeOverride = Some(dayLengthSeconds * 0.92f)
-        addChatMessage("Set time to sunset")
-        true
-      case "night" =>
-        timeOverride = Some(dayLengthSeconds + nightLengthSeconds * 0.18f)
-        addChatMessage("Set time to night")
-        true
-      case "midnight" =>
-        timeOverride = Some(dayLengthSeconds + nightLengthSeconds * 0.50f)
-        addChatMessage("Set time to midnight")
-        true
-      case "reset" =>
-        timeOverride = None
-        addChatMessage("Time override cleared")
-        true
-      case _ => false
-    if applied && gameServer != null then gameServer.broadcast("TIME|" + normalized)
-    applied
-
-  private def parseGiveBlock(text: String): Option[Block] =
-    Block.find(text).filter(validHotbarBlock)
-
-  private def giveItemForPlayer(target: String, block: Block, count: Int): Unit =
-    val safe = networkSafeName(target)
-    val amount = count.max(1).min(999)
-    if safe.equalsIgnoreCase(playerName) then
-      gainItem(block, amount)
-      addChatMessage(s"Gave $amount ${blockName(block)} to $safe")
-    else if gameServer != null then
-      gameServer.broadcast("GIVE|" + networkEscape(safe) + "|" + block.id.toInt.toString + "|" + amount.toString)
-      addChatMessage(s"Gave $amount ${blockName(block)} to $safe")
-    else addChatMessage("Only the host can give items to another player")
-
-  private def setVitalsForPlayer(target: String, health: Option[Float], food: Option[Float], label: String): Unit =
-    val safe = networkSafeName(target)
-    val hp = health.map(_.max(0f).min(maxPlayerHealth))
-    val fd = food.map(_.max(0f).min(maxPlayerFood))
-    if safe.equalsIgnoreCase(playerName) then
-      hp.foreach(v => playerHealth = v)
-      fd.foreach(v => playerFood = v)
-      addChatMessage(label + " " + safe)
-    else if gameServer != null then
-      val hpText = hp.map(networkFloat).getOrElse("-1")
-      val foodText = fd.map(networkFloat).getOrElse("-1")
-      gameServer.broadcast("VITAL|" + networkEscape(safe) + "|" + hpText + "|" + foodText + "|" + networkEscape(label))
-      addChatMessage(label + " " + safe)
-    else addChatMessage("Only the host can change another player's health or food")
-
-  private def biomeNameAt(x: Int, z: Int, y: Int): String =
-    val savanna = terrainGen.savannaBlendAt(x, z, y)
-    val birch = terrainGen.birchBlendAt(x, z, y)
-    if savanna > 0.58f && savanna >= birch then "Savanna"
-    else if birch > 0.58f && birch > savanna then "Birch Grove"
-    else if savanna > 0.24f && birch > 0.24f then "Mixed Grassland"
-    else if savanna > 0.24f then "Savanna Edge"
-    else if birch > 0.24f then "Birch Edge"
-    else "Plains"
-
-  private def addPositionReport(name: String, pos: Vec3): Unit =
-    val bx = floor(pos.x).toInt
-    val by = floor(pos.y).toInt
-    val bz = floor(pos.z).toInt
-    val biome = biomeNameAt(bx, bz, by)
-    addChatMessage(s"$name: x=$bx y=$by z=$bz chunk=(${chunkCoordBlock(bx)}, ${chunkCoordBlock(bz)}) biome=$biome")
-
-  private def parseCoord(text: String, current: Float): Option[Float] =
-    try
-      if text == "~" then Some(current)
-      else if text.startsWith("~") then Some(current + text.drop(1).toFloat)
-      else Some(text.toFloat)
-    catch case _: Exception => None
-
-  private def parseCommand(cmd: String, remoteSender: Option[String] = None): Unit =
-    val trimmed = cmd.trim
-    if !trimmed.startsWith("/") then
-      sendChatMessage(trimmed)
-      return
-
-    val args = trimmed.drop(1).split("\\s+").filter(_.nonEmpty)
-    if args.isEmpty then return
-    val command = args(0).toLowerCase
-    val actorName = remoteSender.map(networkSafeName).getOrElse(playerName)
-    val actorIsHostLocal = remoteSender.isEmpty && (!multiplayerMode || gameServer != null)
-    val actorIsOp = actorIsHostLocal || remoteSender.exists(isOppedName) || (remoteSender.isEmpty && isOppedName(playerName))
-    if modManager.hasCommand(command) then
-      if remoteSender.isEmpty && gameClient != null && gameServer == null && modManager.commandIsServerInteractive(command) then
-        if isOppedName(playerName) then
-          gameClient.send("CMD|" + networkEscape(trimmed))
-        else addChatMessage("That mod command is server-side. Ask the host for /op.")
-      else modManager.executeCommand(command, args.drop(1), actorName, remoteSender.nonEmpty)
-      return
-    val isCheat = Set(
-      "gamemode", "gm", "timeset", "time", "fly", "tp", "teleport",
-      "spawn", "give", "heal", "feed", "op", "deop"
-    ).contains(command)
-
-    if remoteSender.isEmpty && isClientOnlyOperator && isCheat && command != "enablecheats" && command != "cheats" && command != "op" && command != "deop" then
-      gameClient.send("CMD|" + networkEscape(trimmed))
-      return
-
-    if command == "enablecheats" || command == "cheats" then
-      if actorIsHostLocal then
-        if worldCheatsEnabled then addChatMessage("Cheats are already enabled")
-        else
-          worldCheatsEnabled = true
-          addChatMessage("Cheats enabled")
-      else addChatMessage("Only the host can enable cheats")
-      return
-
-    if (command == "op" || command == "deop") then
-      if !actorIsHostLocal then
-        addChatMessage("Only the host can op or deop players")
-        return
-      if !worldCheatsEnabled then
-        addChatMessage("Cheats are not enabled. Run /enablecheats first")
-        return
-      if args.length < 2 then
-        addChatMessage("Usage: /" + command + " <player>")
-        return
-      val target = findPlayerName(args(1)).getOrElse(networkSafeName(args(1)))
-      val value = command == "op"
-      if value && isOppedName(target) then addChatMessage(s"$target is already an operator")
-      else if !value && !isOppedName(target) then addChatMessage(s"$target is not an operator")
-      else
-        setOppedName(target, value)
-        broadcastOpState(target, value)
-      return
-
-    if isCheat && !actorIsOp then
-      addChatMessage(if remoteSender.isDefined then s"$actorName tried to use a command but is not opped" else "You are not opped")
-      return
-    if isCheat && !worldCheatsEnabled then
-      addChatMessage("Cheats are not enabled. Host can run /enablecheats")
-      return
-
-    command match
-      case "gamemode" | "gm" =>
-        val mode = if args.length > 1 then args(1).toLowerCase else ""
-        val targetName = if args.length > 2 then findPlayerName(args(2)).getOrElse(networkSafeName(args(2))) else actorName
-        val parsedMode = mode match
-          case "survival" | "s" | "0" => Some(GameMode.Survival)
-          case "creative" | "c" | "1" => Some(GameMode.Creative)
-          case _ => None
-        parsedMode match
-          case Some(nextMode) => setGameModeForPlayer(targetName, nextMode)
-          case None => addChatMessage("Usage: /gamemode <survival|creative> [player]")
-      case "timeset" | "time" =>
-        val when = if args.length > 1 then args(1).toLowerCase else ""
-        if !setTimeCommand(when) then addChatMessage("Usage: /time <sunrise|day|noon|sunset|night|midnight|reset>")
-      case "fly" =>
-        val targetName = if args.length > 1 then findPlayerName(args(1)).getOrElse(networkSafeName(args(1))) else actorName
-        toggleFlyForPlayer(targetName)
-      case "spawn" =>
-        val targetName = if args.length > 1 then findPlayerName(args(1)).getOrElse(networkSafeName(args(1))) else actorName
-        teleportPlayer(targetName, findSpawn())
-      case "give" =>
-        if args.length < 2 then addChatMessage("Usage: /give <block> [count] [player]")
-        else
-          parseGiveBlock(args(1)) match
-            case Some(block) =>
-              val amount = if args.length > 2 then args(2).toIntOption.getOrElse(64) else 64
-              val targetName = if args.length > 3 then findPlayerName(args(3)).getOrElse(networkSafeName(args(3))) else actorName
-              giveItemForPlayer(targetName, block, amount)
-            case None => addChatMessage("Unknown or ungiveable block: " + args(1))
-      case "heal" =>
-        val targetName = if args.length > 1 then findPlayerName(args(1)).getOrElse(networkSafeName(args(1))) else actorName
-        setVitalsForPlayer(targetName, Some(maxPlayerHealth), None, "Healed")
-      case "feed" =>
-        val targetName = if args.length > 1 then findPlayerName(args(1)).getOrElse(networkSafeName(args(1))) else actorName
-        setVitalsForPlayer(targetName, None, Some(maxPlayerFood), "Fed")
-      case "tp" | "teleport" =>
-        if args.length == 2 then
-          findPlayerName(args(1)).flatMap(positionOfPlayer) match
-            case Some(dest) => teleportPlayer(actorName, dest)
-            case None => addChatMessage("Usage: /tp <player> OR /tp <target> <destination> OR /tp <x> <y> <z>")
-        else if args.length == 3 then
-          val targetOpt = findPlayerName(args(1))
-          val destOpt = findPlayerName(args(2)).flatMap(positionOfPlayer)
-          (targetOpt, destOpt) match
-            case (Some(target), Some(dest)) => teleportPlayer(target, dest)
-            case _ => addChatMessage("Usage: /tp <target> <destination>")
-        else if args.length == 4 then
-          val base = positionOfPlayer(actorName).getOrElse(camera)
-          val x = parseCoord(args(1), base.x)
-          val y = parseCoord(args(2), base.y)
-          val z = parseCoord(args(3), base.z)
-          (x, y, z) match
-            case (Some(px), Some(py), Some(pz)) => teleportPlayer(actorName, Vec3(px, py, pz))
-            case _ => addChatMessage("Usage: /tp <x> <y> <z>")
-        else if args.length == 5 then
-          val targetOpt = findPlayerName(args(1))
-          val base = targetOpt.flatMap(positionOfPlayer).getOrElse(camera)
-          val x = parseCoord(args(2), base.x)
-          val y = parseCoord(args(3), base.y)
-          val z = parseCoord(args(4), base.z)
-          (targetOpt, x, y, z) match
-            case (Some(target), Some(px), Some(py), Some(pz)) => teleportPlayer(target, Vec3(px, py, pz))
-            case _ => addChatMessage("Usage: /tp <target> <x> <y> <z>")
-        else addChatMessage("Usage: /tp <player> | /tp <target> <destination> | /tp <x> <y> <z>")
-      case "where" =>
-        val targetName = if args.length > 1 then findPlayerName(args(1)).getOrElse(networkSafeName(args(1))) else actorName
-        positionOfPlayer(targetName) match
-          case Some(pos) => addPositionReport(targetName, pos)
-          case None => addChatMessage("Unknown player: " + targetName)
-      case "biome" =>
-        val pos = positionOfPlayer(actorName).getOrElse(camera)
-        val bx = floor(pos.x).toInt
-        val by = floor(pos.y).toInt
-        val bz = floor(pos.z).toInt
-        val savanna = terrainGen.savannaBlendAt(bx, bz, by)
-        val birch = terrainGen.birchBlendAt(bx, bz, by)
-        val tint = terrainGen.grassTintAt(bx, bz, by)
-        addChatMessage(f"Biome: ${biomeNameAt(bx, bz, by)} savanna=$savanna%.2f birch=$birch%.2f grassRGB=${tint._1}%.2f/${tint._2}%.2f/${tint._3}%.2f")
-      case "seed" =>
-        addChatMessage(s"World: $worldName seed=$worldSeed")
-      case "save" =>
-        if !actorIsHostLocal then addChatMessage("Only the host can save the world")
-        else
-          saveWorld()
-          addChatMessage(s"Saved world: $worldName")
-      case "clear" =>
-        chatMessages.clear()
-      case "help" =>
-        addChatMessage("Commands: /help, /where, /biome, /seed, /clear, /save")
-        addChatMessage("Admin: /enablecheats, /op, /deop, /gamemode, /time, /fly, /tp, /spawn, /give, /heal, /feed")
-      case _ =>
-        addChatMessage(s"Unknown command: /${args(0)}")
-
-  private def toggleTo(mode: GameMode): Unit =
-    gameMode = mode
-    if mode == GameMode.Survival then flyEnabled = false
-    velocity = Vec3(0f, 0f, 0f); onGround = false
-    addChatMessage(s"Game mode set to $mode")
 
   private def openInventory(): Unit =
     catalogScroll = 0
@@ -2203,45 +1531,6 @@ final class Blockbox:
     glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL)
     breakingBlock = null
     breakingProgress = 0f
-
-  private def playPlaceSound(): Unit = playTone(140f, 0.045f, 0.28f, 0.35f)
-  private def playBreakSound(): Unit = playNoise(0.075f, 0.26f)
-  private def playTone(freq: Float, seconds: Float, volume: Float, decay: Float): Unit =
-    if soundEnabled then playSound(seconds) { (i, rate) =>
-      val t = i.toFloat / rate
-      val env = pow((1f - t / seconds).max(0f), decay.toDouble).toFloat
-      sin(2.0 * Pi * freq * t).toFloat * volume * env
-    }
-
-  private def playNoise(seconds: Float, volume: Float): Unit =
-    if soundEnabled then playSound(seconds) { (i, _) =>
-      var n = i * 1103515245 + 12345
-      n = (n ^ (n >>> 16)) * 2246822519L.toInt
-      val env = (1f - i.toFloat / (44100f * seconds)).max(0f)
-      (((n & 0xffff).toFloat / 32768f) - 1f) * volume * env
-    }
-
-  private def playSound(seconds: Float)(sample: (Int, Float) => Float): Unit =
-    Thread(() =>
-      try
-        val rate = 44100f
-        val frames = (rate * seconds).toInt.max(1)
-        val bytes = new Array[Byte](frames * 2)
-        var i = 0
-        while i < frames do
-          val s = (sample(i, rate).max(-1f).min(1f) * Short.MaxValue).toInt
-          bytes(i * 2) = (s & 0xff).toByte
-          bytes(i * 2 + 1) = ((s >>> 8) & 0xff).toByte
-          i += 1
-        val format = AudioFormat(rate, 16, 1, true, false)
-        val line = AudioSystem.getSourceDataLine(format)
-        line.open(format, bytes.length)
-        line.start()
-        line.write(bytes, 0, bytes.length)
-        line.drain()
-        line.close()
-      catch case _: Throwable => ()
-    ).start()
 
   private def updateGame(dt: Float): Unit =
     processNetworkMessages()
@@ -2785,7 +2074,7 @@ final class Blockbox:
     val probes = Array(camera, camera + Vec3(0f, -0.72f, 0f), camera + Vec3(0f, -1.45f, 0f))
     probes.count(p => blockAt(p) == Block.Water).toFloat / probes.length
 
-  private def chunkCoordBlock(v: Int): Int = Math.floorDiv(v, Terrain.chunkSize)
+  protected def chunkCoordBlock(v: Int): Int = Math.floorDiv(v, Terrain.chunkSize)
   private def chunkCoordPos(v: Float): Int = floor(v / Terrain.chunkSize.toFloat).toInt
 
   private def activeBlockAt(x: Int, y: Int, z: Int): Block =
@@ -3293,44 +2582,7 @@ final class Blockbox:
     glEnable(GL_DEPTH_TEST)
 
   private def drawHeartIcon(x: Float, y: Float, size: Float, fillFrac: Float, bgAlpha: Float): Unit =
-    val s = size.max(10f)
-    val fill = fillFrac.max(0f).min(1f)
-    rect(x - 1f, y - 1f, s + 2f, s + 2f, 0f, 0f, 0f, 0.30f)
-    rect(x, y, s, s, 0.10f, 0.02f, 0.02f, bgAlpha)
-    val cols = 7
-    val rows = 6
-    val cell = (s / cols.toFloat).max(1f)
-    val heart = Array(
-      Array(0, 1, 1, 0, 1, 1, 0),
-      Array(1, 1, 1, 1, 1, 1, 1),
-      Array(1, 1, 1, 1, 1, 1, 1),
-      Array(0, 1, 1, 1, 1, 1, 0),
-      Array(0, 0, 1, 1, 1, 0, 0),
-      Array(0, 0, 0, 1, 0, 0, 0)
-    )
-    val fillW = s * fill
-    var ry = 0
-    while ry < rows do
-      var rx = 0
-      while rx < cols do
-        if heart(ry)(rx) == 1 then
-          val px = x + rx * cell
-          val py = y + ry * cell
-          val pw = (cell + 0.55f).min(s - rx * cell)
-          val ph = (cell + 0.55f).min(s - ry * cell)
-          val filled = px + pw <= x + fillW + 0.01f
-          val partial = !filled && fill > 0f && px < x + fillW
-          if filled then
-            rect(px, py, pw, ph, 0.92f, 0.08f, 0.10f, 0.96f)
-            if ry <= 1 then rect(px, py, pw, ph * 0.38f, 1f, 0.45f, 0.48f, 0.22f)
-          else if partial then
-            val visible = (x + fillW - px).max(0f).min(pw)
-            rect(px, py, pw, ph, 0.18f, 0.03f, 0.03f, bgAlpha + 0.08f)
-            rect(px, py, visible, ph, 0.92f, 0.08f, 0.10f, 0.96f)
-          else
-            rect(px, py, pw, ph, 0.18f, 0.03f, 0.03f, bgAlpha + 0.08f)
-        rx += 1
-      ry += 1
+    BlockboxRender2D.drawHeartIcon(x, y, size, fillFrac, bgAlpha)
 
   private def renderHealth(): Unit =
     glDisable(GL_DEPTH_TEST); glDisable(GL_CULL_FACE); setupOrtho()
@@ -3455,150 +2707,41 @@ final class Blockbox:
     glBindTexture(GL_TEXTURE_2D, 0); glDisable(GL_TEXTURE_2D)
 
   private def renderCrosshair(): Unit =
-    glDisable(GL_DEPTH_TEST); glDisable(GL_CULL_FACE); setupOrtho()
-    val cx = framebufferWidth / 2f; val cy = framebufferHeight / 2f
-    val s = ((framebufferHeight / 720f).max(0.75f)).min(2f)
-    val gap = (4f * s).toInt.toFloat; val len = (8f * s).toInt.toFloat
-    glLineWidth((1.5f * s).max(1f))
-    glColor4f(0f, 0f, 0f, 0.55f)
-    glBegin(GL_LINES)
-    glVertex2f(cx - len - gap, cy); glVertex2f(cx - gap, cy)
-    glVertex2f(cx + gap, cy); glVertex2f(cx + len + gap, cy)
-    glVertex2f(cx, cy - len - gap); glVertex2f(cx, cy - gap)
-    glVertex2f(cx, cy + gap); glVertex2f(cx, cy + len + gap)
-    glEnd()
-    glColor4f(1f, 1f, 1f, 0.80f)
-    glBegin(GL_LINES)
-    glVertex2f(cx - len - gap + 1f, cy); glVertex2f(cx - gap + 1f, cy)
-    glVertex2f(cx + gap - 1f, cy); glVertex2f(cx + len + gap - 1f, cy)
-    glVertex2f(cx, cy - len - gap + 1f); glVertex2f(cx, cy - gap + 1f)
-    glVertex2f(cx, cy + gap - 1f); glVertex2f(cx, cy + len + gap - 1f)
-    glEnd()
-    glColor4f(1f, 1f, 1f, 0.30f)
-    val dot = (1f * s).max(0.5f)
-    glBegin(GL_QUADS)
-    glVertex2f(cx - dot, cy - dot); glVertex2f(cx + dot, cy - dot)
-    glVertex2f(cx + dot, cy + dot); glVertex2f(cx - dot, cy + dot)
-    glEnd()
-    glLineWidth(1f)
+    BlockboxRender2D.renderCrosshair(framebufferWidth, framebufferHeight)
 
   private def renderUnderwaterOverlay(): Unit =
-    glDisable(GL_DEPTH_TEST); glDisable(GL_CULL_FACE); setupOrtho()
-    val t = glfwGetTime().toFloat
-    val wave = (sin(t * 1.5f).toFloat * 0.015f + 0.20f).max(0.12f).min(0.32f)
-    rect(0, 0, framebufferWidth, framebufferHeight, 0.01f, 0.12f + wave * 0.3f, 0.30f + wave * 0.3f, 0.24f)
-    rect(0, 0, framebufferWidth, framebufferHeight * 0.15f, 0.01f, 0.15f, 0.35f, 0.10f)
-    rect(0, framebufferHeight * 0.85f, framebufferWidth, framebufferHeight * 0.15f, 0.01f, 0.15f, 0.35f, 0.10f)
-    val vignette = 0.20f
-    rect(0, 0, framebufferWidth * 0.08f, framebufferHeight, 0f, 0.08f, 0.20f, vignette)
-    rect(framebufferWidth * 0.92f, 0, framebufferWidth * 0.08f, framebufferHeight, 0f, 0.08f, 0.20f, vignette)
+    BlockboxRender2D.renderUnderwaterOverlay(framebufferWidth, framebufferHeight, glfwGetTime().toFloat)
 
   private def clearColor: (Float, Float, Float) =
-    if isUnderwater then (0.02f, 0.14f, 0.30f)
-    else
-      val dp = dayPhase
-      val daylight = smooth01(daylightFactor)
-      val sunrise = smooth01(max(0f, 1f - abs(dp - 0.78f) * 12f))
-      val sunset = smooth01(max(0f, 1f - abs(dp - 0.28f) * 12f))
-      val rWarm = if sunrise > 0f || sunset > 0f then 0.25f * (sunrise + sunset) else 0f
-      val r = (0.12f + 0.50f * daylight + rWarm).max(0.04f).min(0.95f)
-      val g = (0.22f + 0.60f * daylight).max(0.04f).min(0.95f)
-      val b = (0.34f + 0.65f * daylight).max(0.06f).min(0.98f)
-      (r, g, b)
+    BlockboxSky.clearColor(isUnderwater, dayPhase, daylightFactor)
 
-  private val dayLengthSeconds = 10f * 60f
-  private val nightLengthSeconds = 8f * 60f
-  private val dayNightCycleSeconds = dayLengthSeconds + nightLengthSeconds
+  protected val dayLengthSeconds = BlockboxSky.dayLengthSeconds
+  protected val nightLengthSeconds = BlockboxSky.nightLengthSeconds
 
   private def gameTime: Float = timeOverride.getOrElse(glfwGetTime().toFloat)
 
   private def cycleClock: Float =
-    val raw = gameTime % dayNightCycleSeconds
-    if raw < 0f then raw + dayNightCycleSeconds else raw
+    BlockboxSky.cycleClock(gameTime)
 
   private def dayPhase: Float =
-    val t = cycleClock
-    if t < dayLengthSeconds then (t / dayLengthSeconds) * 0.5f
-    else 0.5f + ((t - dayLengthSeconds) / nightLengthSeconds) * 0.5f
+    BlockboxSky.dayPhase(gameTime)
 
   private def daylightFactor: Float =
-    val sun = sin(dayPhase * Pi.toFloat * 2f).toFloat
-    val eased = smooth01((sun + 0.18f) / 0.58f)
-    (0.18f + 0.82f * eased).max(0.18f).min(1f)
+    BlockboxSky.daylightFactor(dayPhase)
 
   private def smooth01(v: Float): Float =
-    val t = v.max(0f).min(1f); t * t * (3f - 2f * t)
+    BlockboxSky.smooth01(v)
 
   private def nightDarkness: Float =
-    // Multiplayer windows joining/leaving should never create a temporary dark
-    // screen while their terrain is warming up. Keep the world readable online;
-    // singleplayer still has the old day/night dimming.
-    if multiplayerMode then 0f
-    else
-      val d = daylightFactor
-      val night = (1f - (d - 0.18f) / 0.82f) * 0.55f
-      night.max(0f).min(0.55f)
+    BlockboxSky.nightDarkness(multiplayerMode, daylightFactor)
 
   private def generateStars(): Unit =
     if starPositions != null then return
-    val rng = new scala.util.Random(42L)
-    starPositions = Array.tabulate(600) { _ =>
-      val theta = rng.nextFloat() * Pi.toFloat * 2f
-      val phi = acos((rng.nextFloat() * 2f - 1f).toDouble).toFloat
-      val radius = 75f
-      val x = (radius * sin(phi) * cos(theta)).toFloat
-      val y = radius * cos(phi).toFloat
-      val z = (radius * sin(phi) * sin(theta)).toFloat
-      val brightness = 0.35f + rng.nextFloat() * 0.65f
-      (x, y, z, brightness)
-    }
+    starPositions = BlockboxSky.generateStars()
 
   private def renderSky(): Unit =
     generateStars()
-    resetGlArraysAndBuffers()
-    val walk = dayPhase * 2f * Pi.toFloat
-    glDisable(GL_FOG)
-    glDisable(GL_DEPTH_TEST)
-    glDepthMask(false)
-    glDisable(GL_TEXTURE_2D)
-    glDisable(GL_CULL_FACE)
-    glEnable(GL_BLEND)
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
-    val phase = dayPhase
-    val daylight = daylightFactor
-    val starVis = smooth01((0.88f - daylight) / 0.34f)
-
-    // Draw sky in camera space. Do not translate by world X/Z, otherwise large
-    // coordinates drag the sky into the same precision problem as terrain.
-    glMatrixMode(GL_MODELVIEW)
-    glPushMatrix()
-    glLoadIdentity()
-    glRotatef(pitch, 1f, 0f, 0f)
-    glRotatef(yaw, 0f, 1f, 0f)
-
-    // Stars rotate with the sky dome
-    glPushMatrix()
-    glRotatef(walk * -6f, 0f, 0f, 1f)
-    glRotatef(35f, 1f, 0f, 0f)
-    glPointSize(2.5f)
-    glBegin(GL_POINTS)
-    if starVis > 0.01f then
-      starPositions.foreach { (sx, sy, sz, sb) =>
-        val alpha = (sb * starVis).max(0f).min(1f)
-        glColor4f(1f, 1f, 1f, alpha)
-        glVertex3f(sx, sy, sz)
-      }
-    glEnd()
-    glPointSize(1f)
-    glPopMatrix()
-
-    // Sun and moon are intentionally disabled for now. The lighting cycle and stars stay,
-    // but the old discs looked cheap and distracted from the terrain.
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
-    glPopMatrix()
-    glDepthMask(true)
-    glEnable(GL_DEPTH_TEST)
-    glEnable(GL_FOG)
+    BlockboxSky.renderSky(yaw, pitch, dayPhase, daylightFactor, starPositions)
 
   private def updateBubbles(dt: Float): Unit =
     if isUnderwater then
@@ -3674,70 +2817,10 @@ final class Blockbox:
         }
 
   private def mainMenuLayout(): (Float, Float, Float, Array[Float], Float, Float, Float, Float, Float) =
-    val w = framebufferWidth.toFloat
-    val h = framebufferHeight.toFloat
-    val s = uiScale
-    val cx = w / 2f
-    val margin = (18f * s).max(12f)
-    val footerReserve = (30f * s).max(20f)
-
-    // Fit everything vertically first. This keeps the title card + 7 buttons inside the window.
-    val desiredTitleH = 136f * s
-    val minTitleH = 82f
-    val maxTitleH = (h * 0.25f).min(140f * s).max(minTitleH)
-    val titleH = desiredTitleH.min(maxTitleH).max(minTitleH.min(h * 0.20f))
-    val titleW = (620f * s).min(w * 0.68f).max(math.min(340f, w - margin * 2f))
-    val titleX = cx - titleW / 2f
-    val titleY = margin
-
-    val labelH = (18f * s).max(12f)
-    val gap = (9f * s).max(5f).min(12f)
-    val firstY = titleY + titleH + (20f * s).max(12f)
-    val available = (h - firstY - footerReserve - labelH - gap * 8f).max(7f * 26f)
-    val buttonH = (38f * s).min(available / 7f).max(26f)
-    val buttonW = (360f * s).min(w * 0.48f).max(math.min(260f, w - margin * 2f))
-    val bx = cx - buttonW / 2f
-
-    val y0 = firstY
-    val y1 = y0 + buttonH + gap + labelH + gap
-    val ys = Array(y0, y1, y1 + (buttonH + gap), y1 + (buttonH + gap) * 2f, y1 + (buttonH + gap) * 3f, y1 + (buttonH + gap) * 4f, y1 + (buttonH + gap) * 5f)
-    (bx, buttonW, buttonH, ys, titleX, titleY, titleW, titleH, s)
-
-  private def titleGlyph(c: Char): Array[String] = c match
-    case 'B' => Array("11110", "10001", "10001", "11110", "10001", "10001", "11110")
-    case 'L' => Array("10000", "10000", "10000", "10000", "10000", "10000", "11111")
-    case 'O' => Array("01110", "10001", "10001", "10001", "10001", "10001", "01110")
-    case 'C' => Array("01111", "10000", "10000", "10000", "10000", "10000", "01111")
-    case 'K' => Array("10001", "10010", "10100", "11000", "10100", "10010", "10001")
-    case 'X' => Array("10001", "10001", "01010", "00100", "01010", "10001", "10001")
-    case _   => Array("00000", "00000", "00000", "00000", "00000", "00000", "00000")
+    BlockboxRender2D.mainMenuLayout(framebufferWidth, framebufferHeight, uiScale)
 
   private def drawPixelLogo(cx: Float, y: Float, text: String, maxW: Float, maxH: Float): Unit =
-    if text == null || text.isEmpty then return
-    val chars = text.toUpperCase.filter(ch => ch == ' ' || "BLOCKX".indexOf(ch) >= 0)
-    if chars.isEmpty then return
-    var cols = 0
-    for ch <- chars do cols += (if ch == ' ' then 3 else 5)
-    cols += (chars.length - 1).max(0)
-    val cell = (maxW / cols.toFloat).min(maxH / 7f).max(1.5f)
-    val totalW = cols * cell
-    var x = cx - totalW / 2f
-    val shadow = (cell * 0.22f).max(1.2f)
-    def drawPass(offX: Float, offY: Float, r: Float, g: Float, b: Float, a: Float): Unit =
-      var px = x + offX
-      for ch <- chars do
-        if ch == ' ' then px += 4f * cell
-        else
-          val glyph = titleGlyph(ch)
-          for row <- 0 until 7 do
-            val line = glyph(row)
-            for col <- 0 until 5 do
-              if line.charAt(col) == '1' then
-                rect(px + col * cell + cell * 0.04f, y + offY + row * cell + cell * 0.04f, cell * 0.92f, cell * 0.92f, r, g, b, a)
-          px += 6f * cell
-    drawPass(shadow, shadow * 1.4f, 0f, 0f, 0f, 0.70f)
-    drawPass(0f, 0f, 1f, 0.92f, 0.40f, 1f)
-    rect(cx - totalW / 2f, y + 7.45f * cell, totalW, cell * 0.18f, 1f, 0.90f, 0.42f, 0.22f)
+    BlockboxRender2D.drawPixelLogo(cx, y, text, maxW, maxH)
 
   private def renderMainMenu(): Unit =
     glDisable(GL_DEPTH_TEST); glDisable(GL_CULL_FACE); setupOrtho()
@@ -3795,79 +2878,25 @@ final class Blockbox:
     centeredTextFit(cx, h - 18f * s, "v1.0 | Scala 3 + LWJGL | Open Source", 0.38f, 0.50f, 0.66f, 0.52f * s, w - 40f * s)
 
   private def textMetrics(text: String): (java.nio.ByteBuffer, Int, Float, Float, Float, Float) =
-    val safeText = if text == null then "" else text
-    val buf = BufferUtils.createByteBuffer((safeText.length.max(1)) * 320)
-    val quads = STBEasyFont.stb_easy_font_print(0, 0, safeText, null, buf)
-    if quads <= 0 then return (buf, quads, 0f, 0f, 0f, 0f)
-    var minX = Float.MaxValue; var maxX = Float.MinValue
-    var minY = Float.MaxValue; var maxY = Float.MinValue
-    var i = 0
-    while i < quads * 4 do
-      val px = buf.getFloat(i * 16)
-      val py = buf.getFloat(i * 16 + 4)
-      if px < minX then minX = px
-      if px > maxX then maxX = px
-      if py < minY then minY = py
-      if py > maxY then maxY = py
-      i += 1
-    (buf, quads, minX, maxX, minY, maxY)
+    BlockboxRender2D.textMetrics(text)
 
   private def textWidth(text: String, scale: Float): Float =
-    if text == null || text.isEmpty then 0f
-    else
-      val (_, quads, minX, maxX, _, _) = textMetrics(text)
-      if quads <= 0 then text.length * 8f * scale else (maxX - minX).max(1f) * scale
+    BlockboxRender2D.textWidth(text, scale)
 
   private def centeredTextFit(cx: Float, y: Float, text: String, r: Float, g: Float, b: Float, scale: Float, maxWidth: Float): Unit =
-    if text == null || text.isEmpty then return
-    val (buf, quads, minX, maxX, minY, _) = textMetrics(text)
-    if quads <= 0 then return
-    val rawW = (maxX - minX).max(1f)
-    val safeW = maxWidth.max(12f).min(framebufferWidth.toFloat - 12f)
-    val eff = scale.min(safeW / rawW).max(0.30f)
-    val left = cx - rawW * eff / 2f - minX * eff
-    val top = y - minY * eff
-    val so = (1.25f * eff).max(0.75f)
-    renderTextBuf(buf, quads, left + so, top + so, 0f, 0f, 0f, eff)
-    renderTextBuf(buf, quads, left, top, r, g, b, eff)
+    BlockboxRender2D.centeredTextFit(cx, y, text, r, g, b, scale, maxWidth, framebufferWidth, framebufferHeight)
 
   private def centeredText(cx: Float, y: Float, text: String, r: Float, g: Float, b: Float, scale: Float): Unit =
-    val safeW = (math.min(cx, framebufferWidth.toFloat - cx) * 2f - 12f).max(24f)
-    centeredTextFit(cx, y, text, r, g, b, scale, safeW)
+    BlockboxRender2D.centeredText(cx, y, text, r, g, b, scale, framebufferWidth, framebufferHeight)
 
   private def centeredTextBox(x: Float, y: Float, w: Float, h: Float, text: String, r: Float, g: Float, b: Float, scale: Float): Unit =
-    if text == null || text.isEmpty then return
-    val (buf, quads, minX, maxX, minY, maxY) = textMetrics(text)
-    if quads <= 0 then return
-    val rawW = (maxX - minX).max(1f)
-    val rawH = (maxY - minY).max(1f)
-    val eff = scale.min((w - 14f * uiScale).max(8f) / rawW).min((h - 8f * uiScale).max(8f) / rawH).max(0.30f)
-    val tx = x + w / 2f - rawW * eff / 2f - minX * eff
-    val ty = y + h / 2f - rawH * eff / 2f - minY * eff
-    val so = (1.20f * eff).max(0.65f)
-    renderTextBuf(buf, quads, tx + so, ty + so, 0f, 0f, 0f, eff)
-    renderTextBuf(buf, quads, tx, ty, r, g, b, eff)
+    BlockboxRender2D.centeredTextBox(x, y, w, h, text, r, g, b, scale, uiScale, framebufferWidth, framebufferHeight)
 
   private def renderText(x: Float, y: Float, text: String, r: Float, g: Float, b: Float, scale: Float = 1f): Unit =
-    if text == null || text.isEmpty then return
-    val lineH = 12f * scale
-    if x >= framebufferWidth - 4f || x + 2f < 0 || y >= framebufferHeight - 2f || y + lineH < 0 then return
-    val maxChars = ((framebufferWidth - x - 12f).max(4f) / (8f * scale).max(1f)).toInt
-    val display = if maxChars <= 0 then "" else if maxChars >= text.length then text else text.take(maxChars.max(4) - 1) + "…"
-    if display.isEmpty then return
-    val (buf, quads, _, _, _, _) = textMetrics(display)
-    if quads <= 0 then return
-    renderTextBuf(buf, quads, x, y, r, g, b, scale)
+    BlockboxRender2D.renderText(x, y, text, r, g, b, scale, framebufferWidth, framebufferHeight)
 
   private def renderTextBuf(buf: java.nio.ByteBuffer, quads: Int, x: Float, y: Float, r: Float, g: Float, b: Float, scale: Float): Unit =
-    buf.rewind()
-    glDisable(GL_DEPTH_TEST); glDisable(GL_CULL_FACE); glDisable(GL_TEXTURE_2D); setupOrtho()
-    glBindBuffer(GL_ARRAY_BUFFER, 0)
-    glDisableClientState(GL_COLOR_ARRAY); glDisableClientState(GL_TEXTURE_COORD_ARRAY)
-    glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
-    glPushMatrix(); glTranslatef(x, y, 0); glScalef(scale, scale, 1); glColor4f(r, g, b, 1f)
-    glEnableClientState(GL_VERTEX_ARRAY); glVertexPointer(2, GL_FLOAT, 16, buf)
-    glDrawArrays(GL_QUADS, 0, quads * 4); glDisableClientState(GL_VERTEX_ARRAY); glPopMatrix()
+    BlockboxRender2D.renderTextBuf(buf, quads, x, y, r, g, b, scale, framebufferWidth, framebufferHeight)
 
   private def renderCreateWorld(): Unit =
     glDisable(GL_DEPTH_TEST); glDisable(GL_CULL_FACE); setupOrtho()
@@ -4178,7 +3207,7 @@ final class Blockbox:
       centeredTextFit(outX + outSize / 2f, outY + outSize + 8f * s, s"${r.outputCount}x ${blockName(r.output)}", if canCraft then 0.80f else 0.45f, if canCraft then 0.86f else 0.48f, if canCraft then 0.72f else 0.50f, 0.48f * s, craftPanelW * 0.46f)
       if hoverOut then renderTooltip(outX + outSize / 2f, outY - 6f * s, r.label)
     }
-    if result.isEmpty && normalizeCraftGrid(craftGridBlocks).nonEmpty then
+    if result.isEmpty && InventoryModel.normalizeCraftGrid(craftGridBlocks).nonEmpty then
       centeredTextFit(craftX + craftPanelW / 2f, craftY + 178f * s, "no matching recipe", 0.72f, 0.48f, 0.45f, 0.48f * s, craftPanelW - 18f * s)
     else if result.nonEmpty && !canCraft then
       centeredTextFit(craftX + craftPanelW / 2f, craftY + 178f * s, "missing ingredients", 0.72f, 0.48f, 0.45f, 0.48f * s, craftPanelW - 18f * s)
@@ -4251,7 +3280,7 @@ final class Blockbox:
     rect(panelX + 12f * s, infoY - 2f * s, panelW - 24f * s, 18f * s, 0.06f, 0.08f, 0.12f, 0.50f)
     centeredTextFit(cx, infoY, "catalog: click block, then click hotbar slot | e or esc closes", 0.55f, 0.60f, 0.70f, 0.56f * s, panelW - 32f * s)
 
-  private def blockName(block: Block): String =
+  protected def blockName(block: Block): String =
     block.toString.replaceAll("([a-z])([A-Z])", "$1 $2")
 
   private def inventoryItems: Array[Block] =
@@ -4477,96 +3506,6 @@ final class Blockbox:
       case Some(b: Block) => furnaceInput = b
       case None => addChatMessage("No smeltable items in inventory")
 
-  private def smeltResult(input: Block): Option[(Block, Int)] = input match
-    case Block.Sand => Some((Block.Glass, 1))
-    case Block.Clay => Some((Block.Brick, 1))
-    case Block.Stone => Some((Block.Brick, 2))
-    case Block.Wood | Block.BirchWood | Block.PineWood | Block.AcaciaWood => Some((Block.Coal, 1))
-    case Block.IronOre => Some((Block.IronIngot, 1))
-    case Block.GoldOre => Some((Block.GoldIngot, 1))
-    case _ => None
-
-  private def canConsumeFuelFor(input: Block): Boolean =
-    totalItemCount(Block.Coal) > 0 || fuelBlocks.exists(b => b != Block.Coal && totalItemCount(b) > (if b == input then 1 else 0))
-
-  private def consumeFuelFor(input: Block): Boolean =
-    if furnaceFuelRemaining > 0f then true
-    else if totalItemCount(Block.Coal) > 0 then
-      consumeInventory(Block.Coal, 1)
-      furnaceFuel = Block.Coal
-      furnaceFuelRemaining = 8f
-      true
-    else
-      val picked = fuelBlocks.find(b => b != Block.Coal && totalItemCount(b) > (if b == input then 1 else 0))
-      picked match
-        case Some(fuel) =>
-          consumeInventory(fuel, 1)
-          furnaceFuel = fuel
-          furnaceFuelRemaining = if fuel == Block.Planks || fuel == Block.BirchPlanks || fuel == Block.PinePlanks || fuel == Block.AcaciaPlanks then 3f else 4f
-          true
-        case None => false
-
-  private def takeFurnaceOutput(): Unit =
-    if furnaceOutput != Block.Air && furnaceOutputCount > 0 then
-      val room = (999 - totalItemCount(furnaceOutput)).max(0)
-      val moved = math.min(room, furnaceOutputCount)
-      if moved > 0 then
-        gainItem(furnaceOutput, moved)
-        furnaceOutputCount -= moved
-        playPlaceSound()
-      if furnaceOutputCount <= 0 then
-        furnaceOutput = Block.Air
-        furnaceOutputCount = 0
-      else addChatMessage("Inventory stack is full")
-
-  private def smeltOneInternal(showMessages: Boolean): Boolean =
-    if furnaceInput == Block.Air then
-      if showMessages then addChatMessage("Choose an input from the furnace list first")
-      return false
-    if totalItemCount(furnaceInput) <= 0 then
-      if showMessages then addChatMessage(s"No ${blockName(furnaceInput)} left")
-      furnaceInput = Block.Air
-      furnaceProgress = 0f
-      return false
-    val result = smeltResult(furnaceInput)
-    if result.isEmpty then
-      if showMessages then addChatMessage("That item cannot be smelted")
-      return false
-    val (out, amount) = result.get
-    if furnaceOutput != Block.Air && furnaceOutput != out then
-      if showMessages then addChatMessage("Take the current output first")
-      return false
-    if furnaceOutputCount + amount > 999 then
-      if showMessages then addChatMessage("Furnace output is full")
-      return false
-    if !consumeFuelFor(furnaceInput) then
-      if showMessages then addChatMessage("Need fuel: Coal or Wood")
-      return false
-    consumeInventory(furnaceInput, 1)
-    furnaceFuelRemaining -= 1f
-    furnaceProgress = 4f
-    furnaceOutput = out
-    furnaceOutputCount += amount
-    if totalItemCount(furnaceInput) <= 0 then furnaceInput = Block.Air
-    if furnaceFuelRemaining <= 0f then
-      furnaceFuelRemaining = 0f
-      furnaceFuel = Block.Air
-    playPlaceSound()
-    true
-
-  private def smeltFurnace(): Unit =
-    if smeltOneInternal(showMessages = true) then furnaceProgress = 0f
-
-  private def smeltAllFurnace(): Unit =
-    var made = 0
-    var keepGoing = true
-    while keepGoing && made < 256 do
-      keepGoing = smeltOneInternal(showMessages = false)
-      if keepGoing then made += 1
-    furnaceProgress = 0f
-    if made == 0 then smeltOneInternal(showMessages = true)
-    else addChatMessage(s"Smelted $made item${if made == 1 then "" else "s"}")
-
   private def drawSlot(x: Float, y: Float, size: Float, block: Block, count: Int): Unit =
     rect(x - 2, y - 2, size + 4, size + 4, 0.06f, 0.06f, 0.06f, 1f)
     rect(x, y, size, size, 0.30f, 0.30f, 0.30f, 1f)
@@ -4581,94 +3520,33 @@ final class Blockbox:
       renderText(nx, ny, ns, 1f, 1f, 1f, countScale)
 
   private def drawPanel(x: Float, y: Float, w: Float, h: Float): Unit =
-    val s = uiScale
-    rect(x + 5f * s, y + 5f * s, w, h, 0f, 0f, 0f, 0.30f)
-    rect(x - 1f * s, y - 1f * s, w + 2f * s, h + 2f * s, 0.025f, 0.030f, 0.040f, 0.88f)
-    rect(x, y, w, h, 0.095f, 0.115f, 0.165f, 0.96f)
-    rect(x + 2f * s, y + 2f * s, w - 4f * s, 2f * s, 0.20f, 0.23f, 0.30f, 0.20f)
-    rect(x + 2f * s, y + h - 3f * s, w - 4f * s, 1.5f * s, 0f, 0f, 0f, 0.20f)
-    rect(x + 1f * s, y + 1f * s, 1f * s, h - 2f * s, 0.18f, 0.20f, 0.26f, 0.10f)
-    rect(x + w - 2f * s, y + 1f * s, 1f * s, h - 2f * s, 0f, 0f, 0f, 0.16f)
+    BlockboxRender2D.drawPanel(x, y, w, h, uiScale)
 
   private def uiScale: Float =
-    // Slightly larger global UI scale so small labels stay readable without blowing up layouts.
-    val byWidth = framebufferWidth.toFloat / 1280f
-    val byHeight = framebufferHeight.toFloat / 720f
-    math.min(byWidth, byHeight).max(0.98f).min(1.38f)
+    BlockboxRender2D.uiScale(framebufferWidth, framebufferHeight)
 
-  private def dimBackground(): Unit = rect(0, 0, framebufferWidth, framebufferHeight, 0f, 0f, 0f, 0.55f)
+  private def dimBackground(): Unit = BlockboxRender2D.dimBackground(framebufferWidth, framebufferHeight)
 
   private def slider(x: Float, y: Float, w: Float, value: Float): Unit =
-    val s = uiScale
-    val trackH = 18f * s; val knobW = 14f * s; val knobH = 26f * s
-    rect(x, y, w, trackH, 0.02f, 0.02f, 0.02f, 0.80f)
-    rect(x + 2 * s, y + 2 * s, w - 4 * s, trackH - 4 * s, 0.20f, 0.22f, 0.26f, 0.85f)
-    val fillW = (w - 4 * s - knobW) * value.max(0f).min(1f)
-    rect(x + 2 * s, y + 2 * s, fillW.max(0f), trackH - 4 * s, 0.50f, 0.55f, 0.65f, 0.70f)
-    val knob = x + 2 * s + fillW
-    rect(knob, y - 4 * s, knobW, knobH, 0.85f, 0.88f, 0.95f, 1f)
-    rect(knob + 2 * s, y - 2 * s, knobW - 4 * s, knobH - 8 * s, 1f, 1f, 1f, 0.30f)
+    BlockboxRender2D.slider(x, y, w, value, uiScale)
 
   private def resetGlArraysAndBuffers(): Unit =
-    glBindBuffer(GL_ARRAY_BUFFER, 0)
-    glDisableClientState(GL_VERTEX_ARRAY)
-    glDisableClientState(GL_COLOR_ARRAY)
-    glDisableClientState(GL_TEXTURE_COORD_ARRAY)
+    BlockboxRender2D.resetGlArraysAndBuffers()
 
   private def rect(x: Float, y: Float, w: Float, h: Float, r: Float, g: Float, b: Float, a: Float): Unit =
-    if w <= 0f || h <= 0f || a <= 0f then return
-    glBindBuffer(GL_ARRAY_BUFFER, 0)
-    glDisable(GL_TEXTURE_2D)
-    glEnable(GL_BLEND)
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
-    glColor4f(r, g, b, a)
-    glBegin(GL_QUADS); glVertex2f(x, y); glVertex2f(x + w, y); glVertex2f(x + w, y + h); glVertex2f(x, y + h); glEnd()
+    BlockboxRender2D.rect(x, y, w, h, r, g, b, a)
 
   private def drawButton(x: Float, y: Float, w: Float, h: Float, label: String, accent: Boolean = false): Unit =
     val s = uiScale
     val (mx, my) = mouseFramebufferPos()
     val hover = inRect(mx, my, x, y, w, h)
-    val base = if accent then 0.36f else 0.275f
-    val bright = if hover then base + 0.13f else base
-    val textR = if accent then 1f else if hover then 1f else 0.92f
-    val textG = if accent then 0.86f else if hover then 1f else 0.92f
-    val textB = if accent then 0.36f else if hover then 1f else 0.94f
-    rect(x + 3f * s, y + 3f * s, w, h, 0f, 0f, 0f, 0.24f)
-    rect(x - 1f * s, y - 1f * s, w + 2f * s, h + 2f * s, 0.02f, 0.025f, 0.035f, 0.88f)
-    rect(x, y, w, h, bright, bright * 1.02f, bright * 1.06f, 1f)
-    rect(x, y, w, h * 0.46f, (bright + 0.11f).min(0.75f), (bright + 0.11f).min(0.75f), (bright + 0.14f).min(0.78f), 0.44f)
-    rect(x + 2f * s, y + 1f * s, w - 4f * s, 2f * s, 1f, 1f, 1f, 0.10f)
-    rect(x + 2f * s, y + h - 2f * s, w - 4f * s, 1f * s, 0f, 0f, 0f, 0.22f)
-    if hover then
-      rect(x - 1f * s, y - 1f * s, w + 2f * s, h + 2f * s, if accent then 0.95f else 0.58f, if accent then 0.78f else 0.60f, if accent then 0.28f else 0.70f, 0.16f)
-      rect(x, y, w, h, 1f, 1f, 1f, 0.045f)
-    centeredTextBox(x + 8f * s, y + 3f * s, w - 16f * s, h - 6f * s, label, textR, textG, textB, (1.05f * s).max(0.82f).min(h / 12.5f))
+    BlockboxRender2D.drawButton(x, y, w, h, label, accent, hover, s, framebufferWidth, framebufferHeight)
 
   private def renderTextShadow(x: Float, y: Float, text: String, r: Float, g: Float, b: Float, scale: Float = 1f): Unit =
-    val o = (1.60f * scale).max(1.05f)
-    renderText(x + o, y + o, text, 0f, 0f, 0f, scale)
-    renderText(x - o, y, text, 0f, 0f, 0f, scale)
-    renderText(x + o, y, text, 0f, 0f, 0f, scale)
-    renderText(x, y - o, text, 0f, 0f, 0f, scale)
-    renderText(x, y + o, text, 0f, 0f, 0f, scale)
-    renderText(x - o, y - o, text, 0f, 0f, 0f, scale)
-    renderText(x + o, y - o, text, 0f, 0f, 0f, scale)
-    renderText(x - o, y + o, text, 0f, 0f, 0f, scale)
-    renderText(x, y, text, r, g, b, scale)
+    BlockboxRender2D.renderTextShadow(x, y, text, r, g, b, scale, framebufferWidth, framebufferHeight)
 
   private def setupOrtho(): Unit =
-    resetGlArraysAndBuffers()
-    glPolygonMode(GL_FRONT_AND_BACK, GL_FILL)
-    glDepthMask(true)
-    glDisable(GL_FOG)
-    glDisable(GL_CULL_FACE)
-    glDisable(GL_DEPTH_TEST)
-    glDisable(GL_TEXTURE_2D)
-    glEnable(GL_BLEND)
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
-    glMatrixMode(GL_PROJECTION); glLoadIdentity()
-    glOrtho(0, framebufferWidth, framebufferHeight, 0, -1, 1)
-    glMatrixMode(GL_MODELVIEW); glLoadIdentity()
+    BlockboxRender2D.setupOrtho(framebufferWidth, framebufferHeight)
 
   private def onOff(value: Boolean): String = if value then "ON" else "OFF"
 
@@ -4915,40 +3793,10 @@ final class Blockbox:
       dx += 1
 
   private def viewDirection: Vec3 =
-    val yawRad = toRadians(yaw); val pitchRad = toRadians(pitch)
-    val cp = cos(pitchRad).toFloat; val sp = sin(pitchRad).toFloat
-    val sy = sin(yawRad).toFloat; val cy = cos(yawRad).toFloat
-    Vec3(sy * cp, -sp, -cy * cp).normalized
+    BlockboxRaycast.viewDirection(yaw, pitch)
 
   private def raycast(maxDistance: Float = 8f): Option[RayHit] =
-    val dir = viewDirection
-    if dir.lengthSquared < 0.0001f then return None
-    var x = floor(camera.x).toInt
-    var y = floor(camera.y).toInt
-    var z = floor(camera.z).toInt
-    val stepX = if dir.x > 0f then 1 else if dir.x < 0f then -1 else 0
-    val stepY = if dir.y > 0f then 1 else if dir.y < 0f then -1 else 0
-    val stepZ = if dir.z > 0f then 1 else if dir.z < 0f then -1 else 0
-    val inf = Float.PositiveInfinity
-    val tDeltaX = if stepX == 0 then inf else abs(1f / dir.x)
-    val tDeltaY = if stepY == 0 then inf else abs(1f / dir.y)
-    val tDeltaZ = if stepZ == 0 then inf else abs(1f / dir.z)
-    var tMaxX = if stepX > 0 then (x + 1f - camera.x) / dir.x else if stepX < 0 then (x.toFloat - camera.x) / dir.x else inf
-    var tMaxY = if stepY > 0 then (y + 1f - camera.y) / dir.y else if stepY < 0 then (y.toFloat - camera.y) / dir.y else inf
-    var tMaxZ = if stepZ > 0 then (z + 1f - camera.z) / dir.z else if stepZ < 0 then (z.toFloat - camera.z) / dir.z else inf
-    if tMaxX < 0f then tMaxX = 0f; if tMaxY < 0f then tMaxY = 0f; if tMaxZ < 0f then tMaxZ = 0f
-    var normal = (0, 0, 0); var distance = 0f; var i = 0
-    while distance <= maxDistance && i < 200 do
-      i += 1
-      if activeBlockAt(x, y, z).solid then
-        return Some(RayHit((x, y, z), (x + normal._1, y + normal._2, z + normal._3), normal, distance))
-      if tMaxX <= tMaxY && tMaxX <= tMaxZ then
-        x += stepX; distance = tMaxX; tMaxX += tDeltaX; normal = (-stepX, 0, 0)
-      else if tMaxY <= tMaxZ then
-        y += stepY; distance = tMaxY; tMaxY += tDeltaY; normal = (0, -stepY, 0)
-      else
-        z += stepZ; distance = tMaxZ; tMaxZ += tDeltaZ; normal = (0, 0, -stepZ)
-    None
+    BlockboxRaycast.raycast(camera, viewDirection, maxDistance, activeBlockAt)
 
   private def sendBlockNetwork(x: Int, y: Int, z: Int, blockId: Byte): Unit =
     if multiplayerMode then

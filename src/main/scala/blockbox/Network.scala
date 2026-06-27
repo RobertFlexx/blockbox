@@ -209,14 +209,14 @@ final class GameServer(
               val snapshot =
                 try worldSnapshot().take(250000)
                 catch case _: Exception => Seq.empty[(Int, Int, Int, Byte)]
-              send("SNAPBEGIN|" + snapshot.length.toString)
+              send(BlockboxNet.snapBegin(snapshot.length))
               var checksum = 0L
               snapshot.foreach { case (sx, sy, sz, sid) =>
                 checksum = BlockboxNet.blockChecksum(checksum, sx, sy, sz, sid.toInt, 0)
                 send(blockMessage(sx, sy, sz, sid))
               }
-              send("SNAPEND|" + snapshot.length.toString + "|" + BlockboxNet.checksumText(checksum))
-              send("ENTER|" + sessionId)
+              send(BlockboxNet.snapEnd(snapshot.length, checksum))
+              send(BlockboxNet.enter(sessionId))
           else if registered && packet.is(BlockboxNet.BLOC) then
             try
               val bp = BlockboxNet.parseBlock(packet, Terrain.worldHeight)
@@ -303,12 +303,13 @@ final class GameClient(host: String, port: Int):
         lastError = "Server closed the connection before sending world data."
         disconnect()
         return false
-      if firstLine.startsWith("ERR|") then
-        val parts = BlockboxNet.split(firstLine)
-        lastError = if parts.length >= 3 then parts.drop(2).mkString(" ") else firstLine
+      val firstPacket = BlockboxNet.packet(firstLine)
+      if firstPacket.is(BlockboxNet.ERR) then
+        val parts = firstPacket.parts()
+        lastError = if parts.length >= 3 then parts.drop(2).map(BlockboxNet.unescape).mkString(" ") else firstLine
         disconnect()
         return false
-      if !firstLine.startsWith("WORLD|") then
+      if !firstPacket.is(BlockboxNet.WORLD) then
         lastError = "Connected, but the server did not speak Blockbox protocol."
         disconnect()
         return false
@@ -392,3 +393,56 @@ final class GameClient(host: String, port: Int):
   def pollMessage(): Option[String] = Option(msgQueue.poll())
 
   def isConnected: Boolean = connected
+
+object BlockboxNetworkText:
+  def escape(value: String): String = BlockboxNet.escape(value)
+  def unescape(value: String): String = BlockboxNet.unescape(value)
+  def floatText(value: Float): String = BlockboxNet.floatText(value)
+  def parseFloat(value: String): Float = BlockboxNet.parseFloat(value)
+  def safeName(value: String): String = BlockboxNet.safeName(value)
+
+  def cleanPlayerName(value: String, fallbackNumber: => Int): String =
+    val cleaned = Option(value).getOrElse("").trim.filter(ch => ch.isLetterOrDigit || ch == '_' || ch == '-').take(16)
+    if cleaned.nonEmpty then cleaned else s"Player$fallbackNumber"
+
+  def normalizeColorId(id: Int, colorCount: Int): Int =
+    Math.floorMod(id, colorCount.max(1))
+
+  def fallbackColorForName(name: String, colorCount: Int): Int =
+    normalizeColorId(Math.floorMod(safeName(name).hashCode, colorCount.max(1)), colorCount)
+
+  def parsePlayerToken(token: String, colorCount: Int): Option[(String, Int)] =
+    val raw = Option(token).getOrElse("").trim
+    if raw.isEmpty then None
+    else
+      val idx = raw.lastIndexOf(':')
+      if idx > 0 && idx < raw.length - 1 then
+        val name = safeName(raw.substring(0, idx))
+        val color = try normalizeColorId(raw.substring(idx + 1).toInt, colorCount) catch case _: Exception => fallbackColorForName(name, colorCount)
+        Some((name, color))
+      else
+        val name = safeName(raw)
+        Some((name, fallbackColorForName(name, colorCount)))
+
+  def parseServerAddress(rawInput: String, defaultPort: Int): Either[String, (String, Int)] =
+    val raw = Option(rawInput).getOrElse("").trim
+    val value = if raw.isEmpty then "127.0.0.1" else raw
+    if value.startsWith("[") && value.contains("]:") then
+      val close = value.indexOf(']')
+      val host = value.substring(1, close)
+      val portText = value.substring(close + 2)
+      parsePort(portText).map(port => (host, port))
+    else
+      val colon = value.lastIndexOf(':')
+      val singleColon = colon > 0 && value.indexOf(':') == colon
+      if singleColon && colon < value.length - 1 && value.substring(colon + 1).forall(_.isDigit) then
+        val host = value.substring(0, colon).trim
+        val portText = value.substring(colon + 1)
+        if host.isEmpty then Left("Missing host before port.") else parsePort(portText).map(port => (host, port))
+      else Right((value, defaultPort))
+
+  def parsePort(text: String): Either[String, Int] =
+    try
+      val port = text.toInt
+      if port >= 1 && port <= 65535 then Right(port) else Left("Port must be 1-65535.")
+    catch case _: NumberFormatException => Left("Invalid port number.")

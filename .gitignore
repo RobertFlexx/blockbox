@@ -11,6 +11,12 @@ out/
 .gradle/
 build/
 .blockbox-java-classes/
+config/
+worlds/
+mods/*.jar
+mods/*.groovy
+nvidia-drm_gbm.so.test
+scripts/*.old
 launcher/.gradle/
 launcher/build/
 launcher/instances/

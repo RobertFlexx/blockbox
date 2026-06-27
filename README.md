@@ -74,12 +74,22 @@ blockbox is me learning, building, fixing, breaking things, and making it better
 
 you need:
 
-* java 21 or newer
+* java 21 or newer, with `javac`
 * scala-cli
 * opengl support
 * a desktop that can run lwjgl
 
 linux is the main setup right now, but windows launch scripts are included in newer builds.
+
+on linux and bsd you also usually need:
+
+* x11 or wayland runtime libraries
+* xwayland if you want to use the x11 backend from a wayland session
+* working gpu drivers with opengl 2.1+ support
+* `libdecor` for the normal glfw wayland decoration path, if your desktop needs it
+* nvidia users need the proprietary driver, glvnd, and the nvidia egl gbm external platform files for good wayland performance
+
+the scripts try to avoid homebrew java on linux because mixing homebrew java/x11 libraries with system gpu drivers can break opengl.
 
 ## running on linux
 
@@ -91,10 +101,22 @@ bash scripts/run.sh
 
 the first run will download scala and lwjgl dependencies through scala-cli.
 
-if you are on wayland and the window does not show up, try forcing x11:
+if you are on wayland and the window does not show up, try x11 nvidia/glx or plain x11:
 
 ```bash
-glfw_platform=x11 bash scripts/run.sh
+BLOCKBOX_DISPLAY_BACKEND=x11-nvidia ./scripts/run.sh
+```
+
+or:
+
+```bash
+BLOCKBOX_DISPLAY_BACKEND=x11 ./scripts/run.sh
+```
+
+if your gpu driver is broken and you just need it to open, use software rendering:
+
+```bash
+BLOCKBOX_DISPLAY_BACKEND=software ./scripts/run.sh
 ```
 
 ## running on windows
@@ -195,6 +217,11 @@ blockbox is still a prototype, so there are bugs.
 
 things that still need work:
 
+* wayland can still be weird on some nvidia setups
+* libdecor can fail on some desktops and make a wayland window invisible
+* x11 through xwayland may fail or be slower depending on the gpu driver
+* software rendering uses llvmpipe and will be slow
+* scala currently warns about old non-local `return` usage
 * better multiplayer chunk sync
 * better player identity handling on servers
 * better inventory dragging
