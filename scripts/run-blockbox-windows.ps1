@@ -68,6 +68,7 @@ $($roots -join "`n")
 $Resolved = Resolve-BlockboxRootAndSource
 $ProjectRoot = $Resolved.Root
 $SourceFile = $Resolved.Source
+$env:BLOCKBOX_PROJECT_ROOT = $ProjectRoot
 if ([string]::IsNullOrWhiteSpace($env:BLOCKBOX_INSTANCE)) {
   Set-Location $ProjectRoot
 } else {

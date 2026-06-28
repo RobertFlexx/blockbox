@@ -1,5 +1,6 @@
 package blockbox
 
+import java.util.concurrent.ConcurrentHashMap
 import scala.collection.mutable.ArrayBuffer
 import scala.math.*
 
@@ -10,6 +11,12 @@ object Terrain:
 
 final class TerrainGenerator(val seed: Long):
   private val seedHash = (seed ^ (seed >>> 32)).toInt
+  private val maxTerrainCacheEntries = 262144
+  private val heightCache = new ConcurrentHashMap[Long, java.lang.Integer]()
+  private val grassTintCache = new ConcurrentHashMap[Long, Array[(Float, Float, Float)]]()
+
+  private def columnKey(x: Int, z: Int): Long =
+    (x.toLong << 32) ^ (z.toLong & 0xffffffffL)
 
   private def hash(x: Int, y: Int, z: Int, base: Int): Float =
     var n = x * 374761393 + y * 668265263 + z * 1442695041 + base * 1274126177 + seedHash * 60493
@@ -165,6 +172,22 @@ final class TerrainGenerator(val seed: Long):
     if coldAt(x, z, h) || desertAt(x, z, h) || h <= Terrain.seaLevel + 2 then 0f else (wet * grove * coolEnough).max(0f).min(1f)
 
   def grassTintAt(x: Int, z: Int, h: Int): (Float, Float, Float) =
+    if h < 0 || h >= Terrain.worldHeight then computeGrassTintAt(x, z, h)
+    else
+      val key = columnKey(x, z)
+      var column = grassTintCache.get(key)
+      if column == null then
+        val created = new Array[(Float, Float, Float)](Terrain.worldHeight)
+        val existing = if grassTintCache.size() < maxTerrainCacheEntries then grassTintCache.putIfAbsent(key, created) else null
+        column = if existing != null then existing else created
+      val cached = column(h)
+      if cached != null then cached
+      else
+        val computed = computeGrassTintAt(x, z, h)
+        column(h) = computed
+        computed
+
+  private def computeGrassTintAt(x: Int, z: Int, h: Int): (Float, Float, Float) =
     val savanna = savannaBlendAt(x, z, h).max(0f).min(1f)
     val birch = (birchBlendAt(x, z, h) * (1f - savanna * 0.82f)).max(0f).min(1f)
     val plains = (1f - savanna * 0.86f - birch * 0.82f).max(0.18f)
@@ -275,6 +298,15 @@ final class TerrainGenerator(val seed: Long):
     cavern || bigRoom || giantPocket || tunnel
 
   def heightAt(x: Int, z: Int): Int =
+    val key = columnKey(x, z)
+    val cached = heightCache.get(key)
+    if cached != null then cached.intValue()
+    else
+      val computed = computeHeightAt(x, z)
+      if heightCache.size() < maxTerrainCacheEntries then heightCache.putIfAbsent(key, computed)
+      computed
+
+  private def computeHeightAt(x: Int, z: Int): Int =
     val fx = x.toDouble; val fz = z.toDouble
 
     // Minecraft-like terrain needs multiple scales working together: broad continents,
@@ -727,4 +759,3 @@ final class TerrainGenerator(val seed: Long):
 
   private def idx(lx: Int, y: Int, lz: Int): Int =
     (y * Terrain.chunkSize + lz) * Terrain.chunkSize + lx
-

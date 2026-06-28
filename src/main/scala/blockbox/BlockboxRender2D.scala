@@ -199,13 +199,13 @@ object BlockboxRender2D:
     val labelH = (18f * scale).max(12f)
     val gap = (9f * scale).max(5f).min(12f)
     val firstY = titleY + titleH + (20f * scale).max(12f)
-    val available = (h - firstY - footerReserve - labelH - gap * 8f).max(7f * 26f)
-    val buttonH = (38f * scale).min(available / 7f).max(26f)
+    val available = (h - firstY - footerReserve - labelH - gap * 9f).max(8f * 24f)
+    val buttonH = (38f * scale).min(available / 8f).max(24f)
     val buttonW = (360f * scale).min(w * 0.48f).max(math.min(260f, w - margin * 2f))
     val bx = cx - buttonW / 2f
     val y0 = firstY
     val y1 = y0 + buttonH + gap + labelH + gap
-    val ys = Array(y0, y1, y1 + (buttonH + gap), y1 + (buttonH + gap) * 2f, y1 + (buttonH + gap) * 3f, y1 + (buttonH + gap) * 4f, y1 + (buttonH + gap) * 5f)
+    val ys = Array(y0, y1, y1 + (buttonH + gap), y1 + (buttonH + gap) * 2f, y1 + (buttonH + gap) * 3f, y1 + (buttonH + gap) * 4f, y1 + (buttonH + gap) * 5f, y1 + (buttonH + gap) * 6f)
     (bx, buttonW, buttonH, ys, titleX, titleY, titleW, titleH, scale)
 
   private def titleGlyph(c: Char): Array[String] = c match

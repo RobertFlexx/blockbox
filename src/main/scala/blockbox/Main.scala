@@ -148,6 +148,10 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
   protected var terrainGen = TerrainGenerator(0L)
   private var chunks = scala.collection.mutable.AnyRefMap.empty[(Int, Int), Chunk]
   private var textureAtlas: TextureAtlas | Null = null
+  private var selectedTexturePackId = loadSelectedTexturePackId()
+  private var resourcePacks: List[TexturePack] = Nil
+  private var resourcesReturnTo: Screen = Screen.MainMenu
+  private var resourcesScroll = 0
   protected var playerHealth = 20f
   protected var playerFood = 20f
   protected val maxPlayerHealth = 20f
@@ -207,12 +211,17 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
   private val bubbleParticles = ArrayBuffer.empty[(Float, Float, Float, Float)]
   private var sliderActive: String | Null = null
   private val dirtyChunks = scala.collection.mutable.Set.empty[(Int, Int)]
+  private val dirtyChunksForSave = scala.collection.mutable.Set.empty[(Int, Int)]
   private val terrainHeightCache = scala.collection.mutable.HashMap.empty[Long, Int]
   private var starPositions: Array[(Float, Float, Float, Float)] = null
   // Threaded chunk generation
   private val chunkBuildQueue = new java.util.concurrent.ConcurrentLinkedQueue[Chunk]()
   private val chunkUploadQueue = new java.util.concurrent.ConcurrentLinkedQueue[Chunk]()
+  private val chunkCreateQueue = new java.util.concurrent.ConcurrentLinkedQueue[(Int, Int, Int)]()
+  private val chunkReadyQueue = new java.util.concurrent.ConcurrentLinkedQueue[(Int, Chunk)]()
+  private val pendingChunkCreates = java.util.concurrent.ConcurrentHashMap.newKeySet[(Int, Int)]()
   @volatile private var chunkGenRunning = false
+  @volatile private var chunkStreamGeneration = 0
   private var chunkGenPool: java.util.concurrent.ExecutorService = null
 
   // High-quality seed source. Using currentTimeMillis() alone made quick restarts and
@@ -248,6 +257,82 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
 
   private def uniqueWorldFolderName(raw: String): String =
     BlockboxWorld.uniqueWorldFolderName(raw)
+
+  private def gameRootDir: java.io.File =
+    sys.env.get("BLOCKBOX_PROJECT_ROOT").map(java.io.File(_)).filter(_.isDirectory).getOrElse(java.io.File("."))
+
+  private def settingsFile: java.io.File = java.io.File("blockbox-settings.properties")
+
+  private def loadSelectedTexturePackId(): String =
+    val file = settingsFile
+    if !file.isFile then "default"
+    else
+      try
+        val props = java.util.Properties()
+        val in = java.io.FileInputStream(file)
+        try props.load(in) finally in.close()
+        Option(props.getProperty("texturePack")).map(_.trim).filter(_.nonEmpty).getOrElse("default")
+      catch case _: Exception => "default"
+
+  private def saveSelectedTexturePackId(): Unit =
+    try
+      val props = java.util.Properties()
+      props.setProperty("texturePack", selectedTexturePackId)
+      BlockboxFiles.ensureDirectory(settingsFile.getAbsoluteFile.getParentFile.toPath)
+      val out = java.io.ByteArrayOutputStream()
+      props.store(out, "Blockbox settings")
+      BlockboxFiles.writeAtomic(settingsFile.toPath, stream => stream.write(out.toByteArray))
+    catch case e: Exception => System.err.println(s"Texture pack setting save failed: $e")
+
+  private def defaultTexturePackDir: java.io.File = java.io.File(gameRootDir, "assets/textures")
+
+  private def customTexturePackRoots: List[java.io.File] =
+    List(java.io.File(gameRootDir, "resourcepacks"), java.io.File("resourcepacks")).distinctBy(_.getAbsolutePath)
+
+  private def discoverResourcePacks(): List[TexturePack] =
+    val builtIns = List(
+      TexturePack("default", "Default Textures", "Kokonico", Some(defaultTexturePackDir)),
+      TexturePack("legacy", "Legacy Textures", "RobertFlexx", None, legacy = true)
+    )
+    val custom = customTexturePackRoots.flatMap { root =>
+      val dirs = Option(root.listFiles()).getOrElse(Array.empty[java.io.File]).filter(_.isDirectory).toList
+      dirs.map { dir =>
+        val safeId = "custom:" + dir.getName.trim.toLowerCase.replaceAll("[^a-z0-9._-]+", "-")
+        val propsFile = java.io.File(dir, "pack.properties")
+        val props = java.util.Properties()
+        if propsFile.isFile then
+          try
+            val in = java.io.FileInputStream(propsFile)
+            try props.load(in) finally in.close()
+          catch case _: Exception => ()
+        val name = Option(props.getProperty("name")).map(_.trim).filter(_.nonEmpty).getOrElse(dir.getName)
+        val author = Option(props.getProperty("author")).map(_.trim).filter(_.nonEmpty).getOrElse("Custom")
+        TexturePack(safeId, name, author, Some(dir))
+      }
+    }.distinctBy(_.id).sortBy(_.name.toLowerCase)
+    builtIns ++ custom
+
+  private def refreshResourcePacks(): Unit =
+    resourcePacks = discoverResourcePacks()
+    if !resourcePacks.exists(_.id == selectedTexturePackId) then selectedTexturePackId = "default"
+    resourcesScroll = resourcesScroll.max(0).min((resourcePacks.length - 1).max(0))
+
+  private def selectedTexturePack: TexturePack =
+    if resourcePacks.isEmpty then refreshResourcePacks()
+    resourcePacks.find(_.id == selectedTexturePackId).getOrElse(resourcePacks.head)
+
+  private def applyTexturePack(pack: TexturePack): Unit =
+    if pack.id == selectedTexturePackId && textureAtlas != null then return
+    selectedTexturePackId = pack.id
+    saveSelectedTexturePackId()
+    val old = textureAtlas
+    textureAtlas = TextureAtlas(pack)
+    if old != null then old.destroy()
+    chunks.values.foreach { chunk =>
+      chunk.markDirtyMesh()
+      chunk.meshReady = false
+      queueChunkMesh(chunk)
+    }
 
   def run(): Unit =
     try
@@ -336,7 +421,8 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
       throw IllegalStateException(s"OpenGL context setup failed. $info Try: (1) Software fallback in the launcher display-backend menu, (2) disabling gamemoderun/GameMode, (3) leaving GLFW_PLATFORM unset for auto-detect on Wayland, or (4) updating your GPU driver.")
     glEnable(0x809D)
     System.err.println(s"Blockbox: OpenGL context created — vendor=${glGetString(GL_VENDOR)} renderer=${glGetString(GL_RENDERER)} version=${glGetString(GL_VERSION)}")
-    textureAtlas = TextureAtlas()
+    refreshResourcePacks()
+    textureAtlas = TextureAtlas(selectedTexturePack)
     windowedW = width; windowedH = height
     queryWindowPos()
     updateFramebufferSize()
@@ -422,6 +508,8 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
         catalogScroll = (catalogScroll + delta).max(0)
       case Screen.Mods =>
         modsScreenScroll = (modsScreenScroll + delta).max(0)
+      case Screen.Resources =>
+        resourcesScroll = (resourcesScroll + delta).max(0).min((resourcePacks.length - 1).max(0))
       case _ => ()
 
   private def onKey(key: Int): Unit =
@@ -431,12 +519,17 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
         if key == GLFW_KEY_ENTER then screen = Screen.CreateWorld
         else if key == GLFW_KEY_S then screen = Screen.Settings
         else if key == GLFW_KEY_M then screen = Screen.Mods
+        else if key == GLFW_KEY_R then openResources(Screen.MainMenu)
         else if key == GLFW_KEY_L then openLoadWorldMenu()
         else if key == GLFW_KEY_ESCAPE then glfwSetWindowShouldClose(window, true)
       case Screen.Mods =>
         if key == GLFW_KEY_ESCAPE || key == GLFW_KEY_ENTER then screen = Screen.MainMenu
         else if key == GLFW_KEY_UP then modsScreenScroll = (modsScreenScroll - 1).max(0)
         else if key == GLFW_KEY_DOWN then modsScreenScroll += 1
+      case Screen.Resources =>
+        if key == GLFW_KEY_ESCAPE || key == GLFW_KEY_ENTER then screen = resourcesReturnTo
+        else if key == GLFW_KEY_UP then resourcesScroll = (resourcesScroll - 1).max(0)
+        else if key == GLFW_KEY_DOWN then resourcesScroll = (resourcesScroll + 1).min((resourcePacks.length - 1).max(0))
       case Screen.CreateWorld =>
         if key == GLFW_KEY_ENTER then startNewWorld()
         else if key == GLFW_KEY_R then
@@ -477,6 +570,7 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
         else if key == GLFW_KEY_RIGHT || key == GLFW_KEY_EQUAL then changeRenderDistance(1)
         else if key == GLFW_KEY_M && canUseCheatAuthority && worldCheatsEnabled then toggleGameMode()
         else if key == GLFW_KEY_P then pauseEscReturnsToGame = !pauseEscReturnsToGame
+        else if key == GLFW_KEY_R then openResources(Screen.Settings)
       case Screen.Playing =>
         if chatOpen then
           if key == GLFW_KEY_ENTER then
@@ -561,6 +655,7 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
         case Screen.CreateWorld => handleCreateWorldClick(mx, my)
         case Screen.LoadWorld => handleLoadWorldClick(mx, my)
         case Screen.Mods => handleModsClick(mx, my)
+        case Screen.Resources => handleResourcesClick(mx, my)
         case Screen.Settings => handleSettingsClick(mx, my)
         case Screen.Paused => handlePauseClick(mx, my)
         case Screen.Inventory => handleInventoryClick(mx, my)
@@ -614,10 +709,11 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
       screen = Screen.JoinGame
     else if inRect(mx, my, bx, ys(3), bw, bh) then openLoadWorldMenu()
     else if inRect(mx, my, bx, ys(4), bw, bh) then screen = Screen.Mods
-    else if inRect(mx, my, bx, ys(5), bw, bh) then
+    else if inRect(mx, my, bx, ys(5), bw, bh) then openResources(Screen.MainMenu)
+    else if inRect(mx, my, bx, ys(6), bw, bh) then
       screen = Screen.Settings
       settingsReturnTo = Screen.MainMenu
-    else if inRect(mx, my, bx, ys(6), bw, bh) then glfwSetWindowShouldClose(window, true)
+    else if inRect(mx, my, bx, ys(7), bw, bh) then glfwSetWindowShouldClose(window, true)
 
   private def handleCreateWorldClick(mx: Float, my: Float): Unit =
     val w = framebufferWidth.toFloat
@@ -779,7 +875,7 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
 
   private def handleSettingsClick(mx: Float, my: Float): Unit =
     val h = framebufferHeight.toFloat; val s = uiScale
-    val pH = 590f * s; val pY = (h / 2f - pH / 2f).max(12f * s)
+    val pH = (630f * s).min(h * 0.94f); val pY = (h / 2f - pH / 2f).max(12f * s)
     val cx = framebufferWidth / 2f; val settingX = cx - 220f * s
     if inRect(mx, my, settingX, pY + 118 * uiScale, 440 * uiScale, 30 * uiScale) then
       updateSlider(mx); sliderActive = "rd"
@@ -807,15 +903,18 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
               if inRect(mx, my, settingX, optY, 440 * s, 28 * s) then toggleFullscreen()
               else
                 optY += 40 * s
-                if inRect(mx, my, settingX, optY, 440 * s, 28 * s) then pauseEscReturnsToGame = !pauseEscReturnsToGame
+                if inRect(mx, my, settingX, optY, 440 * s, 28 * s) then openResources(Screen.Settings)
                 else
-                  val buttonW = 300f * s; val buttonX = cx - buttonW / 2f
-                  if inRect(mx, my, buttonX, pY + 535 * s, buttonW, 44f * s) then
-                    sliderActive = null
-                    screen = settingsReturnTo
-                    if settingsReturnTo == Screen.Playing then
-                      glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED)
-                      firstMouse = true
+                  optY += 40 * s
+                  if inRect(mx, my, settingX, optY, 440 * s, 28 * s) then pauseEscReturnsToGame = !pauseEscReturnsToGame
+                  else
+                    val buttonW = 300f * s; val buttonX = cx - buttonW / 2f
+                    if inRect(mx, my, buttonX, pY + pH - 55 * s, buttonW, 44f * s) then
+                      sliderActive = null
+                      screen = settingsReturnTo
+                      if settingsReturnTo == Screen.Playing then
+                        glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED)
+                        firstMouse = true
 
   private def handlePauseClick(mx: Float, my: Float): Unit =
     val cx = framebufferWidth / 2f; val h = framebufferHeight.toFloat; val s = uiScale
@@ -1251,11 +1350,13 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
     startGame()
 
   private def leaveGame(next: Screen): Unit =
-    saveWorld()
     // Pausing must NOT close the multiplayer server. The host needs to be able to tab away,
     // open the pause menu, or focus another local test client while the socket keeps listening.
     // Only tear networking down when actually returning to title/main menu.
-    if next == Screen.MainMenu then stopNetworking()
+    if next == Screen.MainMenu then
+      saveWorld()
+      stopNetworking()
+      clearLoadedChunks(saveFirst = false)
     screen = next
     glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL)
 
@@ -1352,14 +1453,21 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
     try
       val chunksDir = currentChunksDir
       chunksDir.mkdirs()
-      chunks.values.foreach(_.save(chunksDir))
+      chunks.foreach { case ((cx, cz), chunk) =>
+        chunk.save(chunksDir)
+        dirtyChunksForSave -= ((cx, cz))
+      }
     catch case e: Exception => System.err.println(s"Chunk save failed: $e")
 
   private def clearLoadedChunks(saveFirst: Boolean): Unit =
     if saveFirst then saveLoadedChunks()
+    chunkStreamGeneration += 1
     chunkBuildQueue.clear(); chunkUploadQueue.clear()
+    chunkCreateQueue.clear(); chunkReadyQueue.clear(); pendingChunkCreates.clear()
     waterFlowQueue.clear()
     waterFlowQueued.clear()
+    dirtyChunks.clear()
+    dirtyChunksForSave.clear()
     chunks.values.foreach(_.dispose())
     chunks.clear()
 
@@ -1371,6 +1479,7 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
       val chunksDir = new java.io.File(dir, "chunks")
       BlockboxFiles.ensureDirectory(chunksDir.toPath)
       val file = new java.io.File(dir, "world.dat")
+      val chunksNeedingSave = dirtyChunksForSave.toSet
       BlockboxFiles.writeAtomic(file.toPath, out0 =>
         val meta = new java.io.DataOutputStream(new java.io.BufferedOutputStream(out0))
         meta.writeLong(worldSeed)
@@ -1381,7 +1490,7 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
         meta.writeInt(chunks.size)
         chunks.foreach { case ((cx, cz), _) =>
           meta.writeInt(cx); meta.writeInt(cz)
-          saveChunk(cx, cz)
+          if chunksNeedingSave.contains((cx, cz)) then saveChunk(cx, cz)
         }
         writeWorldExtras(meta)
         meta.flush()
@@ -1393,6 +1502,13 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
     loadWorldSelection = loadWorldSelection.max(0).min((worldSaveDirs.length - 1).max(0))
     loadWorldScroll = loadWorldSelection.max(0)
     screen = Screen.LoadWorld
+    glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL)
+
+  private def openResources(returnTo: Screen): Unit =
+    refreshResourcePacks()
+    resourcesReturnTo = returnTo
+    resourcesScroll = resourcePacks.indexWhere(_.id == selectedTexturePackId).max(0)
+    screen = Screen.Resources
     glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL)
 
   private def loadWorld(): Unit =
@@ -1661,7 +1777,8 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
   private def shouldRunMultiplayerBackgroundTick: Boolean =
     multiplayerMode &&
       (screen == Screen.Paused || screen == Screen.Inventory || screen == Screen.Catalog || screen == Screen.FurnaceUI ||
-        (screen == Screen.Settings && (settingsReturnTo == Screen.Playing || settingsReturnTo == Screen.Paused)))
+        (screen == Screen.Settings && (settingsReturnTo == Screen.Playing || settingsReturnTo == Screen.Paused)) ||
+        (screen == Screen.Resources && resourcesReturnTo == Screen.Settings && (settingsReturnTo == Screen.Playing || settingsReturnTo == Screen.Paused)))
 
   private def updateMultiplayerBackgroundTick(dt: Float): Unit =
     // Do NOT run local movement/physics here. This is only the live multiplayer heartbeat for UI screens.
@@ -2342,6 +2459,7 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
       case Screen.CreateWorld => renderCreateWorld()
       case Screen.LoadWorld => renderLoadWorldMenu()
       case Screen.Mods => renderModsScreen()
+      case Screen.Resources => renderResourcesScreen()
       case Screen.Settings => renderSettings()
       case Screen.Paused =>
         renderWorld()
@@ -2873,8 +2991,9 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
     drawButton(bx, ys(2), bw, bh, "Join LAN Game")
     drawButton(bx, ys(3), bw, bh, "Load World")
     drawButton(bx, ys(4), bw, bh, "Mods")
-    drawButton(bx, ys(5), bw, bh, "Options")
-    drawButton(bx, ys(6), bw, bh, "Quit Game")
+    drawButton(bx, ys(5), bw, bh, "Resources")
+    drawButton(bx, ys(6), bw, bh, "Options")
+    drawButton(bx, ys(7), bw, bh, "Quit Game")
     centeredTextFit(cx, h - 18f * s, "v1.0 | Scala 3 + LWJGL | Open Source", 0.38f, 0.50f, 0.66f, 0.52f * s, w - 40f * s)
 
   private def textMetrics(text: String): (java.nio.ByteBuffer, Int, Float, Float, Float, Float) =
@@ -3052,6 +3171,60 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
     val bw = (260f * s).min(pW * 0.44f); val bh = (38f * s).max(30f)
     if inRect(mx, my, cx - bw / 2f, pY + pH - 56f * s, bw, bh) then screen = Screen.MainMenu
 
+  private def renderResourcesScreen(): Unit =
+    if resourcePacks.isEmpty then refreshResourcePacks()
+    glDisable(GL_DEPTH_TEST); glDisable(GL_CULL_FACE); setupOrtho()
+    val w = framebufferWidth.toFloat; val h = framebufferHeight.toFloat; val cx = w / 2f; val s = uiScale
+    glBegin(GL_QUADS)
+    glColor4f(0.04f, 0.05f, 0.10f, 1f); glVertex2f(0, 0); glVertex2f(w, 0)
+    glColor4f(0.11f, 0.19f, 0.30f, 1f); glVertex2f(w, h); glVertex2f(0, h)
+    glEnd()
+    val pW = (780f * s).min(w * 0.94f); val pH = (565f * s).min(h * 0.90f)
+    val pX = cx - pW / 2f; val pY = h / 2f - pH / 2f
+    drawPanel(pX, pY, pW, pH)
+    centeredTextFit(cx, pY + 32f * s, "RESOURCES", 1f, 0.94f, 0.55f, 2.0f * s, pW - 80f * s)
+    centeredTextFit(cx, pY + 58f * s, "Texture packs refresh immediately. Add custom packs in resourcepacks/<pack>/", 0.62f, 0.74f, 0.95f, 0.56f * s, pW - 80f * s)
+    rect(pX + 34f * s, pY + 76f * s, pW - 68f * s, 1f, 0.30f, 0.34f, 0.42f, 0.30f)
+    val rowH = (64f * s).max(48f)
+    val listX = pX + 42f * s
+    val listY = pY + 96f * s
+    val visible = ((pH - 188f * s) / rowH).toInt.max(3)
+    resourcesScroll = resourcesScroll.max(0).min((resourcePacks.length - visible).max(0))
+    resourcePacks.zipWithIndex.drop(resourcesScroll).take(visible).foreach { case (pack, idx) =>
+      val y = listY + (idx - resourcesScroll) * rowH
+      val selected = pack.id == selectedTexturePackId
+      val available = pack.legacy || pack.dir.exists(d => d.isDirectory)
+      rect(listX, y, pW - 84f * s, rowH - 6f * s, if selected then 0.12f else 0.075f, if selected then 0.14f else 0.09f, if selected then 0.20f else 0.14f, 0.88f)
+      rect(listX, y, 4f * s, rowH - 6f * s, if selected then 0.95f else if available then 0.30f else 0.75f, if selected then 0.78f else if available then 0.60f else 0.28f, if selected then 0.28f else if available then 0.85f else 0.22f, 0.90f)
+      renderTextShadow(listX + 14f * s, y + 8f * s, pack.name, if selected then 1f else 0.94f, if selected then 0.92f else 0.96f, if selected then 0.60f else 1f, 0.76f * s)
+      renderTextShadow(listX + 14f * s, y + 29f * s, s"by ${pack.author}${if selected then "  [ACTIVE]" else ""}", 0.62f, 0.72f, 0.86f, 0.54f * s)
+      val pathText = if pack.legacy then "built-in procedural textures" else pack.dir.map(_.getPath).getOrElse("missing")
+      renderTextShadow(listX + 14f * s, y + 46f * s, pathText.take(112), if available then 0.46f else 1f, if available then 0.56f else 0.48f, if available then 0.70f else 0.42f, 0.44f * s)
+    }
+    val bw = (250f * s).min(pW * 0.36f); val bh = (38f * s).max(30f)
+    drawButton(cx - bw - 12f * s, pY + pH - 56f * s, bw, bh, "Refresh List")
+    drawButton(cx + 12f * s, pY + pH - 56f * s, bw, bh, "Back")
+    centeredTextFit(cx, pY + pH - 13f * s, "custom packs: dirt.png, stone.png, grass_side.png, grass_top.png, sand.png, snow.png, water.png", 0.48f, 0.55f, 0.68f, 0.46f * s, pW - 70f * s)
+
+  private def handleResourcesClick(mx: Float, my: Float): Unit =
+    val w = framebufferWidth.toFloat; val h = framebufferHeight.toFloat; val cx = w / 2f; val s = uiScale
+    val pW = (780f * s).min(w * 0.94f); val pH = (565f * s).min(h * 0.90f)
+    val pX = cx - pW / 2f; val pY = h / 2f - pH / 2f
+    val rowH = (64f * s).max(48f)
+    val listX = pX + 42f * s
+    val listY = pY + 96f * s
+    val visible = ((pH - 188f * s) / rowH).toInt.max(3)
+    val clickedPack = resourcePacks.zipWithIndex.drop(resourcesScroll).take(visible).find { case (_, idx) =>
+      val y = listY + (idx - resourcesScroll) * rowH
+      inRect(mx, my, listX, y, pW - 84f * s, rowH - 6f * s)
+    }.map(_._1)
+    clickedPack match
+      case Some(pack) => applyTexturePack(pack)
+      case None =>
+        val bw = (250f * s).min(pW * 0.36f); val bh = (38f * s).max(30f)
+        if inRect(mx, my, cx - bw - 12f * s, pY + pH - 56f * s, bw, bh) then refreshResourcePacks()
+        else if inRect(mx, my, cx + 12f * s, pY + pH - 56f * s, bw, bh) then screen = resourcesReturnTo
+
   private def renderSettings(): Unit =
     glDisable(GL_DEPTH_TEST); glDisable(GL_CULL_FACE); setupOrtho()
     val w = framebufferWidth.toFloat; val h = framebufferHeight.toFloat
@@ -3062,7 +3235,7 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
     rect(0, h * 0.62f, w, h * 0.38f, 0.06f, 0.18f, 0.06f, 0.85f)
     rect(0, h * 0.76f, w, h * 0.24f, 0.22f, 0.16f, 0.08f, 0.80f)
     val cx = w / 2f; val s = uiScale
-    val pW = (520f * s).min(w * 0.92f); val pH = (590f * s).min(h * 0.92f); val pX = cx - pW / 2f; val pY = (h / 2f - pH / 2f).max(12f * s)
+    val pW = (520f * s).min(w * 0.92f); val pH = (630f * s).min(h * 0.94f); val pX = cx - pW / 2f; val pY = (h / 2f - pH / 2f).max(12f * s)
     drawPanel(pX, pY, pW, pH)
     centeredText(cx, pY + 36 * s, "OPTIONS", 1f, 0.95f, 0.55f, 2.6f * s)
     rect(pX + 40 * s, pY + 68 * s, pW - 80 * s, 1, 0.30f, 0.30f, 0.35f, 0.30f)
@@ -3086,10 +3259,11 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
       clickRow(optY, s"Host game mode: ${gameMode}"); optY += 40 * s
     clickRow(optY, s"Sound effects: ${onOff(soundEnabled)}"); optY += 40 * s
     clickRow(optY, s"Fullscreen: ${onOff(fullscreen)}"); optY += 40 * s
+    clickRow(optY, s"Resources: ${selectedTexturePack.name}"); optY += 40 * s
     clickRow(optY, s"Pause ESC: ${if pauseEscReturnsToGame then "Resume game" else "Quit to title"}")
-    rect(pX + 40 * s, pY + 525 * s, pW - 80 * s, 1, 0.30f, 0.30f, 0.35f, 0.20f)
+    rect(pX + 40 * s, pY + pH - 65 * s, pW - 80 * s, 1, 0.30f, 0.30f, 0.35f, 0.20f)
     val buttonW = 300f * s; val buttonH = 44f * s; val buttonX = cx - buttonW / 2f
-    drawButton(buttonX, pY + 535 * s, buttonW, buttonH, "Done")
+    drawButton(buttonX, pY + pH - 55 * s, buttonW, buttonH, "Done")
 
   private def renderPauseMenu(): Unit =
     glDisable(GL_DEPTH_TEST); glDisable(GL_CULL_FACE); setupOrtho()
@@ -3563,6 +3737,43 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
     if !chunk.isDisposed && chunk.tryQueueMesh() then
       chunkBuildQueue.add(chunk)
 
+  private def requestChunkCreate(cx: Int, cz: Int): Boolean =
+    val key = (cx, cz)
+    if chunks.contains(key) || pendingChunkCreates.contains(key) then false
+    else if pendingChunkCreates.add(key) then
+      chunkCreateQueue.add((cx, cz, chunkStreamGeneration))
+      true
+    else false
+
+  private def chunkWanted(cx: Int, cz: Int, ccx: Int, ccz: Int): Boolean =
+    val worldRadius = renderDistanceBlocks + Terrain.chunkSize
+    val wx = cx * Terrain.chunkSize + Terrain.chunkSize / 2
+    val wz = cz * Terrain.chunkSize + Terrain.chunkSize / 2
+    val dxb = wx - ccx * Terrain.chunkSize
+    val dzb = wz - ccz * Terrain.chunkSize
+    dxb * dxb + dzb * dzb <= worldRadius * worldRadius
+
+  private def processCreatedChunks(limit: Int): Unit =
+    val ccx = chunkCoordPos(camera.x)
+    val ccz = chunkCoordPos(camera.z)
+    var processed = 0
+    while processed < limit do
+      val ready = chunkReadyQueue.poll()
+      if ready == null then processed = limit
+      else
+        val (generation, chunk) = ready
+        val key = (chunk.cx, chunk.cz)
+        if generation != chunkStreamGeneration then chunk.dispose()
+        else
+          pendingChunkCreates.remove(key)
+          if chunks.contains(key) || !chunkWanted(chunk.cx, chunk.cz, ccx, ccz) then chunk.dispose()
+          else
+            chunks(key) = chunk
+            initChunkWaterLevels(chunk.cx, chunk.cz)
+            applyNetworkBlocksToChunk(chunk.cx, chunk.cz)
+            queueChunkMesh(chunk)
+        processed += 1
+
   private var lastChunkX = 0; private var lastChunkZ = 0
 
   private def syncChunks(): Unit =
@@ -3573,6 +3784,7 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
     // `chunks` was no longer empty. That caused temporary dark-blue empty worlds, missing
     // terrain, and players falling/desyncing while multiplayer screens were open.
     lastChunkX = ccx; lastChunkZ = ccz
+    processCreatedChunks(8)
     loadChunks(ccx, ccz)
 
   private def terrainReadyNearCamera: Boolean =
@@ -3609,7 +3821,11 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
     while i < nearest.length && built < limit do
       val c = nearest(i)
       if !c.isDisposed && (!c.hasMesh || c.meshReady) then
-        if c.buildNowAndUpload() then built += 1
+        if c.meshReady then
+          if c.uploadMesh() then built += 1 else queueChunkMesh(c)
+        else
+          queueChunkMesh(c)
+          built += 1
       i += 1
 
   private def refreshChunkAndNeighbors(cx: Int, cz: Int): Unit =
@@ -3674,16 +3890,9 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
             val loadedFromDisk = canUseLocalChunkSaves && loadChunkIfSaved(cx, cz)
             if loadedFromDisk then
               applyNetworkBlocksToChunk(cx, cz)
-              // Current/adjacent chunks should be ready immediately; far chunks can stream.
-              if ring == 0 then chunks.get((cx, cz)).foreach(_.buildNowAndUpload()) else chunks.get((cx, cz)).foreach(queueChunkMesh)
+              chunks.get((cx, cz)).foreach(queueChunkMesh)
               loaded += 1
-            else
-              val chunk = Chunk(cx, cz, activeAtlas, terrainGen)
-              chunks((cx, cz)) = chunk
-              initChunkWaterLevels(cx, cz)
-              applyNetworkBlocksToChunk(cx, cz)
-              if ring == 0 then chunk.buildNowAndUpload() else queueChunkMesh(chunk)
-              loaded += 1
+            else if requestChunkCreate(cx, cz) then loaded += 1
           else if chunks.contains((cx, cz)) then
             val chunk = chunks((cx, cz))
             if !chunk.hasMesh && !chunk.meshReady then
@@ -3693,29 +3902,41 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
     if canUseLocalChunkSaves then chunksDir.mkdirs()
     toRemove.foreach { key =>
       chunks.get(key).foreach { chunk =>
-        if canUseLocalChunkSaves then chunk.save(chunksDir)
+        if canUseLocalChunkSaves then
+          chunk.save(chunksDir)
+          dirtyChunksForSave -= key
         chunk.dispose()
       }
       chunks -= key
     }
 
   private def startChunkGenThread(): Unit =
-    // v18 brings the worker back, but only for CPU mesh building. The Chunk mesher
-    // snapshots block arrays/edits and uses revision checks before upload, so stale
-    // worker results cannot replace newer meshes. This keeps joining clients from
-    // hitching while still avoiding the old race-condition void bug.
+    // Workers do CPU-only chunk creation and mesh building. OpenGL uploads stay on
+    // the main thread in processChunkWorkMainThread().
     if chunkGenPool != null then return
     chunkGenRunning = true
     val cores = Runtime.getRuntime.availableProcessors().max(1)
-    val threads = if cores >= 6 then 2 else 1
+    val threads = (cores - 2).max(1).min(6)
     chunkGenPool = java.util.concurrent.Executors.newFixedThreadPool(threads)
     for i <- 0 until threads do
       chunkGenPool.submit(new Runnable:
         override def run(): Unit =
-          while chunkGenRunning do
+          var preferCreate = i % 2 == 0
+          def processCreate(): Boolean =
+            val createKey = chunkCreateQueue.poll()
+            if createKey == null then false
+            else
+              try
+                val chunk = Chunk(createKey._1, createKey._2, activeAtlas, terrainGen)
+                if chunkGenRunning && createKey._3 == chunkStreamGeneration then chunkReadyQueue.add((createKey._3, chunk))
+                else chunk.dispose()
+              catch case e: Exception =>
+                pendingChunkCreates.remove((createKey._1, createKey._2))
+                e.printStackTrace()
+              true
+          def processMesh(): Boolean =
             val chunk = chunkBuildQueue.poll()
-            if chunk == null then
-              try Thread.sleep(8) catch case _: InterruptedException => ()
+            if chunk == null then false
             else
               try
                 if !chunk.isDisposed then
@@ -3726,6 +3947,11 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
               catch case e: Exception =>
                 chunk.releaseMeshQueue()
                 e.printStackTrace()
+              true
+          while chunkGenRunning do
+            val didWork = if preferCreate then processCreate() || processMesh() else processMesh() || processCreate()
+            preferCreate = !preferCreate
+            if !didWork then try Thread.sleep(4) catch case _: InterruptedException => ()
       )
 
   private def stopChunkGenThread(): Unit =
@@ -3737,6 +3963,7 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
     chunkGenPool = null
 
   private def processChunkWorkMainThread(buildLimit: Int, uploadLimit: Int): Unit =
+    processCreatedChunks(uploadLimit.max(1))
     // Upload any leftover completed meshes first. This also makes upgrading from an
     // older build safer if a stale queue exists during the first frame.
     var uploaded = 0
@@ -3780,15 +4007,12 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
         val cx = ccx + dx
         val cz = ccz + dz
         val key = (cx, cz)
-        val chunk = chunks.get(key) match
-          case Some(existing) => existing
+        chunks.get(key) match
+          case Some(chunk) =>
+            if !chunk.isDisposed && !chunk.hasMesh then queueChunkMesh(chunk)
           case None =>
-            val created = Chunk(cx, cz, activeAtlas, terrainGen)
-            chunks(key) = created
-            initChunkWaterLevels(cx, cz)
-            applyNetworkBlocksToChunk(cx, cz)
-            created
-        if !chunk.isDisposed && !chunk.hasMesh then chunk.forceBuildNowAndUpload()
+            if canUseLocalChunkSaves && loadChunkIfSaved(cx, cz) then chunks.get(key).foreach(queueChunkMesh)
+            else requestChunkCreate(cx, cz)
         dz += 1
       dx += 1
 
@@ -3921,7 +4145,10 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
   private def saveChunk(cx: Int, cz: Int): Unit =
     if !canUseLocalChunkSaves then return
     val chunk = chunks.get((cx, cz))
-    chunk.foreach(_.save(currentChunksDir))
+    chunk.foreach { c =>
+      c.save(currentChunksDir)
+      dirtyChunksForSave -= ((cx, cz))
+    }
 
   private def loadChunkIfSaved(cx: Int, cz: Int): Boolean =
     if !canUseLocalChunkSaves then return false
@@ -3929,7 +4156,8 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
     val file = new java.io.File(chunksDir, s"chunk_${cx}_${cz}.dat")
     if file.exists() then
       try
-        val chunk = Chunk(cx, cz, activeAtlas, terrainGen)
+        val emptyBlocks = new Array[Byte](Terrain.chunkSize * Terrain.worldHeight * Terrain.chunkSize)
+        val chunk = Chunk(cx, cz, activeAtlas, terrainGen, emptyBlocks)
         chunk.load(chunksDir)
         chunks((cx, cz)) = chunk
         initChunkWaterLevels(cx, cz)
@@ -3948,6 +4176,7 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
     val cx = chunkCoordBlock(x)
     val cz = chunkCoordBlock(z)
     dirtyChunks += ((cx, cz))
+    dirtyChunksForSave += ((cx, cz))
     val keys = collection.mutable.Set((cx, cz))
     val lx = x - cx * 16; val lz = z - cz * 16
     if lx == 0 then keys += ((cx - 1, cz))
@@ -3966,6 +4195,7 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
     val cx = chunkCoordBlock(wx)
     val cz = chunkCoordBlock(wz)
     dirtyChunks += ((cx, cz))
+    dirtyChunksForSave += ((cx, cz))
 
   private def flushDirtyChunks(): Unit =
     if dirtyChunks.nonEmpty then

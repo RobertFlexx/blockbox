@@ -8,8 +8,8 @@ import java.io.*
 import scala.collection.mutable.ArrayBuffer
 import scala.math.*
 
-final class Chunk(val cx: Int, val cz: Int, atlas: TextureAtlas, gen: TerrainGenerator):
-  var blocks: Array[Byte] = gen.fillChunkBlocks(cx, cz)
+final class Chunk(val cx: Int, val cz: Int, atlas: TextureAtlas, gen: TerrainGenerator, initialBlocks: Array[Byte] = null):
+  var blocks: Array[Byte] = if initialBlocks != null then initialBlocks else gen.fillChunkBlocks(cx, cz)
   private[blockbox] val edits = scala.collection.mutable.HashMap.empty[(Int, Int, Int), Block]
   // 0 means default full-height water for generated/static water.
   // 1..8 are dynamic flowing-water levels used by the cellular automata.

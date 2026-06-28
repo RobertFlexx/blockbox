@@ -12,7 +12,10 @@ final case class Vec3(x: Float, y: Float, z: Float):
     if len <= 0.0001f then Vec3(0, 0, 0) else Vec3(x / len, y / len, z / len)
 
 enum Screen:
-  case MainMenu, CreateWorld, LoadWorld, Mods, Settings, Playing, Paused, Inventory, Catalog, FurnaceUI, JoinGame, HostGame
+  case MainMenu, CreateWorld, LoadWorld, Mods, Resources, Settings, Playing, Paused, Inventory, Catalog, FurnaceUI, JoinGame, HostGame
+
+final case class TexturePack(id: String, name: String, author: String, dir: Option[java.io.File], legacy: Boolean = false):
+  def label: String = s"$name by $author"
 
 enum GameMode:
   case Survival, Creative
@@ -83,4 +86,3 @@ enum FaceKind:
 
 final case class RayHit(block: (Int, Int, Int), place: (Int, Int, Int), normal: (Int, Int, Int), distance: Float)
 final case class RemotePlayer(name: String, var pos: Vec3, var yaw: Float, var pitch: Float, var lastSeen: Double, var colorId: Int)
-

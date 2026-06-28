@@ -2,9 +2,12 @@ package blockbox
 
 import org.lwjgl.BufferUtils
 import org.lwjgl.opengl.GL11.*
+import java.awt.image.BufferedImage
+import java.io.File
+import javax.imageio.ImageIO
 import scala.math.*
 
-final class TextureAtlas:
+final class TextureAtlas(texturePack: TexturePack):
   val tileSize = 16
   private val faceCount = FaceKind.values.length
   private val columns = 16
@@ -13,6 +16,7 @@ final class TextureAtlas:
   private val textureWidth = columns * tileSize
   private val textureHeight = rows * tileSize
   private var textureId = 0
+  private val imageCache = scala.collection.mutable.HashMap.empty[String, Option[BufferedImage]]
 
   build()
 
@@ -40,8 +44,11 @@ final class TextureAtlas:
       val face = FaceKind.values(tile % faceCount)
       val ox = (tile % columns) * tileSize
       val oy = (tile / columns) * tileSize
+      val source = imageFor(block, face)
       for py <- 0 until tileSize; px <- 0 until tileSize do
-        val (r, g, b, a) = pixel(block, face, px, py)
+        val (r, g, b, a) = source match
+          case Some(img) => imagePixel(img, px, py)
+          case None => pixel(block, face, px, py)
         val index = ((oy + py) * textureWidth + (ox + px)) * 4
         pixels.put(index, r.toByte)
         pixels.put(index + 1, g.toByte)
@@ -57,6 +64,47 @@ final class TextureAtlas:
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP)
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, textureWidth, textureHeight, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels)
     glBindTexture(GL_TEXTURE_2D, 0)
+
+  private def imageFor(block: Block, face: FaceKind): Option[BufferedImage] =
+    if texturePack.legacy then None else textureNames(block, face).view.flatMap(loadTexture).headOption
+
+  private def textureNames(block: Block, face: FaceKind): List[String] = block match
+    case Block.Grass =>
+      face match
+        case FaceKind.Top => List("grass_top.png", "grass..png", "grass.png")
+        case FaceKind.Bottom => List("dirt.png")
+        case _ => List("grass_side.png")
+    case Block.Dirt => List("dirt.png")
+    case Block.Stone => List("stone.png")
+    case Block.Sand => List("sand.png")
+    case Block.Snow => List("snow.png")
+    case Block.Water => List("water.png")
+    case Block.Wood =>
+      face match
+        case FaceKind.Top | FaceKind.Bottom => List("log_top_bottom.png")
+        case _ => List("log_side.png")
+    case _ => Nil
+
+  private def loadTexture(name: String): Option[BufferedImage] =
+    imageCache.getOrElseUpdate(name, {
+      val resource = Option(getClass.getResourceAsStream(s"/textures/$name"))
+      val image = resource.flatMap { in =>
+        try Option(ImageIO.read(in)) finally in.close()
+      }.orElse(loadTextureFile(name))
+      image
+    })
+
+  private def loadTextureFile(name: String): Option[BufferedImage] =
+    val files = texturePack.dir.toList.flatMap { dir =>
+      List(File(dir, name), File(File(dir, "textures"), name))
+    }
+    files.collectFirst { case file if file.exists() => ImageIO.read(file) }
+
+  private def imagePixel(img: BufferedImage, x: Int, y: Int): (Int, Int, Int, Int) =
+    val sx = (x * img.getWidth / tileSize).max(0).min(img.getWidth - 1)
+    val sy = (y * img.getHeight / tileSize).max(0).min(img.getHeight - 1)
+    val argb = img.getRGB(sx, sy)
+    ((argb >>> 16) & 0xFF, (argb >>> 8) & 0xFF, argb & 0xFF, (argb >>> 24) & 0xFF)
 
   private def pixel(block: Block, face: FaceKind, x: Int, y: Int): (Int, Int, Int, Int) = block match
     case Block.Air => (0, 0, 0, 0)
@@ -335,4 +383,3 @@ final class TextureAtlas:
     (n ^ (n >>> 16)) & 255
 
   private def clampByte(v: Int): Int = v.max(0).min(255)
-
