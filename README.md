@@ -258,3 +258,8 @@ i want blockbox to become a fun handmade voxel sandbox with:
 it is made by one guy, robertflexx, and i work very hard on it.
 
 that is basically the whole spirit of the project.
+
+# Honorable Mentions
+* [Kokonico](https://github.com/Kokonico)
+> why?
+**Well** this goated man made the new default textures, and is currently making. Please show him some love!!
