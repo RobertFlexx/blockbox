@@ -30,7 +30,7 @@ final class TextureAtlas(texturePack: TexturePack):
     val tile = block.ordinal * faceCount + face.ordinal
     val tx = tile % columns
     val ty = tile / columns
-    val inset = 2f
+    val inset = 0.001f
     val u0 = (tx * tileSize + inset) / textureWidth
     val v0 = (ty * tileSize + inset) / textureHeight
     val u1 = ((tx + 1) * tileSize - inset) / textureWidth
