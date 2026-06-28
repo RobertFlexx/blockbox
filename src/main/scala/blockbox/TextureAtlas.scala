@@ -1,15 +1,18 @@
 package blockbox
 
 import org.lwjgl.BufferUtils
+import org.lwjgl.opengl.GL
 import org.lwjgl.opengl.GL11.*
+import org.lwjgl.opengl.GL12.GL_CLAMP_TO_EDGE
+import org.lwjgl.opengl.EXTTextureFilterAnisotropic.{GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT, GL_TEXTURE_MAX_ANISOTROPY_EXT}
 import java.awt.image.BufferedImage
 import java.io.File
 import javax.imageio.ImageIO
 import scala.math.*
 
-final class TextureAtlas(texturePack: TexturePack):
+final class TextureAtlas(texturePack: TexturePack, anisotropicFiltering: Boolean = true):
   val tileSize = 16
-  private val tileBorder = 1
+  private val tileBorder = 2
   private val tileStep = tileSize + tileBorder * 2
   private val faceCount = FaceKind.values.length
   private val columns = 16
@@ -75,10 +78,17 @@ final class TextureAtlas(texturePack: TexturePack):
     glBindTexture(GL_TEXTURE_2D, textureId)
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST)
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST)
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP)
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP)
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE)
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, textureWidth, textureHeight, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels)
+    configureFiltering()
     glBindTexture(GL_TEXTURE_2D, 0)
+
+  private def configureFiltering(): Unit =
+    val caps = GL.getCapabilities
+    if anisotropicFiltering && caps.GL_EXT_texture_filter_anisotropic then
+      val maxAniso = glGetFloat(GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT).max(1f).min(16f)
+      glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAX_ANISOTROPY_EXT, maxAniso)
 
   private def imageFor(block: Block, face: FaceKind): Option[BufferedImage] =
     if texturePack.legacy then None else textureNames(block, face).view.flatMap(loadTexture).headOption
@@ -94,6 +104,7 @@ final class TextureAtlas(texturePack: TexturePack):
     case Block.Sand => List("sand.png")
     case Block.Snow => List("snow.png")
     case Block.Water => List("water.png")
+    case Block.Torch => List("torch.png")
     case Block.Wood =>
       face match
         case FaceKind.Top | FaceKind.Bottom => List("log_top_bottom.png")
@@ -327,6 +338,14 @@ final class TextureAtlas(texturePack: TexturePack):
             (180 + flicker, 90 + flicker, 20 + flicker, 255)
           else (sbr, sbg, sbb, 255)
         case _ => (sbr, sbg, sbb, 255)
+    case Block.Torch =>
+      val flame = y < 5 && x >= 5 && x <= 10
+      val core = flame && x >= 6 && x <= 9 && y >= 1 && y <= 3
+      val stick = x >= 6 && x <= 9 && y >= 5
+      if core then (255, 238, 120, 255)
+      else if flame then (240, 120 + noise(x, y, 2301) / 8, 28, 230)
+      else if stick then vary((126, 72, 32), 18, noise(x, y, 2302), 255)
+      else (0, 0, 0, 0)
     case Block.IronOre =>
       val ore = if noise(x, y, 1005) > 182 then (168, 120, 78) else (92, 70, 62)
       stonePixel(x, y, 1006) match

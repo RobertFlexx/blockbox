@@ -58,6 +58,7 @@ enum Block(val solid: Boolean, val rgb: (Float, Float, Float), val translucent: 
   case BirchPlanks extends Block(true, (0.76f, 0.63f, 0.42f))
   case PinePlanks extends Block(true, (0.44f, 0.28f, 0.14f))
   case AcaciaPlanks extends Block(true, (0.78f, 0.38f, 0.16f))
+  case Torch extends Block(false, (1.00f, 0.74f, 0.28f), true, false, true)
   def id: Byte = ordinal.toByte
 object Block:
   private val valuesArray = values

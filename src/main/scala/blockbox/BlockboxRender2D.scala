@@ -8,6 +8,9 @@ import org.lwjgl.stb.STBEasyFont
 import scala.math.*
 
 object BlockboxRender2D:
+  private def textFitPad(scale: Float): Float =
+    (6f * scale).max(5f)
+
   def textMetrics(text: String): (java.nio.ByteBuffer, Int, Float, Float, Float, Float) =
     val safeText = if text == null then "" else text
     val buf = BufferUtils.createByteBuffer((safeText.length.max(1)) * 320)
@@ -30,13 +33,13 @@ object BlockboxRender2D:
     if text == null || text.isEmpty then 0f
     else
       val (_, quads, minX, maxX, _, _) = textMetrics(text)
-      if quads <= 0 then text.length * 8f * scale else (maxX - minX).max(1f) * scale
+      if quads <= 0 then text.length * 8f * scale + textFitPad(scale) else (maxX - minX).max(1f) * scale + textFitPad(scale)
 
   def uiScale(framebufferWidth: Int, framebufferHeight: Int): Float =
     // Slightly larger global UI scale so small labels stay readable without blowing up layouts.
     val byWidth = framebufferWidth.toFloat / 1280f
     val byHeight = framebufferHeight.toFloat / 720f
-    math.min(byWidth, byHeight).max(0.98f).min(1.38f)
+    math.min(byWidth, byHeight).max(1.10f).min(1.42f)
 
   def resetGlArraysAndBuffers(): Unit =
     glBindBuffer(GL_ARRAY_BUFFER, 0)
@@ -258,19 +261,35 @@ object BlockboxRender2D:
     if text == null || text.isEmpty then return
     val lineH = 12f * scale
     if x >= framebufferWidth - 4f || x + 2f < 0 || y >= framebufferHeight - 2f || y + lineH < 0 then return
-    val maxChars = ((framebufferWidth - x - 12f).max(4f) / (8f * scale).max(1f)).toInt
-    val display = if maxChars <= 0 then "" else if maxChars >= text.length then text else text.take(maxChars.max(4) - 1) + "…"
+    val maxChars = ((framebufferWidth - x - textFitPad(scale) - 12f).max(4f) / (9f * scale).max(1f)).toInt
+    val display = if maxChars <= 0 then "" else if maxChars >= text.length then text else text.take(maxChars.max(4) - 3) + "..."
     if display.isEmpty then return
     val (buf, quads, _, _, _, _) = textMetrics(display)
     if quads <= 0 then return
     renderTextBuf(buf, quads, x, y, r, g, b, scale, framebufferWidth, framebufferHeight)
 
+  def fitText(text: String, scale: Float, maxWidth: Float): String =
+    if text == null || text.isEmpty then ""
+    else if textWidth(text, scale) <= maxWidth.max(4f) then text
+    else
+      val suffix = "..."
+      val suffixW = textWidth(suffix, scale)
+      val target = (maxWidth - suffixW - textFitPad(scale)).max(0f)
+      if target <= 4f then suffix
+      else
+        var lo = 0
+        var hi = text.length
+        while lo < hi do
+          val mid = (lo + hi + 1) / 2
+          if textWidth(text.take(mid), scale) <= target then lo = mid else hi = mid - 1
+        text.take(lo.max(0)) + suffix
+
   def centeredTextFit(cx: Float, y: Float, text: String, r: Float, g: Float, b: Float, scale: Float, maxWidth: Float, framebufferWidth: Int, framebufferHeight: Int): Unit =
     if text == null || text.isEmpty then return
     val (buf, quads, minX, maxX, minY, _) = textMetrics(text)
     if quads <= 0 then return
-    val rawW = (maxX - minX).max(1f)
-    val safeW = maxWidth.max(12f).min(framebufferWidth.toFloat - 12f)
+    val rawW = (maxX - minX).max(1f) + textFitPad(scale)
+    val safeW = (maxWidth - textFitPad(scale)).max(12f).min(framebufferWidth.toFloat - 12f)
     val eff = scale.min(safeW / rawW).max(0.30f)
     val left = cx - rawW * eff / 2f - minX * eff
     val top = y - minY * eff
@@ -286,9 +305,9 @@ object BlockboxRender2D:
     if text == null || text.isEmpty then return
     val (buf, quads, minX, maxX, minY, maxY) = textMetrics(text)
     if quads <= 0 then return
-    val rawW = (maxX - minX).max(1f)
+    val rawW = (maxX - minX).max(1f) + textFitPad(scale)
     val rawH = (maxY - minY).max(1f)
-    val eff = scale.min((w - 14f * uiScale).max(8f) / rawW).min((h - 8f * uiScale).max(8f) / rawH).max(0.30f)
+    val eff = scale.min((w - 20f * uiScale).max(8f) / rawW).min((h - 8f * uiScale).max(8f) / rawH).max(0.30f)
     val tx = x + w / 2f - rawW * eff / 2f - minX * eff
     val ty = y + h / 2f - rawH * eff / 2f - minY * eff
     val so = (1.20f * eff).max(0.65f)
@@ -306,3 +325,6 @@ object BlockboxRender2D:
     renderText(x + o, y - o, text, 0f, 0f, 0f, scale, framebufferWidth, framebufferHeight)
     renderText(x - o, y + o, text, 0f, 0f, 0f, scale, framebufferWidth, framebufferHeight)
     renderText(x, y, text, r, g, b, scale, framebufferWidth, framebufferHeight)
+
+  def renderTextShadowFit(x: Float, y: Float, text: String, r: Float, g: Float, b: Float, scale: Float, maxWidth: Float, framebufferWidth: Int, framebufferHeight: Int): Unit =
+    renderTextShadow(x, y, fitText(text, scale, maxWidth), r, g, b, scale, framebufferWidth, framebufferHeight)

@@ -8,9 +8,10 @@ import java.io.*
 import scala.collection.mutable.ArrayBuffer
 import scala.math.*
 
-final class Chunk(val cx: Int, val cz: Int, atlas: TextureAtlas, gen: TerrainGenerator, initialBlocks: Array[Byte] = null):
+final class Chunk(val cx: Int, val cz: Int, atlas: TextureAtlas, gen: TerrainGenerator, initialBlocks: Array[Byte] = null, private var smoothLightingEnabled: Boolean = true):
   var blocks: Array[Byte] = if initialBlocks != null then initialBlocks else gen.fillChunkBlocks(cx, cz)
   private[blockbox] val edits = scala.collection.mutable.HashMap.empty[(Int, Int, Int), Block]
+  @volatile private var neighbors = Map.empty[(Int, Int), Chunk]
   // 0 means default full-height water for generated/static water.
   // 1..8 are dynamic flowing-water levels used by the cellular automata.
   private val waterLevelsLocal = new Array[Byte](Terrain.chunkSize * Terrain.worldHeight * Terrain.chunkSize)
@@ -76,13 +77,26 @@ final class Chunk(val cx: Int, val cz: Int, atlas: TextureAtlas, gen: TerrainGen
   def releaseMeshQueue(): Unit =
     meshQueued.set(false)
 
+  private[blockbox] def setNeighbor(dx: Int, dz: Int, chunk: Chunk): Unit =
+    if chunk != null && (dx != 0 || dz != 0) && dx >= -1 && dx <= 1 && dz >= -1 && dz <= 1 then
+      neighbors = neighbors.updated((dx, dz), chunk)
+
+  private[blockbox] def clearNeighbor(dx: Int, dz: Int, chunk: Chunk): Unit =
+    val key = (dx, dz)
+    if neighbors.get(key).contains(chunk) then neighbors = neighbors - key
+
+  private[blockbox] def setSmoothLightingEnabled(value: Boolean): Unit =
+    if smoothLightingEnabled != value then
+      smoothLightingEnabled = value
+      markDirtyMesh()
+
   def dispose(): Unit =
     disposed = true
     pendingData = null
     meshReady = false
     meshQueued.set(false)
     destroy()
-
+    // This below is just pure bullshit. Ignore how some codebase is duct taped
   private def localIndex(lx: Int, y: Int, lz: Int): Int =
     (y * Terrain.chunkSize + lz) * Terrain.chunkSize + lx
 
@@ -161,6 +175,27 @@ final class Chunk(val cx: Int, val cz: Int, atlas: TextureAtlas, gen: TerrainGen
     val waterLevelsSnapshot = waterLevelsLocal.clone()
     val editsSnapshot: scala.collection.mutable.HashMap[(Int, Int, Int), Block] =
       edits.synchronized { edits.clone() }
+    final case class NeighborSnapshot(blocks: Array[Byte], water: Array[Byte], edits: scala.collection.mutable.HashMap[(Int, Int, Int), Block])
+    val neighborSnapshots = neighbors.flatMap { case (offset, chunk) =>
+      if chunk == null || chunk.isDisposed then None
+      else
+        val editsCopy = chunk.edits.synchronized { chunk.edits.clone() }
+        Some(offset -> NeighborSnapshot(chunk.blocks.clone(), chunk.waterLevelsLocal.clone(), editsCopy))
+    }
+    def neighborCoords(lx: Int, lz: Int): (Int, Int, Int, Int) =
+      val (dx, nx) =
+        if lx < 0 then (-1, lx + Terrain.chunkSize)
+        else if lx >= Terrain.chunkSize then (1, lx - Terrain.chunkSize)
+        else (0, lx)
+      val (dz, nz) =
+        if lz < 0 then (-1, lz + Terrain.chunkSize)
+        else if lz >= Terrain.chunkSize then (1, lz - Terrain.chunkSize)
+        else (0, lz)
+      (dx, dz, nx, nz)
+    def snapshotFrom(data: NeighborSnapshot, lx: Int, y: Int, lz: Int): Block =
+      data.edits.get((lx, y, lz)) match
+        case Some(b: Block) => b
+        case None => Block.fromId(data.blocks((y * Terrain.chunkSize + lz) * Terrain.chunkSize + lx))
     def snapshotBlock(lx: Int, y: Int, lz: Int): Block =
       val found: Option[Block] = editsSnapshot.get((lx, y, lz))
       found match
@@ -174,28 +209,27 @@ final class Chunk(val cx: Int, val cz: Int, atlas: TextureAtlas, gen: TerrainGen
       else if nlx >= 0 && nlx < Terrain.chunkSize && nlz >= 0 && nlz < Terrain.chunkSize then
         snapshotBlock(nlx, ny, nlz)
       else
-        // Important: do NOT guess neighbor terrain here. Earlier builds used deterministic
-        // generated terrain outside the chunk, but that ignores caves, saved edits, water
-        // changes, and chunk-edge structures. That made real air pockets look solid, so
-        // faces disappeared at chunk borders. Treat unknown neighbor space as air and
-        // rebuild border chunks when neighbors load/change; it is safer to briefly draw an
-        // extra hidden face than to delete a visible one.
-        Block.Air
+        val (dx, dz, lx, lz) = neighborCoords(nlx, nlz)
+        neighborSnapshots.get((dx, dz)).map(snapshotFrom(_, lx, ny, lz)).getOrElse(Block.Air)
 
     def localWaterRawLevel(nlx: Int, ny: Int, nlz: Int): Int =
-      if ny < 0 || ny >= Terrain.worldHeight || nlx < 0 || nlx >= Terrain.chunkSize || nlz < 0 || nlz >= Terrain.chunkSize then 0
-      else waterLevelsSnapshot((ny * Terrain.chunkSize + nlz) * Terrain.chunkSize + nlx).toInt & 0xFF
+      if ny < 0 || ny >= Terrain.worldHeight then 0
+      else if nlx >= 0 && nlx < Terrain.chunkSize && nlz >= 0 && nlz < Terrain.chunkSize then
+        waterLevelsSnapshot((ny * Terrain.chunkSize + nlz) * Terrain.chunkSize + nlx).toInt & 0xFF
+      else
+        val (dx, dz, lx, lz) = neighborCoords(nlx, nlz)
+        neighborSnapshots.get((dx, dz)).map(_.water((ny * Terrain.chunkSize + lz) * Terrain.chunkSize + lx).toInt & 0xFF).getOrElse(0)
 
     def localWaterLevel(nlx: Int, ny: Int, nlz: Int): Int =
-      if ny < 0 || ny >= Terrain.worldHeight || nlx < 0 || nlx >= Terrain.chunkSize || nlz < 0 || nlz >= Terrain.chunkSize then 0
-      else if snapshotBlock(nlx, ny, nlz) != Block.Water then 0
+      if ny < 0 || ny >= Terrain.worldHeight then 0
+      else if localBlock(nlx, ny, nlz) != Block.Water then 0
       else
         val raw = localWaterRawLevel(nlx, ny, nlz)
         if raw <= 0 then 8 else raw.max(1).min(8)
 
     def rawWaterTopY(nlx: Int, ny: Int, nlz: Int, fy: Float): Float =
-      if ny < 0 || ny >= Terrain.worldHeight || nlx < 0 || nlx >= Terrain.chunkSize || nlz < 0 || nlz >= Terrain.chunkSize then fy
-      else if snapshotBlock(nlx, ny, nlz) != Block.Water then fy
+      if ny < 0 || ny >= Terrain.worldHeight then fy
+      else if localBlock(nlx, ny, nlz) != Block.Water then fy
       else
         val raw = localWaterRawLevel(nlx, ny, nlz)
         // Generated/static water has raw level 0. Draw it as a full flat block-top
@@ -222,11 +256,9 @@ final class Chunk(val cx: Int, val cz: Int, atlas: TextureAtlas, gen: TerrainGen
       else if count > 0 then sum / count.toFloat
       else fallback
     def isWaterSideVisible(nlx: Int, ny: Int, nlz: Int): Boolean =
-      // Never guess a neighbor chunk as air for water sides. Opaque blocks can tolerate
-      // temporary border faces, but transparent water cannot: those faces show up as huge
-      // blue sheets along chunk/grid seams. Neighbor chunks draw their own water tops, and
-      // real exposed sides are only emitted when the neighbor is known inside this chunk.
-      if nlx < 0 || nlx >= Terrain.chunkSize || nlz < 0 || nlz >= Terrain.chunkSize || ny < 0 || ny >= Terrain.worldHeight then false
+      if ny < 0 || ny >= Terrain.worldHeight then false
+      else if (nlx < 0 || nlx >= Terrain.chunkSize || nlz < 0 || nlz >= Terrain.chunkSize) &&
+        !neighborSnapshots.contains((neighborCoords(nlx, nlz)._1, neighborCoords(nlx, nlz)._2)) then false
       else
         val nb = localBlock(nlx, ny, nlz)
         nb != Block.Water && (nb == Block.Air || nb.cutout || (nb.translucent && nb != Block.Water))
@@ -249,6 +281,94 @@ final class Chunk(val cx: Int, val cz: Int, atlas: TextureAtlas, gen: TerrainGen
       else if nb.cutout then block != nb
       else if block.solid && nb.solid && !block.translucent && !nb.translucent && !block.cutout && !nb.cutout then false
       else nb.translucent && nb != block
+    def occludesLight(b: Block): Boolean = b.solid && !b.translucent && !b.cutout
+    val skyMin = -1
+    val skyMax = Terrain.chunkSize + 1
+    val skySize = skyMax - skyMin + 1
+    val skyBlockers = new Array[Int](skySize * skySize)
+    var sgx = skyMin
+    while sgx <= skyMax do
+      var sgz = skyMin
+      while sgz <= skyMax do
+        var sy = Terrain.worldHeight - 1
+        var found = -1
+        while sy >= 0 && found < 0 do
+          if occludesLight(localBlock(sgx, sy, sgz)) then found = sy
+          sy -= 1
+        skyBlockers((sgx - skyMin) * skySize + (sgz - skyMin)) = found
+        sgz += 1
+      sgx += 1
+    def highestSkyBlocker(nlx: Int, nlz: Int): Int =
+      val cx = nlx.max(skyMin).min(skyMax)
+      val cz = nlz.max(skyMin).min(skyMax)
+      skyBlockers((cx - skyMin) * skySize + (cz - skyMin))
+    def columnSky(nlx: Int, probeY: Int, nlz: Int): Float =
+      val topBlocker = highestSkyBlocker(nlx, nlz)
+      if topBlocker < probeY then 1f else 0f
+    def softSky(ix: Int, probeY: Int, iz: Int): Float =
+      // Weighted 3x3 skylight samples produce Minecraft-like soft shadow transitions
+      // around caves, cliffs, tree canopies and overhangs without runtime shadow maps.
+      val center = columnSky(ix, probeY, iz) * 4f
+      val cardinals =
+        columnSky(ix - 1, probeY, iz) + columnSky(ix + 1, probeY, iz) +
+        columnSky(ix, probeY, iz - 1) + columnSky(ix, probeY, iz + 1)
+      val diagonals =
+        columnSky(ix - 1, probeY, iz - 1) + columnSky(ix + 1, probeY, iz - 1) +
+        columnSky(ix - 1, probeY, iz + 1) + columnSky(ix + 1, probeY, iz + 1)
+      (center + cardinals * 2f + diagonals) * 0.0625f
+    val lightMin = -1
+    val lightMax = Terrain.chunkSize
+    val lightSize = lightMax - lightMin + 1
+    val lightCellCount = lightSize * Terrain.worldHeight * lightSize
+    val blockLight = new Array[Byte](lightCellCount)
+    val lightQueueSize = lightCellCount * 16
+    val qx = new Array[Int](lightQueueSize)
+    val qy = new Array[Int](lightQueueSize)
+    val qz = new Array[Int](lightQueueSize)
+    def lightIndex(x: Int, y: Int, z: Int): Int =
+      (y * lightSize + (z - lightMin)) * lightSize + (x - lightMin)
+    def lightSourceLevel(b: Block): Int = b match
+      case Block.Torch => 14
+      case Block.FurnaceLit => 13
+      case _ => 0
+    var head = 0
+    var tail = 0
+    def enqueueLight(x: Int, y: Int, z: Int, level: Int): Unit =
+      if x >= lightMin && x <= lightMax && y >= 0 && y < Terrain.worldHeight && z >= lightMin && z <= lightMax && level > 0 then
+        val idx = lightIndex(x, y, z)
+        if level > (blockLight(idx).toInt & 0xFF) then
+          blockLight(idx) = level.toByte
+          if tail < lightQueueSize then
+            qx(tail) = x; qy(tail) = y; qz(tail) = z; tail += 1
+    var lxSeed = lightMin
+    while lxSeed <= lightMax do
+      var lzSeed = lightMin
+      while lzSeed <= lightMax do
+        var lySeed = 0
+        while lySeed < Terrain.worldHeight do
+          val level = lightSourceLevel(localBlock(lxSeed, lySeed, lzSeed))
+          if level > 0 then enqueueLight(lxSeed, lySeed, lzSeed, level)
+          lySeed += 1
+        lzSeed += 1
+      lxSeed += 1
+    while head < tail do
+      val x = qx(head); val y = qy(head); val z = qz(head); head += 1
+      val next = (blockLight(lightIndex(x, y, z)).toInt & 0xFF) - 1
+      if next > 0 then
+        def spread(nx: Int, ny: Int, nz: Int): Unit =
+          if nx >= lightMin && nx <= lightMax && ny >= 0 && ny < Terrain.worldHeight && nz >= lightMin && nz <= lightMax && !occludesLight(localBlock(nx, ny, nz)) then enqueueLight(nx, ny, nz, next)
+        spread(x + 1, y, z); spread(x - 1, y, z); spread(x, y + 1, z); spread(x, y - 1, z); spread(x, y, z + 1); spread(x, y, z - 1)
+    def blockLightAt(x: Int, y: Int, z: Int): Float =
+      if x < lightMin || x > lightMax || y < 0 || y >= Terrain.worldHeight || z < lightMin || z > lightMax then 0f
+      else (blockLight(lightIndex(x, y, z)).toInt & 0xFF).toFloat / 14f
+    def aoFactor(sideA: Boolean, sideB: Boolean, corner: Boolean): Float =
+      val level = if sideA && sideB then 3 else (if sideA then 1 else 0) + (if sideB then 1 else 0) + (if corner then 1 else 0)
+      level match
+        case 0 => 1.00f
+        case 1 => 0.82f
+        case 2 => 0.68f
+        case _ => 0.54f
+    def signAt(value: Float, origin: Float): Int = if value <= origin + 0.001f then -1 else 1
     for lx <- 0 until Terrain.chunkSize; lz <- 0 until Terrain.chunkSize; y <- 0 until Terrain.worldHeight do
       val block = snapshotBlock(lx, y, lz)
       if block != Block.Air then
@@ -267,14 +387,69 @@ final class Chunk(val cx: Int, val cz: Int, atlas: TextureAtlas, gen: TerrainGen
           val sx = floor(baseX.toFloat + cfx).toInt
           val sz = floor(baseZ.toFloat + cfz).toInt
           gen.grassTintAt(sx, sz, y)
+        def cornerAo(kind: FaceKind, cfx: Float, cfy: Float, cfz: Float): Float =
+          if !smoothLightingEnabled || block == Block.Water || block.translucent then 1f
+          else
+            val sx = signAt(cfx, fx)
+            val sy = signAt(cfy, fy)
+            val sz = signAt(cfz, fz)
+            val (sideA, sideB, corner) = kind match
+              case FaceKind.Top =>
+                (occludesLight(localBlock(lx + sx, y + 1, lz)), occludesLight(localBlock(lx, y + 1, lz + sz)), occludesLight(localBlock(lx + sx, y + 1, lz + sz)))
+              case FaceKind.Bottom =>
+                (occludesLight(localBlock(lx + sx, y - 1, lz)), occludesLight(localBlock(lx, y - 1, lz + sz)), occludesLight(localBlock(lx + sx, y - 1, lz + sz)))
+              case FaceKind.East =>
+                (occludesLight(localBlock(lx + 1, y + sy, lz)), occludesLight(localBlock(lx + 1, y, lz + sz)), occludesLight(localBlock(lx + 1, y + sy, lz + sz)))
+              case FaceKind.West =>
+                (occludesLight(localBlock(lx - 1, y + sy, lz)), occludesLight(localBlock(lx - 1, y, lz + sz)), occludesLight(localBlock(lx - 1, y + sy, lz + sz)))
+              case FaceKind.South =>
+                (occludesLight(localBlock(lx + sx, y, lz + 1)), occludesLight(localBlock(lx, y + sy, lz + 1)), occludesLight(localBlock(lx + sx, y + sy, lz + 1)))
+              case FaceKind.North =>
+                (occludesLight(localBlock(lx + sx, y, lz - 1)), occludesLight(localBlock(lx, y + sy, lz - 1)), occludesLight(localBlock(lx + sx, y + sy, lz - 1)))
+            aoFactor(sideA, sideB, corner)
+        def cornerSkyLight(kind: FaceKind, cfx: Float, cfy: Float, cfz: Float): Float =
+          if block == Block.Water || block.translucent then 1f
+          else
+            val probeY = (floor(cfy).toInt + 1).max(0).min(Terrain.worldHeight)
+            val ix = floor(cfx).toInt
+            val iz = floor(cfz).toInt
+            val sky = softSky(ix, probeY, iz)
+            // Minecraft-style skylight should not crush caves to black; AO and face shade
+            // still provide contact shadow while this supplies broad soft sky exposure.
+            val minSky = kind match
+              case FaceKind.Top => 0.34f
+              case FaceKind.Bottom => 0.24f
+              case _ => 0.30f
+            val eased = sky * sky * (3f - 2f * sky)
+            minSky + (1f - minSky) * eased
+        def cornerBlockLight(cfx: Float, cfy: Float, cfz: Float): Float =
+          val ix = floor(cfx).toInt
+          val iy = floor(cfy).toInt
+          val iz = floor(cfz).toInt
+          val fxCorner = abs(cfx - round(cfx).toFloat) < 0.001f
+          val fyCorner = abs(cfy - round(cfy).toFloat) < 0.001f
+          val fzCorner = abs(cfz - round(cfz).toFloat) < 0.001f
+          val x0 = if fxCorner then ix - 1 else ix; val x1 = ix
+          val y0 = if fyCorner then iy - 1 else iy; val y1 = iy
+          val z0 = if fzCorner then iz - 1 else iz; val z1 = iz
+          val sum =
+            blockLightAt(x0, y0, z0) + blockLightAt(x1, y0, z0) + blockLightAt(x0, y1, z0) + blockLightAt(x1, y1, z0) +
+            blockLightAt(x0, y0, z1) + blockLightAt(x1, y0, z1) + blockLightAt(x0, y1, z1) + blockLightAt(x1, y1, z1)
+          sum * 0.125f
         def addFace(shade: Float, corners: Array[(Float, Float, Float, Float, Float)], kind: FaceKind, tintGrass: Boolean = false): Unit =
           val buf = if block.cutout then cutoutVerts
             else if block == Block.Water then waterVerts
             else if block.translucent then translucentVerts
             else opaqueVerts
           val light = if block == Block.Water then (0.55f + yNorm * 0.22f) * (0.82f + shade * 0.18f) else shade * ambient
-          val idx = Array(0, 1, 2, 2, 3, 0)
-          for i <- idx do
+          val c0 = corners(0); val c1 = corners(1); val c2 = corners(2); val c3 = corners(3)
+          val ao0 = cornerAo(kind, c0._1, c0._2, c0._3); val ao1 = cornerAo(kind, c1._1, c1._2, c1._3)
+          val ao2 = cornerAo(kind, c2._1, c2._2, c2._3); val ao3 = cornerAo(kind, c3._1, c3._2, c3._3)
+          val sky0 = cornerSkyLight(kind, c0._1, c0._2, c0._3); val sky1 = cornerSkyLight(kind, c1._1, c1._2, c1._3)
+          val sky2 = cornerSkyLight(kind, c2._1, c2._2, c2._3); val sky3 = cornerSkyLight(kind, c3._1, c3._2, c3._3)
+          val bl0 = cornerBlockLight(c0._1, c0._2, c0._3); val bl1 = cornerBlockLight(c1._1, c1._2, c1._3)
+          val bl2 = cornerBlockLight(c2._1, c2._2, c2._3); val bl3 = cornerBlockLight(c3._1, c3._2, c3._3)
+          def emit(i: Int): Unit =
             val (cfx, cfy, cfz, tu, tv) = corners(i)
             val (u, v) = atlasRef.uv(block, kind, tu, tv)
             val (tintR, tintG, tintB) = if tintGrass then grassCornerTint(cfx, cfz) else (1f, 1f, 1f)
@@ -283,8 +458,17 @@ final class Chunk(val cx: Int, val cz: Int, atlas: TextureAtlas, gen: TerrainGen
               case Block.Glass => 0.68f
               case _ => 1f
             buf += cfx; buf += cfy; buf += cfz
-            buf += (light * tintR).min(1.35f); buf += (light * tintG).min(1.35f); buf += (light * tintB).min(1.35f); buf += alpha
+            val ao = if i == 0 then ao0 else if i == 1 then ao1 else if i == 2 then ao2 else ao3
+            val sky = if i == 0 then sky0 else if i == 1 then sky1 else if i == 2 then sky2 else sky3
+            val blockGlow = if i == 0 then bl0 else if i == 1 then bl1 else if i == 2 then bl2 else bl3
+            val lit = light * ao * sky
+            val warm = blockGlow * blockGlow
+            buf += (lit * tintR + warm * 0.82f).min(1.35f); buf += (lit * tintG + warm * 0.46f).min(1.35f); buf += (lit * tintB + warm * 0.18f).min(1.35f); buf += alpha
             buf += u; buf += v
+          if smoothLightingEnabled && ao0 + ao2 > ao1 + ao3 then
+            emit(0); emit(1); emit(3); emit(1); emit(2); emit(3)
+          else
+            emit(0); emit(1); emit(2); emit(2); emit(3); emit(0)
         def addGrassSide(shade: Float, corners: Array[(Float, Float, Float, Float, Float)], kind: FaceKind): Unit =
           val bottomA = corners(0)
           val bottomB = corners(1)
@@ -303,7 +487,13 @@ final class Chunk(val cx: Int, val cz: Int, atlas: TextureAtlas, gen: TerrainGen
           val bandB = band(bottomB, topB)
           addFace(shade, Array(bottomA, bottomB, bandB, bandA), kind, false)
           addFace(shade, Array(bandA, bandB, topB, topA), kind, true)
-        if block == Block.Water then
+        if block == Block.Torch then
+          val inset = 0.18f
+          val low = fy + 0.04f
+          val high = fy + 0.92f
+          addFace(1.00f, Array((fx + inset, low, fz + inset, 0f, 1f), (fx + 1f - inset, low, fz + 1f - inset, 1f, 1f), (fx + 1f - inset, high, fz + 1f - inset, 1f, 0f), (fx + inset, high, fz + inset, 0f, 0f)), FaceKind.North)
+          addFace(1.00f, Array((fx + 1f - inset, low, fz + inset, 0f, 1f), (fx + inset, low, fz + 1f - inset, 1f, 1f), (fx + inset, high, fz + 1f - inset, 1f, 0f), (fx + 1f - inset, high, fz + inset, 0f, 0f)), FaceKind.South)
+        else if block == Block.Water then
           // Render dynamic water as actual block-volume water with internal culling.
           // Neighboring water cells hide shared faces; exposed streams and waterfalls show
           // full-height sides like Minecraft-style flowing water.
@@ -497,5 +687,3 @@ final class Chunk(val cx: Int, val cz: Int, atlas: TextureAtlas, gen: TerrainGen
       glTexCoordPointer(2, GL_FLOAT, stride, 28L)
       glDrawArrays(GL_TRIANGLES, 0, count)
       glPopMatrix()
-
-// Multiplayer networking
