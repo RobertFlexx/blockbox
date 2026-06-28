@@ -9,12 +9,16 @@ import scala.math.*
 
 final class TextureAtlas(texturePack: TexturePack):
   val tileSize = 16
+  private val tileBorder = 1
+  private val tileStep = tileSize + tileBorder * 2
   private val faceCount = FaceKind.values.length
   private val columns = 16
   private val tileCount = Block.values.length * faceCount
   private val rows = (tileCount + columns - 1) / columns
-  private val textureWidth = columns * tileSize
-  private val textureHeight = rows * tileSize
+  private val usedTextureWidth = columns * tileStep
+  private val usedTextureHeight = rows * tileStep
+  private val textureWidth = nextPowerOfTwo(usedTextureWidth)
+  private val textureHeight = nextPowerOfTwo(usedTextureHeight)
   private var textureId = 0
   private val imageCache = scala.collection.mutable.HashMap.empty[String, Option[BufferedImage]]
 
@@ -30,30 +34,41 @@ final class TextureAtlas(texturePack: TexturePack):
     val tile = block.ordinal * faceCount + face.ordinal
     val tx = tile % columns
     val ty = tile / columns
-    val inset = 0.5f
-    val u0 = (tx * tileSize + inset) / textureWidth
-    val v0 = (ty * tileSize + inset) / textureHeight
-    val u1 = ((tx + 1) * tileSize - inset) / textureWidth
-    val v1 = ((ty + 1) * tileSize - inset) / textureHeight
+    val x0 = tx * tileStep + tileBorder
+    val y0 = ty * tileStep + tileBorder
+    val u0 = x0.toFloat / textureWidth.toFloat
+    val v0 = y0.toFloat / textureHeight.toFloat
+    val u1 = (x0 + tileSize).toFloat / textureWidth.toFloat
+    val v1 = (y0 + tileSize).toFloat / textureHeight.toFloat
     (u0 + (u1 - u0) * u, v0 + (v1 - v0) * v)
+
+  private def nextPowerOfTwo(value: Int): Int =
+    var n = 1
+    while n < value do n <<= 1
+    n
 
   private def build(): Unit =
     val pixels = BufferUtils.createByteBuffer(textureWidth * textureHeight * 4)
     for tile <- 0 until tileCount do
       val block = Block.values(tile / faceCount)
       val face = FaceKind.values(tile % faceCount)
-      val ox = (tile % columns) * tileSize
-      val oy = (tile / columns) * tileSize
+      val ox = (tile % columns) * tileStep
+      val oy = (tile / columns) * tileStep
       val source = imageFor(block, face)
+      val tilePixels = Array.ofDim[(Int, Int, Int, Int)](tileSize, tileSize)
       for py <- 0 until tileSize; px <- 0 until tileSize do
-        val (r, g, b, a) = source match
+        tilePixels(py)(px) = source match
           case Some(img) => imagePixel(img, px, py)
           case None => pixel(block, face, px, py)
-        val index = ((oy + py) * textureWidth + (ox + px)) * 4
-        pixels.put(index, r.toByte)
-        pixels.put(index + 1, g.toByte)
-        pixels.put(index + 2, b.toByte)
-        pixels.put(index + 3, a.toByte)
+      for ay <- 0 until tileStep; ax <- 0 until tileStep do
+        val sx = (ax - tileBorder).max(0).min(tileSize - 1)
+        val sy = (ay - tileBorder).max(0).min(tileSize - 1)
+        val (r, g, b, a) = tilePixels(sy)(sx)
+        val idx = ((oy + ay) * textureWidth + (ox + ax)) * 4
+        pixels.put(idx, r.toByte)
+        pixels.put(idx + 1, g.toByte)
+        pixels.put(idx + 2, b.toByte)
+        pixels.put(idx + 3, a.toByte)
     pixels.position(0)
 
     textureId = glGenTextures()
