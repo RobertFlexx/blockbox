@@ -328,7 +328,7 @@ final class Chunk(val cx: Int, val cz: Int, atlas: TextureAtlas, gen: TerrainGen
     def lightIndex(x: Int, y: Int, z: Int): Int =
       (y * lightSize + (z - lightMin)) * lightSize + (x - lightMin)
     def lightSourceLevel(b: Block): Int = b match
-      case Block.Torch => 14
+      case Block.Torch => 15
       case Block.FurnaceLit => 13
       case _ => 0
     var head = 0
@@ -488,11 +488,100 @@ final class Chunk(val cx: Int, val cz: Int, atlas: TextureAtlas, gen: TerrainGen
           addFace(shade, Array(bottomA, bottomB, bandB, bandA), kind, false)
           addFace(shade, Array(bandA, bandB, topB, topA), kind, true)
         if block == Block.Torch then
-          val inset = 0.18f
-          val low = fy + 0.04f
-          val high = fy + 0.92f
-          addFace(1.00f, Array((fx + inset, low, fz + inset, 0f, 1f), (fx + 1f - inset, low, fz + 1f - inset, 1f, 1f), (fx + 1f - inset, high, fz + 1f - inset, 1f, 0f), (fx + inset, high, fz + inset, 0f, 0f)), FaceKind.North)
-          addFace(1.00f, Array((fx + 1f - inset, low, fz + inset, 0f, 1f), (fx + inset, low, fz + 1f - inset, 1f, 1f), (fx + inset, high, fz + 1f - inset, 1f, 0f), (fx + 1f - inset, high, fz + inset, 0f, 0f)), FaceKind.South)
+          // High-quality 3D torch model with wall/floor placement like Minecraft.
+          val torchKind = FaceKind.North
+          // UV for stick region of the 16x16 texture
+          val stickU0 = 6f / 16f; val stickU1 = 9f / 16f
+          val stickVBot = 15f / 16f; val stickVTop = 5f / 16f
+          // UV for flame region
+          val flameU0 = 5f / 16f; val flameU1 = 10f / 16f
+          val flameVBot = 4f / 16f; val flameVTop = 0f
+          // Determine placement from neighbors (uses snapshot data, thread-safe)
+          val floorBelow = localBlock(lx, y - 1, lz).solid
+          val wallEast = localBlock(lx + 1, y, lz).solid
+          val wallWest = localBlock(lx - 1, y, lz).solid
+          val wallSouth = localBlock(lx, y, lz + 1).solid
+          val wallNorth = localBlock(lx, y, lz - 1).solid
+          // Emit a flame vertex with self-emissive warm glow
+          def emitFlame(cfx: Float, cfy: Float, cfz: Float, tu: Float, tv: Float): Unit =
+            val (u, v) = atlasRef.uv(Block.Torch, torchKind, tu, tv)
+            cutoutVerts += cfx; cutoutVerts += cfy; cutoutVerts += cfz
+            cutoutVerts += 2.0f; cutoutVerts += 1.3f; cutoutVerts += 0.35f; cutoutVerts += 1.0f
+            cutoutVerts += u; cutoutVerts += v
+          // Emit a flame quad (two triangles, emissive)
+          def flameQuad(c0: (Float,Float,Float,Float,Float), c1: (Float,Float,Float,Float,Float), c2: (Float,Float,Float,Float,Float), c3: (Float,Float,Float,Float,Float)): Unit =
+            emitFlame(c0._1, c0._2, c0._3, c0._4, c0._5)
+            emitFlame(c1._1, c1._2, c1._3, c1._4, c1._5)
+            emitFlame(c2._1, c2._2, c2._3, c2._4, c2._5)
+            emitFlame(c2._1, c2._2, c2._3, c2._4, c2._5)
+            emitFlame(c3._1, c3._2, c3._3, c3._4, c3._5)
+            emitFlame(c0._1, c0._2, c0._3, c0._4, c0._5)
+          if floorBelow then
+            // bullshit shit floor torch below
+            val cx = fx + 0.5f; val cz = fz + 0.5f
+            // Post: 4 vertical faces, thin (0.125 wide), from y=0.0625 to y=0.8125
+            val hw = 0.0625f
+            val pBot = fy + 0.0625f; val pTop = fy + 0.8125f
+            // North
+            addFace(1.0f, Array((cx + hw, pBot, cz - hw, stickU1, stickVBot), (cx - hw, pBot, cz - hw, stickU0, stickVBot), (cx - hw, pTop, cz - hw, stickU0, stickVTop), (cx + hw, pTop, cz - hw, stickU1, stickVTop)), torchKind)
+            // South
+            addFace(1.0f, Array((cx - hw, pBot, cz + hw, stickU0, stickVBot), (cx + hw, pBot, cz + hw, stickU1, stickVBot), (cx + hw, pTop, cz + hw, stickU1, stickVTop), (cx - hw, pTop, cz + hw, stickU0, stickVTop)), torchKind)
+            // West
+            addFace(1.0f, Array((cx - hw, pBot, cz + hw, stickU1, stickVBot), (cx - hw, pBot, cz - hw, stickU0, stickVBot), (cx - hw, pTop, cz - hw, stickU0, stickVTop), (cx - hw, pTop, cz + hw, stickU1, stickVTop)), torchKind)
+            // East
+            addFace(1.0f, Array((cx + hw, pBot, cz - hw, stickU0, stickVBot), (cx + hw, pBot, cz + hw, stickU1, stickVBot), (cx + hw, pTop, cz + hw, stickU1, stickVTop), (cx + hw, pTop, cz - hw, stickU0, stickVTop)), torchKind)
+            // Base: 4 slightly wider faces at the bottom
+            val bw = 0.09375f
+            addFace(1.0f, Array((cx + bw, fy, cz - bw, stickU1, stickVBot), (cx - bw, fy, cz - bw, stickU0, stickVBot), (cx - bw, pBot, cz - bw, stickU0, stickVTop), (cx + bw, pBot, cz - bw, stickU1, stickVTop)), torchKind)
+            addFace(1.0f, Array((cx - bw, fy, cz + bw, stickU0, stickVBot), (cx + bw, fy, cz + bw, stickU1, stickVBot), (cx + bw, pBot, cz + bw, stickU1, stickVTop), (cx - bw, pBot, cz + bw, stickU0, stickVTop)), torchKind)
+            addFace(1.0f, Array((cx - bw, fy, cz + bw, stickU1, stickVBot), (cx - bw, fy, cz - bw, stickU0, stickVBot), (cx - bw, pBot, cz - bw, stickU0, stickVTop), (cx - bw, pBot, cz + bw, stickU1, stickVTop)), torchKind)
+            addFace(1.0f, Array((cx + bw, fy, cz - bw, stickU0, stickVBot), (cx + bw, fy, cz + bw, stickU1, stickVBot), (cx + bw, pBot, cz + bw, stickU1, stickVTop), (cx + bw, pBot, cz - bw, stickU0, stickVTop)), torchKind)
+            // Base top cap
+            addFace(1.0f, Array((cx - bw, pBot, cz - bw, stickU0, stickVTop), (cx + bw, pBot, cz - bw, stickU1, stickVTop), (cx + bw, pBot, cz + bw, stickU1, stickVBot), (cx - bw, pBot, cz + bw, stickU0, stickVBot)), torchKind)
+            // Flame: 2 crossed quads with self-emissive colors at the top
+            val fw = 0.1875f; val fh = 0.25f
+            val fBot = fy + 0.75f; val fTop = fy + 1.0f
+            flameQuad((cx - fw, fBot, cz - fw, flameU0, flameVBot), (cx + fw, fBot, cz + fw, flameU1, flameVBot), (cx + fw, fTop, cz + fw, flameU1, flameVTop), (cx - fw, fTop, cz - fw, flameU0, flameVTop))
+            flameQuad((cx + fw, fBot, cz - fw, flameU0, flameVBot), (cx - fw, fBot, cz + fw, flameU1, flameVBot), (cx - fw, fTop, cz + fw, flameU1, flameVTop), (cx + fw, fTop, cz - fw, flameU0, flameVTop))
+          else
+            // bullshit really bad wall torch made in like 20 mins
+            // Determine wall direction: the post extends from the solid wall face into the block
+            val (wx, wz, wKind) =
+              if wallEast then (1f, 0f, FaceKind.West)
+              else if wallWest then (-1f, 0f, FaceKind.East)
+              else if wallSouth then (0f, 1f, FaceKind.North)
+              else (0f, -1f, FaceKind.South) // north or default
+            val mountX = fx + 0.5f + wx * 0.4375f
+            val mountZ = fz + 0.5f + wz * 0.4375f
+            val tipX = fx + 0.5f - wx * 0.1875f
+            val tipZ = fz + 0.5f - wz * 0.1875f
+            val postYBot = fy + 0.5625f; val postYTop = fy + 0.6875f
+            val postHW = 0.0625f // half-width perpendicular to post axis
+            // Post vertices: 4 long faces along the post axis + 2 end caps
+            // The post axis runs from (tipX, tipZ) to (mountX, mountZ)
+            // Perpendicular direction for the post's cross-section
+            val perpX = -wz; val perpZ = wx
+            val p1x = tipX + perpX * postHW; val p1z = tipZ + perpZ * postHW
+            val p2x = tipX - perpX * postHW; val p2z = tipZ - perpZ * postHW
+            val p3x = mountX + perpX * postHW; val p3z = mountZ + perpZ * postHW
+            val p4x = mountX - perpX * postHW; val p4z = mountZ - perpZ * postHW
+            // Side 1 (tip-to-mount, +perp side): long face
+            addFace(1.0f, Array((p3x, postYBot, p3z, stickU1, stickVBot), (p1x, postYBot, p1z, stickU0, stickVBot), (p1x, postYTop, p1z, stickU0, stickVTop), (p3x, postYTop, p3z, stickU1, stickVTop)), torchKind)
+            // Side 2 (mount-to-tip, -perp side): long face
+            addFace(1.0f, Array((p2x, postYBot, p2z, stickU0, stickVBot), (p4x, postYBot, p4z, stickU1, stickVBot), (p4x, postYTop, p4z, stickU1, stickVTop), (p2x, postYTop, p2z, stickU0, stickVTop)), torchKind)
+            // Top face (along post axis)
+            addFace(1.0f, Array((p1x, postYTop, p1z, stickU1, stickVTop), (p3x, postYTop, p3z, stickU0, stickVTop), (p4x, postYTop, p4z, stickU0, stickVBot), (p2x, postYTop, p2z, stickU1, stickVBot)), torchKind)
+            // Bottom face (along post axis)
+            addFace(1.0f, Array((p3x, postYBot, p3z, stickU0, stickVTop), (p1x, postYBot, p1z, stickU1, stickVTop), (p2x, postYBot, p2z, stickU1, stickVBot), (p4x, postYBot, p4z, stickU0, stickVBot)), torchKind)
+            // Tip face (small, at the flame end)
+            addFace(1.0f, Array((p2x, postYBot, p2z, stickU0, stickVBot), (p1x, postYBot, p1z, stickU1, stickVBot), (p1x, postYTop, p1z, stickU1, stickVTop), (p2x, postYTop, p2z, stickU0, stickVTop)), torchKind)
+            // Mount face (small, near wall) - use same UV mapping, hidden but rendered for correctness
+            addFace(1.0f, Array((p4x, postYBot, p4z, stickU1, stickVBot), (p3x, postYBot, p3z, stickU0, stickVBot), (p3x, postYTop, p3z, stickU0, stickVTop), (p4x, postYTop, p4z, stickU1, stickVTop)), torchKind)
+            // Flame crossed quads at the tip — same diagonal-XZ pattern as the floor torch
+            val fcX = tipX; val fcZ = tipZ; val fcY = fy + 0.625f
+            val fw2 = 0.1875f; val fh2 = 0.25f
+            flameQuad((fcX - fw2, fcY - fh2, fcZ - fw2, flameU0, flameVBot), (fcX + fw2, fcY - fh2, fcZ + fw2, flameU1, flameVBot), (fcX + fw2, fcY + fh2, fcZ + fw2, flameU1, flameVTop), (fcX - fw2, fcY + fh2, fcZ - fw2, flameU0, flameVTop))
+            flameQuad((fcX + fw2, fcY - fh2, fcZ - fw2, flameU0, flameVBot), (fcX - fw2, fcY - fh2, fcZ + fw2, flameU1, flameVBot), (fcX - fw2, fcY + fh2, fcZ + fw2, flameU1, flameVTop), (fcX + fw2, fcY + fh2, fcZ - fw2, flameU0, flameVTop))
         else if block == Block.Water then
           // Render dynamic water as actual block-volume water with internal culling.
           // Neighboring water cells hide shared faces; exposed streams and waterfalls show

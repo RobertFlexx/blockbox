@@ -339,12 +339,19 @@ final class TextureAtlas(texturePack: TexturePack, anisotropicFiltering: Boolean
           else (sbr, sbg, sbb, 255)
         case _ => (sbr, sbg, sbb, 255)
     case Block.Torch =>
+      val stick = x >= 6 && x <= 9 && y >= 5
       val flame = y < 5 && x >= 5 && x <= 10
       val core = flame && x >= 6 && x <= 9 && y >= 1 && y <= 3
-      val stick = x >= 6 && x <= 9 && y >= 5
-      if core then (255, 238, 120, 255)
-      else if flame then (240, 120 + noise(x, y, 2301) / 8, 28, 230)
-      else if stick then vary((126, 72, 32), 18, noise(x, y, 2302), 255)
+      val glow = y >= 0 && y <= 5 && x >= 4 && x <= 11
+      if core then (255, 252, 220, 255)
+      else if flame then
+        val flicker = (noise(x, y, 2301) / 5).toInt
+        (255 - flicker / 2, 172 - flicker / 3, 32 + flicker / 4, 245)
+      else if glow then (255, 180, 50, 70)
+      else if stick then
+        val grain = if noise(x, y, 2302) > 204 then -10 else 0
+        val shade = (noise(x, y, 2303) / 5).toInt
+        ((132 + grain + shade).max(90).min(155), (76 + grain / 2 + shade / 2).max(50).min(106), (34 + shade / 3).max(22).min(50), 255)
       else (0, 0, 0, 0)
     case Block.IronOre =>
       val ore = if noise(x, y, 1005) > 182 then (168, 120, 78) else (92, 70, 62)
