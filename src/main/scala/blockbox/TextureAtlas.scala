@@ -30,7 +30,7 @@ final class TextureAtlas(texturePack: TexturePack):
     val tile = block.ordinal * faceCount + face.ordinal
     val tx = tile % columns
     val ty = tile / columns
-    val inset = 0.001f
+    val inset = 0.5f
     val u0 = (tx * tileSize + inset) / textureWidth
     val v0 = (ty * tileSize + inset) / textureHeight
     val u1 = ((tx + 1) * tileSize - inset) / textureWidth
@@ -71,7 +71,7 @@ final class TextureAtlas(texturePack: TexturePack):
   private def textureNames(block: Block, face: FaceKind): List[String] = block match
     case Block.Grass =>
       face match
-        case FaceKind.Top => List("grass_top.png", "grass..png", "grass.png")
+        case FaceKind.Top => List("grass.png")
         case FaceKind.Bottom => List("dirt.png")
         case _ => List("grass_side.png")
     case Block.Dirt => List("dirt.png")
