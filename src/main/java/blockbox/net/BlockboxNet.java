@@ -9,6 +9,9 @@ public final class BlockboxNet {
   public static final int PROTOCOL_VERSION = 2;
   public static final int MAX_LINE_LENGTH = 8192;
   public static final int MAX_PACKET_PARTS = 64;
+  public static final int MAX_FIELD_LENGTH = MAX_LINE_LENGTH;
+  public static final int MAX_NAME_LENGTH = 16;
+  public static final int MAX_FLOAT_TEXT_LENGTH = 64;
   public static final int CONNECT_TIMEOUT_MS = 10_000;
   public static final int JOIN_TIMEOUT_MS = 120_000;
   public static final int MAX_PLAYERS = 32;
@@ -48,6 +51,7 @@ public final class BlockboxNet {
     public String part(int index) { return parts[index]; }
     public boolean is(String packetType) { return packetType != null && packetType.equals(type()); }
     public void require(int count) { requireParts(parts, count, type()); }
+    public void requireExact(int count) { requireExactParts(parts, count, type()); }
   }
 
   public static final class HelloPacket {
@@ -158,18 +162,39 @@ public final class BlockboxNet {
   }
 
   public static String readProtocolLine(BufferedReader in) throws IOException {
-    String line = in.readLine();
-    if (line != null && line.length() > MAX_LINE_LENGTH) {
-      throw new IOException("Protocol line too long");
+    if (in == null) throw new IOException("missing protocol reader");
+    StringBuilder line = new StringBuilder(Math.min(256, MAX_LINE_LENGTH));
+    while (true) {
+      int ch = in.read();
+      if (ch < 0) {
+        if (line.length() == 0) return null;
+        break;
+      }
+      if (ch == '\n') break;
+      if (ch == '\r') continue;
+      if (line.length() >= MAX_LINE_LENGTH) throw new IOException("Protocol line too long");
+      line.append((char) ch);
     }
-    if (line != null && !isSafeProtocolLine(line)) {
+    String result = line.toString();
+    if (!isSafeProtocolLine(result)) {
       throw new IOException("Protocol line contains invalid control characters");
     }
-    return line;
+    return result;
   }
 
   public static String[] split(String line) {
-    return (line == null ? "" : line).split("\\|", -1);
+    String value = line == null ? "" : line;
+    String[] out = new String[Math.min(MAX_PACKET_PARTS + 1, Math.max(1, value.length() + 1))];
+    int count = 0;
+    int start = 0;
+    for (int i = 0; i <= value.length(); i++) {
+      if (i == value.length() || value.charAt(i) == '|') {
+        if (count == out.length) out = Arrays.copyOf(out, out.length + 8);
+        out[count++] = value.substring(start, i);
+        start = i + 1;
+      }
+    }
+    return Arrays.copyOf(out, count);
   }
 
   public static boolean hasPrefix(String line, String prefix) {
@@ -182,10 +207,16 @@ public final class BlockboxNet {
     }
   }
 
+  public static void requireExactParts(String[] parts, int count, String packetName) {
+    if (parts == null || parts.length != count) {
+      throw new IllegalArgumentException(packetName + " needs exactly " + count + " fields");
+    }
+  }
+
   public static String safeName(String value) {
     String input = value == null ? "" : unescape(value).trim();
-    StringBuilder out = new StringBuilder(16);
-    for (int i = 0; i < input.length() && out.length() < 16; i++) {
+    StringBuilder out = new StringBuilder(MAX_NAME_LENGTH);
+    for (int i = 0; i < input.length() && out.length() < MAX_NAME_LENGTH; i++) {
       char ch = input.charAt(i);
       if (Character.isLetterOrDigit(ch) || ch == '_' || ch == '-') {
         out.append(ch);
@@ -237,13 +268,20 @@ public final class BlockboxNet {
 
   public static float parseFloat(String value) {
     if (value == null) throw new NumberFormatException("null");
-    float parsed = Float.parseFloat(value.replace(',', '.'));
+    String clean = value.trim();
+    if (clean.isEmpty()) throw new NumberFormatException("empty float");
+    if (clean.length() > MAX_FLOAT_TEXT_LENGTH) throw new NumberFormatException("float text too long");
+    float parsed = Float.parseFloat(clean.replace(',', '.'));
     if (!Float.isFinite(parsed)) throw new NumberFormatException("non-finite float: " + value);
     return parsed;
   }
 
   public static int parseInt(String value, int min, int max) {
-    int parsed = Integer.parseInt(value);
+    if (min > max) throw new IllegalArgumentException("invalid integer range");
+    if (value == null) throw new NumberFormatException("null");
+    String clean = value.trim();
+    if (clean.isEmpty() || clean.length() > 16) throw new NumberFormatException("invalid integer text");
+    int parsed = Integer.parseInt(clean);
     if (parsed < min || parsed > max) {
       throw new NumberFormatException(String.format(Locale.ROOT, "out of range: %d", parsed));
     }
@@ -251,7 +289,10 @@ public final class BlockboxNet {
   }
 
   public static long parseLong(String value) {
-    return Long.parseLong(value);
+    if (value == null) throw new NumberFormatException("null");
+    String clean = value.trim();
+    if (clean.isEmpty() || clean.length() > 32) throw new NumberFormatException("invalid long text");
+    return Long.parseLong(clean);
   }
 
   public static HelloPacket parseHello(Packet packet) {
@@ -268,6 +309,7 @@ public final class BlockboxNet {
 
   public static BlockPacket parseBlock(Packet packet, int worldHeight) {
     requireType(packet, BLOC);
+    if (worldHeight <= 0) throw new IllegalArgumentException("worldHeight must be positive");
     packet.require(5);
     int x = parseInt(packet.part(1), Integer.MIN_VALUE, Integer.MAX_VALUE);
     int y = parseInt(packet.part(2), 0, worldHeight - 1);
@@ -286,7 +328,8 @@ public final class BlockboxNet {
     float z = parseFloat(packet.part(4));
     float yaw = parseFloat(packet.part(5));
     float pitch = parseFloat(packet.part(6));
-    int color = packet.size() >= 8 ? Math.floorMod(parseInt(packet.part(7), Integer.MIN_VALUE, Integer.MAX_VALUE), colorCount) : 0;
+    int colors = Math.max(1, colorCount);
+    int color = packet.size() >= 8 ? Math.floorMod(parseInt(packet.part(7), Integer.MIN_VALUE, Integer.MAX_VALUE), colors) : 0;
     return new PositionPacket(name, x, y, z, yaw, pitch, color);
   }
 
@@ -352,6 +395,7 @@ public final class BlockboxNet {
       if (fields.length + 1 > MAX_PACKET_PARTS) throw new IllegalArgumentException("too many packet fields");
       for (String field : fields) {
         String value = field == null ? "" : field;
+        if (value.length() > MAX_FIELD_LENGTH) throw new IllegalArgumentException("packet field too long");
         if (!isSafeField(value)) throw new IllegalArgumentException("invalid packet field");
         out.append('|').append(value);
       }
@@ -366,6 +410,7 @@ public final class BlockboxNet {
   }
 
   private static boolean isSafeProtocolLine(String line) {
+    if (line == null) return false;
     if (line.length() > MAX_LINE_LENGTH) return false;
     for (int i = 0; i < line.length(); i++) {
       char ch = line.charAt(i);

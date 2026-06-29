@@ -9,6 +9,7 @@ package blockbox
 
 import blockbox.net.BlockboxNet
 import blockbox.io.BlockboxFiles
+import blockbox.io.BlockboxSaveFiles
 import org.lwjgl.BufferUtils
 import org.lwjgl.glfw.GLFW.*
 import org.lwjgl.glfw.GLFWErrorCallback
@@ -1686,13 +1687,9 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
     if !canUseLocalChunkSaves then return
     try
       val dir = currentWorldDir
-      BlockboxFiles.ensureDirectory(dir.toPath)
-      val chunksDir = new java.io.File(dir, "chunks")
-      BlockboxFiles.ensureDirectory(chunksDir.toPath)
-      val file = new java.io.File(dir, "world.dat")
+      val prepared = BlockboxSaveFiles.prepareWorldForSave(dir.toPath)
       val chunksNeedingSave = dirtyChunksForSave.toSet
-      BlockboxFiles.writeAtomic(file.toPath, out0 =>
-        val meta = new java.io.DataOutputStream(new java.io.BufferedOutputStream(out0))
+      BlockboxSaveFiles.writeWorldDataAtomic(prepared.worldDirectory(), meta =>
         meta.writeLong(worldSeed)
         meta.writeFloat(camera.x); meta.writeFloat(camera.y); meta.writeFloat(camera.z)
         meta.writeFloat(yaw); meta.writeFloat(pitch)
@@ -1736,8 +1733,7 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
   private def loadWorldDataFromDir(worldDir: java.io.File): Boolean =
     try
       worldName = worldDir.getName
-      val meta = new java.io.DataInputStream(new java.io.BufferedInputStream(new java.io.FileInputStream(new java.io.File(worldDir, "world.dat"))))
-      try
+      BlockboxSaveFiles.readWorldData(worldDir.toPath, meta =>
         worldSeed = meta.readLong()
         val x = meta.readFloat(); val y = meta.readFloat(); val z = meta.readFloat()
         camera = Vec3(x, y, z)
@@ -1754,7 +1750,7 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
           val cx = meta.readInt(); val cz = meta.readInt()
           loadChunkIfSaved(cx, cz)
         readWorldExtras(meta)
-      finally meta.close()
+      )
       true
     catch
       case e: Exception =>
@@ -3612,7 +3608,10 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
     val cx = framebufferWidth / 2f; val h = framebufferHeight.toFloat; val s = uiScale
     val pw = (420f * s).min(framebufferWidth * 0.80f); val ph = (if multiplayerMode then 300f * s else 275f * s).min(h * 0.82f); val px = cx - pw / 2f; val py = h / 2f - ph / 2f
     drawPanel(px, py, pw, ph)
-    centeredText(cx, py + 34 * s, if multiplayerMode then "MULTIPLAYER" else "PAUSED", 1f, 0.95f, 0.55f, if multiplayerMode then 2.05f * s else 2.6f * s)
+    val titleText = if multiplayerMode then "MULTIPLAYER" else "PAUSED"
+    val titleScale = if multiplayerMode then 2.05f * s else 2.6f * s
+    val titleX = if multiplayerMode then cx else cx + ((6f * titleScale).max(5f) * titleScale) / 2f
+    centeredText(titleX, py + 34 * s, titleText, 1f, 0.95f, 0.55f, titleScale)
     if multiplayerMode then centeredTextFit(cx, py + 60f * s, "Client-side pause - server keeps running", 0.68f, 0.78f, 0.95f, 0.72f * s, pw - 70f * s)
     rect(px + 40 * s, py + 76 * s, pw - 80 * s, 1, 0.30f, 0.30f, 0.35f, 0.30f)
     val bw = (320f * s).min(pw - 72f * s); val bh = (40f * s).min(ph / 6f).max(30f); val bx = cx - bw / 2f
@@ -4537,7 +4536,7 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
   private def loadChunkIfSaved(cx: Int, cz: Int): Boolean =
     if !canUseLocalChunkSaves then return false
     val chunksDir = currentChunksDir
-    val file = new java.io.File(chunksDir, s"chunk_${cx}_${cz}.dat")
+    val file = BlockboxSaveFiles.chunkFile(chunksDir.toPath, cx, cz).toFile
     if file.exists() then
       try
         val emptyBlocks = new Array[Byte](Terrain.chunkSize * Terrain.worldHeight * Terrain.chunkSize)
@@ -4551,7 +4550,7 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
       catch
         case e: Exception =>
           System.err.println(s"Corrupt chunk ignored $cx,$cz: $e")
-          try file.renameTo(new java.io.File(chunksDir, s"chunk_${cx}_${cz}.dat.bad")) catch case _: Exception => ()
+          try file.renameTo(new java.io.File(chunksDir, BlockboxSaveFiles.chunkFileName(cx, cz) + ".bad")) catch case _: Exception => ()
           chunks -= ((cx, cz))
           false
     else

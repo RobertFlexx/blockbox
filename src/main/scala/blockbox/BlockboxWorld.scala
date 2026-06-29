@@ -1,6 +1,8 @@
 package blockbox
 
-import blockbox.io.BlockboxFiles
+import blockbox.io.BlockboxSaveFiles
+
+import scala.jdk.CollectionConverters.*
 
 object BlockboxWorld:
   private val NonZeroRandomFallback = 0x6a09e667f3bcc909L
@@ -42,38 +44,21 @@ object BlockboxWorld:
     "World-" + java.lang.Long.toUnsignedString(seed, 36).toUpperCase
 
   def sanitizeWorldName(raw: String): String =
-    val cleaned = Option(raw).getOrElse("").trim
-      .map(ch => if ch.isLetterOrDigit || ch == ' ' || ch == '_' || ch == '-' then ch else '_')
-      .mkString
-      .replaceAll("\\s+", " ")
-      .take(40)
-    if cleaned.nonEmpty then cleaned else "New World"
+    BlockboxSaveFiles.sanitizeWorldName(raw)
 
-  def worldsRootDir: java.io.File = java.io.File("worlds")
+  def worldsRootDir: java.io.File = BlockboxSaveFiles.defaultWorldsRoot().toFile
 
   def currentWorldDir(worldName: String): java.io.File =
-    java.io.File(worldsRootDir, worldName)
+    BlockboxSaveFiles.worldDirectory(worldsRootDir.toPath, worldName).toFile
 
   def currentChunksDir(worldName: String): java.io.File =
-    java.io.File(currentWorldDir(worldName), "chunks")
+    BlockboxSaveFiles.chunksDirectory(currentWorldDir(worldName).toPath).toFile
 
   def worldSaveDirs(root: java.io.File = worldsRootDir): List[java.io.File] =
-    val files = Option(root.listFiles()).getOrElse(Array.empty[java.io.File])
-    files.filter(d => d.isDirectory && java.io.File(d, "world.dat").isFile).toList.sortWith((a, b) => a.lastModified() > b.lastModified())
+    BlockboxSaveFiles.listWorldSaves(root.toPath).asScala.toList.map(_.directory().toFile)
 
   def uniqueWorldFolderName(raw: String): String =
-    val base = sanitizeWorldName(raw)
-    var candidate = base
-    var n = 2
-    while java.io.File(worldsRootDir, candidate).exists() do
-      candidate = s"$base ($n)"
-      n += 1
-    candidate
+    BlockboxSaveFiles.uniqueWorldName(worldsRootDir.toPath, raw)
 
   def writeWorldIndex(root: java.io.File = worldsRootDir): Unit =
-    BlockboxFiles.ensureDirectory(root.toPath)
-    val text = StringBuilder()
-    worldSaveDirs(root).foreach { d =>
-      text.append(d.getName).append('|').append(java.io.File(d, "world.dat").lastModified().toString).append('\n')
-    }
-    BlockboxFiles.writeTextAtomic(java.io.File(root, "index.txt").toPath, text.toString)
+    BlockboxSaveFiles.writeWorldIndex(root.toPath)

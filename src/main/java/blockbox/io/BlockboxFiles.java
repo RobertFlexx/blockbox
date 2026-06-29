@@ -3,10 +3,12 @@ package blockbox.io;
 import java.io.BufferedInputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.FileVisitResult;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.SimpleFileVisitor;
 import java.nio.file.StandardCopyOption;
@@ -29,13 +31,21 @@ public final class BlockboxFiles {
 
   public static Path ensureDirectory(Path dir) throws IOException {
     Objects.requireNonNull(dir, "dir");
-    return Files.createDirectories(dir);
+    Path normalized = dir.toAbsolutePath().normalize();
+    Files.createDirectories(normalized);
+    if (!Files.isDirectory(normalized)) {
+      throw new IOException("not a directory: " + normalized);
+    }
+    return normalized;
   }
 
   public static Path safeChild(Path root, String child) throws IOException {
     Objects.requireNonNull(root, "root");
     String clean = child == null ? "" : child.replace('\\', '/');
     if (clean.isBlank() || clean.startsWith("/") || clean.contains("\u0000")) {
+      throw new IOException("unsafe path: " + clean);
+    }
+    if (Path.of(clean).isAbsolute()) {
       throw new IOException("unsafe path: " + clean);
     }
     Path normalizedRoot = root.toAbsolutePath().normalize();
@@ -47,9 +57,10 @@ public final class BlockboxFiles {
   }
 
   public static String safeName(String value, String fallback, int maxLength) {
+    int limit = Math.max(1, maxLength);
     String input = value == null ? "" : value.trim();
-    StringBuilder out = new StringBuilder(Math.max(8, Math.min(64, maxLength)));
-    for (int i = 0; i < input.length() && out.length() < maxLength; i++) {
+    StringBuilder out = new StringBuilder(Math.max(8, Math.min(64, limit)));
+    for (int i = 0; i < input.length() && out.length() < limit; i++) {
       char ch = input.charAt(i);
       if (Character.isLetterOrDigit(ch) || ch == '_' || ch == '-' || ch == '.' || ch == ' ') out.append(ch);
     }
@@ -67,6 +78,7 @@ public final class BlockboxFiles {
 
   public static String readText(Path file, long maxBytes) throws IOException {
     Objects.requireNonNull(file, "file");
+    if (maxBytes < 0L) throw new IllegalArgumentException("maxBytes must be non-negative");
     if (!Files.isRegularFile(file)) throw new IOException("not a regular file: " + file);
     long size = Files.size(file);
     if (size > maxBytes) throw new IOException("file too large: " + file + " (" + size + " bytes)");
@@ -89,7 +101,8 @@ public final class BlockboxFiles {
     Objects.requireNonNull(writer, "writer");
     Path target = file.toAbsolutePath().normalize();
     Path parent = target.getParent();
-    if (parent != null) Files.createDirectories(parent);
+    if (Files.isDirectory(target)) throw new IOException("target is a directory: " + target);
+    if (parent != null) ensureDirectory(parent);
     String prefix = target.getFileName() == null ? "bbx" : target.getFileName().toString();
     if (prefix.length() < 3) prefix = "bbx" + prefix;
     Path tmp = parent == null ? Files.createTempFile(prefix, ".tmp") : Files.createTempFile(parent, prefix, ".tmp");
@@ -100,6 +113,8 @@ public final class BlockboxFiles {
           writer.accept(out);
         } catch (UncheckedIo e) {
           throw e.cause;
+        } catch (UncheckedIOException e) {
+          throw e.getCause();
         }
       }
       moveReplace(tmp, target);
@@ -125,6 +140,8 @@ public final class BlockboxFiles {
   }
 
   public static String sha256File(Path file) throws IOException {
+    Objects.requireNonNull(file, "file");
+    if (!Files.isRegularFile(file)) throw new IOException("not a regular file: " + file);
     MessageDigest md = sha256Digest();
     byte[] buffer = new byte[HASH_BUFFER_BYTES];
     try (InputStream in = new BufferedInputStream(Files.newInputStream(file))) {
@@ -137,6 +154,7 @@ public final class BlockboxFiles {
   }
 
   public static String sha256Tree(Path root) throws IOException {
+    Objects.requireNonNull(root, "root");
     Path normalized = root.toAbsolutePath().normalize();
     if (Files.isRegularFile(normalized)) return sha256File(normalized);
     MessageDigest md = sha256Digest();
@@ -162,7 +180,8 @@ public final class BlockboxFiles {
 
   public static void deleteRecursive(Path root) throws IOException {
     if (root == null || !Files.exists(root)) return;
-    Files.walkFileTree(root, new SimpleFileVisitor<>() {
+    Path normalized = root.toAbsolutePath().normalize();
+    Files.walkFileTree(normalized, new SimpleFileVisitor<>() {
       @Override public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) throws IOException {
         Files.deleteIfExists(file);
         return FileVisitResult.CONTINUE;
@@ -177,24 +196,44 @@ public final class BlockboxFiles {
   }
 
   public static void copyRecursive(Path source, Path target) throws IOException {
-    if (Files.isDirectory(source)) {
-      Files.walkFileTree(source, new SimpleFileVisitor<>() {
+    Objects.requireNonNull(source, "source");
+    Objects.requireNonNull(target, "target");
+    Path src = source.toAbsolutePath().normalize();
+    Path dst = target.toAbsolutePath().normalize();
+    if (!Files.exists(src, LinkOption.NOFOLLOW_LINKS)) throw new IOException("source does not exist: " + src);
+    if (Files.isSymbolicLink(src)) throw new IOException("refusing to copy symbolic link: " + src);
+    if (Files.isDirectory(src, LinkOption.NOFOLLOW_LINKS)) {
+      if (dst.startsWith(src)) throw new IOException("target cannot be inside source: " + dst);
+      Files.walkFileTree(src, new SimpleFileVisitor<>() {
         @Override public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs) throws IOException {
-          Files.createDirectories(target.resolve(source.relativize(dir).toString()));
+          if (Files.isSymbolicLink(dir)) throw new IOException("refusing to copy symbolic link: " + dir);
+          Path out = resolveCopyTarget(src, dst, dir);
+          ensureDirectory(out);
           return FileVisitResult.CONTINUE;
         }
 
         @Override public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) throws IOException {
-          Path out = target.resolve(source.relativize(file).toString());
-          Files.createDirectories(out.getParent());
-          Files.copy(file, out, StandardCopyOption.REPLACE_EXISTING);
+          if (!attrs.isRegularFile() || Files.isSymbolicLink(file)) throw new IOException("refusing to copy non-regular file: " + file);
+          Path out = resolveCopyTarget(src, dst, file);
+          Path parent = out.getParent();
+          if (parent != null) ensureDirectory(parent);
+          Files.copy(file, out, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.COPY_ATTRIBUTES, LinkOption.NOFOLLOW_LINKS);
           return FileVisitResult.CONTINUE;
         }
       });
     } else {
-      Files.createDirectories(target.getParent());
-      Files.copy(source, target, StandardCopyOption.REPLACE_EXISTING);
+      if (!Files.isRegularFile(src, LinkOption.NOFOLLOW_LINKS)) throw new IOException("source is not a regular file: " + src);
+      Path parent = dst.getParent();
+      if (parent != null) ensureDirectory(parent);
+      Files.copy(src, dst, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.COPY_ATTRIBUTES, LinkOption.NOFOLLOW_LINKS);
     }
+  }
+
+  private static Path resolveCopyTarget(Path sourceRoot, Path targetRoot, Path current) throws IOException {
+    Path relative = sourceRoot.relativize(current.toAbsolutePath().normalize());
+    Path out = targetRoot.resolve(relative).normalize();
+    if (!out.startsWith(targetRoot)) throw new IOException("copy target escapes destination: " + out);
+    return out;
   }
 
   private static MessageDigest sha256Digest() {

@@ -1,10 +1,9 @@
 package blockbox
 
-import blockbox.io.BlockboxFiles
+import blockbox.io.BlockboxSaveFiles
 import org.lwjgl.BufferUtils
 import org.lwjgl.opengl.GL11.*
 import org.lwjgl.opengl.GL15.*
-import java.io.*
 import scala.collection.mutable.ArrayBuffer
 import scala.math.*
 
@@ -692,10 +691,7 @@ final class Chunk(val cx: Int, val cz: Int, atlas: TextureAtlas, gen: TerrainGen
     if waterVbo != 0 then glDeleteBuffers(waterVbo); waterVbo = 0; waterCount = 0
 
   def save(dir: java.io.File): Unit =
-    BlockboxFiles.ensureDirectory(dir.toPath)
-    val file = new java.io.File(dir, s"chunk_${cx}_${cz}.dat")
-    BlockboxFiles.writeAtomic(file.toPath, out0 =>
-      val out = new java.io.DataOutputStream(new java.io.BufferedOutputStream(out0))
+    BlockboxSaveFiles.writeChunkDataAtomic(dir.toPath, cx, cz, out =>
       out.write(blocks)
       val editCopy = edits.synchronized { edits.toList }
       out.writeInt(editCopy.size)
@@ -719,10 +715,7 @@ final class Chunk(val cx: Int, val cz: Int, atlas: TextureAtlas, gen: TerrainGen
     )
 
   def load(dir: java.io.File): Unit =
-    val file = new java.io.File(dir, s"chunk_${cx}_${cz}.dat")
-    if file.exists() then
-      val in = new java.io.DataInputStream(new java.io.BufferedInputStream(new java.io.FileInputStream(file)))
-      try
+    if BlockboxSaveFiles.readChunkDataIfPresent(dir.toPath, cx, cz, in =>
         val loadedBlocks = new Array[Byte](Terrain.chunkSize * Terrain.worldHeight * Terrain.chunkSize)
         in.readFully(loadedBlocks)
         // Fast load path: use the saved block array and reapply edits below.
@@ -752,7 +745,7 @@ final class Chunk(val cx: Int, val cz: Int, atlas: TextureAtlas, gen: TerrainGen
               if wi >= 0 && wi < waterLevelsLocal.length then waterLevelsLocal(wi) = (level.toInt & 0xFF).max(0).min(8).toByte
         normalizeStaticNaturalWater()
         markDirtyMesh()
-      finally in.close()
+      ) then ()
 
   private def upload(data: ArrayBuffer[Float]): (Int, Int) =
     if data == null || data.isEmpty then (0, 0)

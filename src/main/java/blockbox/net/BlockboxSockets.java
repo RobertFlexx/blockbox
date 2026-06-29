@@ -12,6 +12,7 @@ import java.net.ServerSocket;
 import java.net.SocketException;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
+import java.util.Objects;
 import java.util.concurrent.BlockingQueue;
 
 public final class BlockboxSockets {
@@ -21,20 +22,44 @@ public final class BlockboxSockets {
   private BlockboxSockets() {}
 
   public static ServerSocket bindIpv4Server(int port) throws IOException {
+    validateBindPort(port);
     ServerSocket server = new ServerSocket();
-    server.setReuseAddress(true);
-    server.bind(new InetSocketAddress("0.0.0.0", port), SERVER_BACKLOG);
-    return server;
+    boolean bound = false;
+    try {
+      server.setReuseAddress(true);
+      server.bind(new InetSocketAddress("0.0.0.0", port), SERVER_BACKLOG);
+      bound = true;
+      return server;
+    } finally {
+      if (!bound) closeQuietly(server);
+    }
   }
 
   public static Socket connectTcp(String host, int port, int timeoutMillis) throws IOException {
+    validateHost(host);
+    validatePort(port);
+    validateTimeout(timeoutMillis, "timeoutMillis");
     Socket socket = new Socket();
-    configureTcp(socket);
-    socket.connect(new InetSocketAddress(host, port), timeoutMillis);
+    boolean connected = false;
+    try {
+      configureTcp(socket);
+      socket.connect(new InetSocketAddress(host.trim(), port), timeoutMillis);
+      connected = true;
+      return socket;
+    } finally {
+      if (!connected) closeQuietly(socket);
+    }
+  }
+
+  public static Socket connectTcp(String host, int port, int connectTimeoutMillis, int readTimeoutMillis) throws IOException {
+    validateTimeout(readTimeoutMillis, "readTimeoutMillis");
+    Socket socket = connectTcp(host, port, connectTimeoutMillis);
+    socket.setSoTimeout(readTimeoutMillis);
     return socket;
   }
 
   public static void configureTcp(Socket socket) throws IOException {
+    Objects.requireNonNull(socket, "socket");
     socket.setTcpNoDelay(true);
     socket.setKeepAlive(true);
     socket.setReuseAddress(true);
@@ -45,10 +70,12 @@ public final class BlockboxSockets {
   }
 
   public static BufferedReader utf8Reader(Socket socket) throws IOException {
+    Objects.requireNonNull(socket, "socket");
     return new BufferedReader(new InputStreamReader(socket.getInputStream(), StandardCharsets.UTF_8));
   }
 
   public static PrintWriter utf8Writer(Socket socket) throws IOException {
+    Objects.requireNonNull(socket, "socket");
     return new PrintWriter(new BufferedWriter(new OutputStreamWriter(socket.getOutputStream(), StandardCharsets.UTF_8)), true);
   }
 
@@ -64,9 +91,16 @@ public final class BlockboxSockets {
   }
 
   public static Thread daemonThread(String name, Runnable runnable) {
-    Thread thread = new Thread(runnable, name);
+    Objects.requireNonNull(runnable, "runnable");
+    String threadName = name == null || name.isBlank() ? "blockbox-worker" : name;
+    Thread thread = new Thread(runnable, threadName);
     thread.setDaemon(true);
     return thread;
+  }
+
+  public static void closeAllQuietly(Closeable... closeables) {
+    if (closeables == null) return;
+    for (Closeable closeable : closeables) closeQuietly(closeable);
   }
 
   public static void closeQuietly(Closeable closeable) {
@@ -96,6 +130,23 @@ public final class BlockboxSockets {
   public static String remoteAddress(Socket socket) {
     if (socket == null || socket.getRemoteSocketAddress() == null) return "unknown";
     return socket.getRemoteSocketAddress().toString();
+  }
+
+  private static void validateHost(String host) {
+    if (host == null || host.trim().isEmpty()) throw new IllegalArgumentException("host is required");
+    if (host.indexOf('\0') >= 0) throw new IllegalArgumentException("host contains NUL");
+  }
+
+  private static void validatePort(int port) {
+    if (port < 1 || port > 65535) throw new IllegalArgumentException("port out of range: " + port);
+  }
+
+  private static void validateBindPort(int port) {
+    if (port < 0 || port > 65535) throw new IllegalArgumentException("port out of range: " + port);
+  }
+
+  private static void validateTimeout(int timeoutMillis, String name) {
+    if (timeoutMillis < 0) throw new IllegalArgumentException(name + " must be non-negative");
   }
 
   private static void trySetTrafficClass(Socket socket, int value) {
