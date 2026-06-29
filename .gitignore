@@ -23,3 +23,4 @@ launcher/instances/
 launcher/exports/
 launcher/*.log
 *.bbpack
+blockbox-settings.properties
