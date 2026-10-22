@@ -8,6 +8,7 @@ uniform float uFogEnd;
 uniform float uDaylight;
 uniform float uTime;
 uniform int renderStage;
+uniform int isEyeInWater;
 uniform vec3 uSunDir;
 uniform vec3 uMoonDir;
 varying vec4 vColor;
@@ -36,6 +37,13 @@ void main() {
     base.rgb *= light;
     float flicker = 0.975 + 0.025 * sin(uTime * 9.0 + vUv.x * 41.0) * sin(uTime * 6.3);
     base.rgb = mix(base.rgb, texel.rgb * vec3(1.20, 1.03, 0.68) * flicker, vEmission);
+    if (isEyeInWater != 0) {
+        float waves=sin((vWorldPos.x+vWorldPos.z)*1.5707963+uTime*0.8)
+                   +sin((vWorldPos.x-vWorldPos.z)*0.7853982-uTime*0.65);
+        float caustic=pow(max(1.0-abs(waves)*2.4,0.0),6.0);
+        base.rgb+=vec3(0.10,0.18,0.16)*caustic*max(n.y,0.0)*vSkyLight*uDaylight;
+        base.rgb*=exp(-vec3(0.022,0.007,0.003)*vFogDepth);
+    }
     float fog = bb_saturate((uFogEnd - vFogDepth) / max(uFogEnd - uFogStart, 0.001));
     base.rgb = mix(uFogColor, base.rgb, fog);
     gl_FragData[0] = base;

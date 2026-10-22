@@ -8,6 +8,23 @@ import org.lwjgl.opengl.GL15.*
 import scala.math.*
 
 object BlockboxRender2D:
+  def voxelPanel(p: UiRect,s: Float): Unit =
+    rect(p.x,p.y,p.w,p.h,0.09f,0.09f,0.09f,1)
+    rect(p.x+s,p.y+s,p.w-2*s,p.h-2*s,0.95f,0.95f,0.95f,1)
+    rect(p.x+3*s,p.y+3*s,p.w-4*s,p.h-4*s,0.35f,0.35f,0.35f,1)
+    rect(p.x+3*s,p.y+3*s,p.w-6*s,p.h-6*s,0.77f,0.77f,0.77f,1)
+    rect(p.x+s,p.y+p.h-2*s,p.w-2*s,s,0.23f,0.23f,0.23f,1)
+    rect(p.x+p.w-2*s,p.y+s,s,p.h-2*s,0.23f,0.23f,0.23f,1)
+
+  def voxelSlot(p: UiRect,s: Float,hover: Boolean=false,selected: Boolean=false): Unit =
+    rect(p.x,p.y,p.w,p.h,0.24f,0.24f,0.24f,1)
+    rect(p.x+s,p.y+s,p.w-s,p.h-s,1f,1f,1f,1)
+    val v=if hover then 0.72f else 0.55f
+    rect(p.x+s,p.y+s,p.w-2*s,p.h-2*s,v,v,v,1)
+    if selected then
+      val e=s.max(1f)
+      rect(p.x-e,p.y-e,p.w+2*e,e,1,1,1,1); rect(p.x-e,p.y+p.h,p.w+2*e,e,1,1,1,1)
+      rect(p.x-e,p.y,e,p.h,1,1,1,1); rect(p.x+p.w,p.y,e,p.h,1,1,1,1)
   private val textMeshCache = scala.collection.mutable.LinkedHashMap.empty[String, (java.nio.ByteBuffer, Int, Float, Float, Float, Float)]
   private val maxTextMeshCacheEntries = 512
 
@@ -347,6 +364,18 @@ object BlockboxRender2D:
     rect(x+e,y+h-e*1.5f,w-e*2f,e*1.5f,0.0f,0.02f,0.02f,0.50f)
     centeredTextBox(x+8f*scale,y+2f*scale,w-16f*scale,h-4f*scale,label,0.95f,0.96f,0.90f,(2.05f*scale).min(h/8.5f),scale,framebufferWidth,framebufferHeight)
 
+  def drawBubbleIcon(x: Float,y: Float,size: Float,popping: Boolean): Unit =
+    val p=size/9f
+    val pattern=if popping then Array("000000000","000001000","010000010","000110000","001001010","000110000","010000000","000000100","000000000")
+      else Array("000111000","001000100","010000010","100000001","100000001","100000001","010000010","001000100","000111000")
+    for row <- pattern.indices; col <- 0 until 9 if pattern(row)(col)=='1' do
+      rect(x+(col+0.5f)*p,y+(row+0.5f)*p,p,p,0.01f,0.07f,0.13f,0.8f)
+      rect(x+col*p,y+row*p,p,p,0.42f,0.83f,1f,1f)
+    if !popping then
+      rect(x+2*p,y+2*p,2*p,p,0.92f,0.99f,1f,1f)
+      rect(x+2*p,y+3*p,p,p,0.78f,0.95f,1f,1f)
+      rect(x+5*p,y+6*p,2*p,p,0.12f,0.49f,0.78f,1f)
+
   def drawHeartIcon(x: Float, y: Float, size: Float, fillFrac: Float, bgAlpha: Float): Unit =
     val s = size.max(10f)
     val fill = fillFrac.max(0f).min(1f)
@@ -415,6 +444,7 @@ object BlockboxRender2D:
     glLineWidth(1f)
 
   def renderUnderwaterOverlay(framebufferWidth: Int, framebufferHeight: Int, time: Float): Unit =
+    if UnderwaterEffect.render(framebufferWidth,framebufferHeight,time,1f) then return
     glDisable(GL_DEPTH_TEST); glDisable(GL_CULL_FACE); setupOrtho(framebufferWidth, framebufferHeight)
     val w = framebufferWidth.toFloat
     val h = framebufferHeight.toFloat
@@ -422,21 +452,7 @@ object BlockboxRender2D:
     rect(0, 0, w, h, 0.00f, 0.10f + wave * 0.28f, 0.24f + wave * 0.34f, 0.26f)
     rect(0, 0, w, h * 0.17f, 0.06f, 0.24f, 0.42f, 0.10f)
     rect(0, h * 0.83f, w, h * 0.17f, 0.03f, 0.18f, 0.34f, 0.14f)
-    val causticBands = 9
-    var i = 0
-    while i < causticBands do
-      val phase = time * (10f + i * 0.7f) + i * 0.9f
-      val cx = (((sin(phase).toFloat * 0.5f + 0.5f) * 1.2f - 0.1f) * w)
-      val cy = (((cos(phase * 0.73f).toFloat * 0.5f + 0.5f) * 1.1f - 0.05f) * h)
-      val bw = w * (0.18f + (i % 3) * 0.05f)
-      val bh = h * (0.020f + (i % 4) * 0.008f)
-      rect(cx - bw * 0.5f, cy, bw, bh, 0.70f, 0.92f, 1.00f, 0.020f)
-      rect(cx - bw * 0.45f, cy + bh * 1.5f, bw * 0.85f, bh * 0.65f, 0.56f, 0.84f, 1.00f, 0.016f)
-      i += 1
-    val sweep = ((time * 26f) % (w + 240f)) - 120f
-    rect(sweep, 0, 120f, h, 0.18f, 0.50f, 0.72f, 0.035f)
-    rect(sweep - 180f, 0, 72f, h, 0.12f, 0.38f, 0.58f, 0.020f)
-    val vignette = 0.22f
+    val vignette = 0.05f
     rect(0, 0, w * 0.09f, h, 0f, 0.06f, 0.16f, vignette)
     rect(w * 0.91f, 0, w * 0.09f, h, 0f, 0.06f, 0.16f, vignette)
     rect(0, 0, w, h * 0.07f, 0f, 0.10f, 0.22f, vignette * 0.62f)

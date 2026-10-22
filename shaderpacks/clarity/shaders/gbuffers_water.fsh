@@ -5,6 +5,9 @@ uniform sampler2D lightmap;
 uniform float uDaylight;
 uniform float uTime;
 uniform int renderStage;
+uniform float rainStrength;
+uniform vec3 uFogColor;
+uniform int isEyeInWater;
 varying vec4 vColor;
 varying vec2 vLightUv;
 varying float vBlockLight;
@@ -29,8 +32,8 @@ void main() {
     base.rgb = mix(base.rgb, waterTint, 0.16 + fresnel * 0.18 * vSkyLight);
     base.rgb *= bbBlockLight(lightmap, vLightUv, vSkyLight, vBlockLight);
     float sunSpec = pow(max(dot(reflect(-normalize(vSunView), n), viewDir), 0.0), 64.0) * uDaylight;
-    base.rgb += vec3(1.0, 0.90, 0.70) * sunSpec * 0.30 * vSkyLight * vSkyLight * vSkyLight;
-    gl_FragData[0] = vec4(base.rgb, max(base.a, 0.90));
+    base.rgb += vec3(1.0, 0.90, 0.70) * sunSpec * (1.0-rainStrength*0.9) * 0.30 * vSkyLight * vSkyLight * vSkyLight;
+    gl_FragData[0] = vec4(base.rgb, max(base.a, 0.50+fresnel*0.22));
     gl_FragData[1] = vec4(n * 0.5 + 0.5, 1.0);
     gl_FragData[2] = vec4(float(renderStage) / 255.0, fresnel, 1.0, clamp(vBlockLight, 0.0, 1.0));
 }

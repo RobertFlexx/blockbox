@@ -16,6 +16,9 @@ final class FirstPersonPass:
   private var renderWidth=0
   private var failed=false
 
+  /** NDC x of the pass's left edge; the projection's left plane must match it. */
+  def leftEdge: Float = if width==0 then -1f else -1f+2f*(width-renderWidth)/width
+
   def begin(w: Int,h: Int): Boolean =
     if failed || !GL.getCapabilities.OpenGL30 || glGetInteger(GL_MAX_SAMPLES)<2 then return false
     try
@@ -42,17 +45,19 @@ final class FirstPersonPass:
     glMatrixMode(GL_PROJECTION); glPushMatrix(); glLoadIdentity()
     glMatrixMode(GL_MODELVIEW); glPushMatrix(); glLoadIdentity()
     glBegin(GL_QUADS)
-    glTexCoord2f(0,0); glVertex2f(0,-1); glTexCoord2f(1,0); glVertex2f(1,-1)
-    glTexCoord2f(1,1); glVertex2f(1,1); glTexCoord2f(0,1); glVertex2f(0,1)
+    val left=leftEdge
+    glTexCoord2f(0,0); glVertex2f(left,-1); glTexCoord2f(1,0); glVertex2f(1,-1)
+    glTexCoord2f(1,1); glVertex2f(1,1); glTexCoord2f(0,1); glVertex2f(left,1)
     glEnd()
     glPopMatrix(); glMatrixMode(GL_PROJECTION); glPopMatrix(); glMatrixMode(GL_MODELVIEW)
     glBindTexture(GL_TEXTURE_2D,0); glDisable(GL_TEXTURE_2D)
     glBlendFunc(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA); glDepthMask(true)
 
   private def allocate(w: Int,h: Int): Unit =
-    destroy(); width=w; height=h; renderWidth=(w+1)/2
-    // Only the right half contains viewmodel geometry. At 4K use two samples to
-    // bound memory and bandwidth instead of allocating a full 4x scene-sized pass.
+    destroy(); width=w; height=h; renderWidth=(w*3+3)/4
+    // Viewmodel geometry stays in the right three quarters: swings reach about 0.25 NDC
+    // past the center on 5:4 screens. At 4K use two samples to bound memory and
+    // bandwidth instead of allocating a full 4x scene-sized pass.
     val samples=glGetInteger(GL_MAX_SAMPLES).min(if w.toLong*h>2560L*1440 then 2 else 4)
     multisampleFbo=glGenFramebuffers(); glBindFramebuffer(GL_FRAMEBUFFER,multisampleFbo)
     colorBuffer=glGenRenderbuffers(); glBindRenderbuffer(GL_RENDERBUFFER,colorBuffer)

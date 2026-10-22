@@ -38,7 +38,7 @@ object BlockboxLightmap:
   def color(sky: Float, block: Float, e: Environment): (Float, Float, Float) =
     val day = smooth01((e.daylight - 0.18f) / 0.82f)
     val nightFloor = if e.darkNights then 0.15f else 0.62f
-    val skyScale = (mix(nightFloor, 1f, day) * (1f - clamp01(e.rain) * 0.24f) + clamp01(e.flash) * 0.55f).min(1.15f)
+    val skyScale = (mix(nightFloor, 1f, day) * (1f - clamp01(e.rain) * 0.48f) + clamp01(e.flash) * 0.55f).min(1.15f)
     val dusk = clamp01(e.dusk)
     val dayWeight = smooth01(day * 1.5f)
     val rain = clamp01(e.rain) * 0.55f

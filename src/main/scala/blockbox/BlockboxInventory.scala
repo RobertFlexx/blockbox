@@ -3,6 +3,7 @@ package blockbox
 import scala.math.*
 
 trait BlockboxInventory:
+  protected var furnaceRequested = 0
   protected val placeableBlocks: Array[Block]
   // Aggregate totals stay as a backward-compatible save/migration surface.
   // Live survival behavior is driven by the physical slot arrays below.
@@ -82,6 +83,7 @@ trait BlockboxInventory:
       inventory(Block.Coal.ordinal) = inventory(Block.Coal.ordinal).max(maxStackSize)
     furnaceInput = Block.Air; furnaceFuel = Block.Air; furnaceProgress = 0f; furnaceFuelRemaining = 0f
     furnaceOutput = Block.Air; furnaceOutputCount = 0
+    furnaceRequested=0
     i = 0
     while i < craftGridBlocks.length do
       craftGridBlocks(i) = Block.Air; craftGridCounts(i) = 0; i += 1
@@ -347,24 +349,19 @@ trait BlockboxInventory:
     InventoryModel.smeltResult(input)
 
   protected def canConsumeFuelFor(input: Block): Boolean =
-    totalItemCount(Block.Coal) > 0 || fuelBlocks.exists(b => b != Block.Coal && totalItemCount(b) > (if b == input then 1 else 0))
+    furnaceFuelRemaining+fuelBlocks.map(b =>
+      (totalItemCount(b)-(if b==input then 1 else 0)).max(0)*InventoryModel.fuelBurnTime(b)).sum>=1f
 
   protected def consumeFuelFor(input: Block): Boolean =
-    if furnaceFuelRemaining > 0f then true
-    else if totalItemCount(Block.Coal) > 0 then
-      consumeInventory(Block.Coal, 1)
-      furnaceFuel = Block.Coal
-      furnaceFuelRemaining = 8f
-      true
-    else
-      val picked = fuelBlocks.find(b => b != Block.Coal && totalItemCount(b) > (if b == input then 1 else 0))
+    while furnaceFuelRemaining<1f do
+      val picked=fuelBlocks.find(b => totalItemCount(b)>(if b==input then 1 else 0))
       picked match
         case Some(fuel) =>
-          consumeInventory(fuel, 1)
-          furnaceFuel = fuel
-          furnaceFuelRemaining = InventoryModel.fuelBurnTime(fuel)
-          true
-        case None => false
+          if !consumeInventory(fuel,1) then return false
+          furnaceFuel=fuel
+          furnaceFuelRemaining+=InventoryModel.fuelBurnTime(fuel)
+        case None => return false
+    true
 
   protected def takeFurnaceOutput(): Unit =
     if furnaceOutput != Block.Air && furnaceOutputCount > 0 then
@@ -396,15 +393,14 @@ trait BlockboxInventory:
     if furnaceOutput != Block.Air && furnaceOutput != out then
       if showMessages then addChatMessage("Take the current output first")
       return false
-    if furnaceOutputCount + amount > 999 then
+    if furnaceOutputCount + amount > maxStackSize then
       if showMessages then addChatMessage("Furnace output is full")
       return false
     if !consumeFuelFor(furnaceInput) then
       if showMessages then addChatMessage("Need fuel: Coal or Wood")
       return false
     consumeInventory(furnaceInput, 1)
-    furnaceFuelRemaining -= 1f
-    furnaceProgress = 4f
+    furnaceFuelRemaining = (furnaceFuelRemaining - 1f).max(0f)
     furnaceOutput = out
     furnaceOutputCount += amount
     if totalItemCount(furnaceInput) <= 0 then furnaceInput = Block.Air
@@ -415,14 +411,24 @@ trait BlockboxInventory:
     true
 
   protected def smeltFurnace(): Unit =
-    if smeltOneInternal(showMessages = true) then furnaceProgress = 0f
+    requestSmelting(1)
 
   protected def smeltAllFurnace(): Unit =
-    var made = 0
-    var keepGoing = true
-    while keepGoing && made < 256 do
-      keepGoing = smeltOneInternal(showMessages = false)
-      if keepGoing then made += 1
-    furnaceProgress = 0f
-    if made == 0 then smeltOneInternal(showMessages = true)
-    else addChatMessage(s"Smelted $made item${if made == 1 then "" else "s"}")
+    requestSmelting(totalItemCount(furnaceInput).min(maxStackSize))
+
+  private def requestSmelting(count: Int): Unit =
+    if furnaceInput==Block.Air || totalItemCount(furnaceInput)<=0 then addChatMessage("Choose an input first")
+    else if !canConsumeFuelFor(furnaceInput) then addChatMessage("Need fuel: coal, logs, planks or sticks")
+    else if smeltResult(furnaceInput).exists((out,_) => furnaceOutput!=Block.Air && furnaceOutput!=out) then addChatMessage("Take the current output first")
+    else furnaceRequested=count.max(1).min(maxStackSize)
+
+  protected def updateFurnace(dt: Float): Unit =
+    if furnaceRequested>0 then
+      if totalItemCount(furnaceInput)<=0 || (!canConsumeFuelFor(furnaceInput)) then
+        furnaceRequested=0; furnaceProgress=0f
+      else
+        furnaceProgress+=dt
+        if furnaceProgress>=4f then
+          furnaceProgress-=4f
+          if smeltOneInternal(showMessages=true) then furnaceRequested-=1 else furnaceRequested=0
+          if furnaceRequested<=0 then furnaceProgress=0f

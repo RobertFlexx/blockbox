@@ -36,3 +36,13 @@ kenney/impactWood_medium_001.ogg,15271dbe8e2872dbb0ff1aeb7b12b2d2b92b7c1951c8853
 kenney/impactWood_medium_002.ogg,3f3f1917428b828f733a963167833c707bf88296ff158e1559c57c5cb813d799,CC0-1.0,Kenney,https://github.com/iree-gd/iree.gd/blob/main/sample/assets/audio/impact/impactWood_medium_002.ogg
 weather/rain-loop.ogg,daeb4eec29dbd488b69a4191986562dbb371c9be6303f0cfb8f1db5a7b871fc5,CC0-1.0,Kresiek The Furry,https://github.com/Julian-adv/OpenMMO/blob/master/client/public/sounds/rain-loop.ogg
 weather/thunder-distant.ogg,8a4f1dee999546b363f989eff92174375eeae7c241dc9beaa0892fb131ef12a9,CC0-1.0,rubberduck,https://github.com/Julian-adv/OpenMMO/blob/master/client/public/sounds/thunder-distant.ogg
+zombie/idle_0.ogg,f245f5e18a52f35926ef8f1bce1636c33de9cfb27120b3ce945d40d8026db1e9,CC0-1.0,artisticdude,https://opengameart.org/content/zombies-sound-pack#zombie-1.wav
+zombie/idle_1.ogg,bc0ff76a2a40b0909e302223763d14e29e65666dbfdbed7bce9180e7f090171e,CC0-1.0,artisticdude,https://opengameart.org/content/zombies-sound-pack#zombie-8.wav
+zombie/idle_2.ogg,386576468f49d1963c0b504f601da8e4b13a22f27c5c576d28da4b0edbe55ea5,CC0-1.0,artisticdude,https://opengameart.org/content/zombies-sound-pack#zombie-16.wav
+zombie/hurt_0.ogg,bb1d406d4af7fcad296ecdd3ff189e077b2c77435f6214ea458603d9ea73e714,CC0-1.0,artisticdude,https://opengameart.org/content/zombies-sound-pack#zombie-3.wav
+zombie/hurt_1.ogg,c85dc7af54bd419afe2eb1f934f07f6a6509bcf0c96d09e25bffc3ca19eb8ef4,CC0-1.0,artisticdude,https://opengameart.org/content/zombies-sound-pack#zombie-5.wav
+zombie/hurt_2.ogg,253df60780d9a1e61f6de2a50bf93f2960ad2be60be3954a2280788110058a40,CC0-1.0,artisticdude,https://opengameart.org/content/zombies-sound-pack#zombie-24.wav
+zombie/attack_0.ogg,94f66bb5b1f945e709b0f7ea04cecb749bde7af23bf6b00b1db9acd5dc665ded,CC0-1.0,artisticdude,https://opengameart.org/content/zombies-sound-pack#zombie-7.wav
+zombie/attack_1.ogg,f8b69dddf113649d819c8e7521b7238e06b9eec87f5387e1f7a41ce26e30d9cd,CC0-1.0,artisticdude,https://opengameart.org/content/zombies-sound-pack#zombie-10.wav
+zombie/death_0.ogg,74fe41afece223de6f414c2b16b6721336eea1387eeb2c7b1d2335df0f6a82f3,CC0-1.0,artisticdude,https://opengameart.org/content/zombies-sound-pack#zombie-17.wav
+zombie/death_1.ogg,8fd3bc45d33334880806599ec752565b7a1c869341fe55ccc7d74e74ff17f215,CC0-1.0,artisticdude,https://opengameart.org/content/zombies-sound-pack#zombie-18.wav

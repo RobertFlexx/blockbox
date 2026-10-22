@@ -667,16 +667,9 @@ final class TerrainGenerator(val seed: Long,decorate: (Int,Int,Array[Byte]) => U
     else if surface == Block.Stone && y > h - (if cliffAt(x, z, h) then 7 else 4) then Block.Stone
     else if y > h - 6 && cliffAt(x, z, h) && hash(x, y, z, 734) > 0.20f then Block.Stone
     else if y > h - 18 then Block.Dirt
-    else if y < 6 && h > Terrain.seaLevel then Block.Stone
-    else if y < h - 28 && y < 12 && hash(x, y, z, 17) > 0.92f then Block.Clay
-    else if y < h - 28 && y < 60 && hash(x, y, z, 37) > 0.88f then Block.Coal
-    else if y < h - 28 && y < 48 && hash(x, y, z, 71) > 0.91f then Block.Copper
-    else if y < h - 28 && y < 40 && hash(x, y, z, 81) > 0.955f then Block.IronOre
-    else if y < h - 28 && y < 30 && hash(x, y, z, 91) > 0.97f then Block.GoldOre
-    else if y < h - 28 && y < 16 && hash(x, y, z, 101) > 0.985f then Block.Diamond
     else if y <= 4 then Block.Bedrock
-    else if y < h - 16 then caveWallBlock(x, y, z, h)
-    else Block.Stone
+    else if y < h - 28 && y < 12 && hash(x, y, z, 17) > 0.92f then Block.Clay
+    else OreDistribution.at(seed,x,y,z,h).getOrElse(if y < h-16 then caveWallBlock(x,y,z,h) else Block.Stone)
 
   def furnaceAt(x: Int, z: Int, h: Int, surface: Block): Option[(Int, Int, Int)] =
     // Furnaces should be player-made utility blocks, not random world decoration.
@@ -906,16 +899,9 @@ final class TerrainGenerator(val seed: Long,decorate: (Int,Int,Array[Byte]) => U
               else if surface == Block.Stone && y > h - (if cliff then 7 else 4) then Block.Stone
               else if y > h - 6 && cliff && hash(wx, y, wz, 734) > 0.20f then Block.Stone
               else if y > h - 18 then Block.Dirt
-              else if y < 6 && h > Terrain.seaLevel then Block.Stone
-              else if y < h - 28 && y < 12 && hash(wx, y, wz, 17) > 0.92f then Block.Clay
-              else if y < h - 28 && y < 60 && hash(wx, y, wz, 37) > 0.88f then Block.Coal
-              else if y < h - 28 && y < 48 && hash(wx, y, wz, 71) > 0.91f then Block.Copper
-              else if y < h - 28 && y < 40 && hash(wx, y, wz, 81) > 0.955f then Block.IronOre
-              else if y < h - 28 && y < 30 && hash(wx, y, wz, 91) > 0.97f then Block.GoldOre
-              else if y < h - 28 && y < 16 && hash(wx, y, wz, 101) > 0.985f then Block.Diamond
               else if y <= 4 then Block.Bedrock
-              else if y < h - 16 then caveWallBlock(wx, y, wz, h)
-              else Block.Stone
+              else if y < h - 28 && y < 12 && hash(wx, y, wz, 17) > 0.92f then Block.Clay
+              else OreDistribution.at(seed,wx,y,wz,h).getOrElse(if y<h-16 then caveWallBlock(wx,y,wz,h) else Block.Stone)
             val canCave = y > 4 && (y < h - 12 || (mouthDepth > 0 && y >= h - mouthDepth))
             val cave = canCave && caveNoise(wx, y, wz, h, mouthDepth)
             if !cave then blocks(idx(lx, y, lz)) = block.id

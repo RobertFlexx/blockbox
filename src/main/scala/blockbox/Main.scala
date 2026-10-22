@@ -132,7 +132,11 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
   protected var heldInventoryCount = 0
   protected var heldFromHotbar = false
   private var catalogScroll = 0
+  private var catalogCategory=0
+  private var catalogQuery=""
+  private var catalogSearchFocused=false
   private var craftingScroll = 0
+  private var furnaceScroll=0
   protected val craftGridBlocks: Array[Block] = Array.fill(9)(Block.Air)
   protected val craftGridCounts: Array[Int] = Array.fill(9)(0)
   protected var furnaceInput: Block = Block.Air
@@ -231,6 +235,16 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
   private var resourcePacks: List[TexturePack] = Nil
   private var resourcesReturnTo: Screen = Screen.MainMenu
   private var resourcesScroll = 0
+  private val zombies = ArrayBuffer.empty[ZombieSystem.Zombie]
+  private val zombieRng = Random(0x20B1E5L)
+  private var zombieSerial=0
+  private var zombieSpawnTimer=2f
+  private var zombieSyncTimer=0f
+  private var combatCooldown=0f
+  private val lastCombatHit=scala.collection.mutable.HashMap.empty[String,Double]
+  private var playerKnockback=Vec3(0,0,0)
+  private val entityWaterPlane=BufferUtils.createDoubleBuffer(4)
+  private val airSupply = AirSupply()
   protected var playerHealth = 20f
   protected var playerFood = 20f
   protected val maxPlayerHealth = 20f
@@ -320,6 +334,7 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
   @volatile private var publishedOps = Vector.empty[String]
   private var lastSwingSend = -10.0
   private var fieldJournal = FieldJournal()
+  private var journalPage=0
   private var journalToast = ""
   private var journalToastTime = 0f
   private var journalTimer = 0f
@@ -389,6 +404,8 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
     terrainHeightCache.clear()
     worldClock = 150.0; timeOverride = None
     rainStrength = 0f; wetness = 0f; stormCloudCover = 0f; lightningFlash = 0f
+    zombies.clear(); zombieSerial=0; zombieSpawnTimer=2f; airSupply.reset(); RainRenderer.reset()
+    lastCombatHit.clear(); combatCooldown=0f; playerKnockback=Vec3(0,0,0)
     localRain=0f; localCloud=0f; localWetness=0f; localLightning=0f
     weatherCells=Vector.empty; weatherStrikes=Vector.empty; heardThunder.clear(); pendingPlayerEdits.clear()
     updateRainAmbience(0f)
@@ -667,6 +684,7 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
       chunks.clear()
       if shaderPipeline != null then shaderPipeline.destroy()
       firstPersonPass.destroy()
+      UnderwaterEffect.destroy(); RainRenderer.destroy()
       shutdownAudio()
       if foveaPass != null then foveaPass.release()
       BlockboxSky.destroy()
@@ -892,6 +910,7 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
       // does not freeze/desync everyone else. Singleplayer still fully pauses here.
       if shouldRunMultiplayerBackgroundTick then updateMultiplayerBackgroundTick(dt)
       handleMenuMouse()
+    if activeWorldSession && (screen==Screen.Playing || screen==Screen.FurnaceUI || shouldRunMultiplayerBackgroundTick) then updateFurnace(dt)
     render()
     flushUserSettings()
     glfwSwapBuffers(window)
@@ -921,6 +940,9 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
       else if codepoint >= 32 && codepoint <= 126 then
         chatInput += codepoint.toChar
         markChatEdited()
+    else if screen==Screen.Catalog && catalogSearchFocused then
+      if codepoint>=32 && codepoint<=126 then
+        catalogQuery=(catalogQuery+codepoint.toChar).take(40); catalogScroll=0
     else if screen == Screen.CreateWorld then
       if codepoint >= 32 && codepoint <= 126 then
         val ch = codepoint.toChar
@@ -942,6 +964,8 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
         selectedItemLabelTimer = 1.8f
       case Screen.Catalog =>
         catalogScroll = (catalogScroll + delta).max(0)
+      case Screen.FurnaceUI =>
+        furnaceScroll=(furnaceScroll+delta).max(0)
       case Screen.Mods =>
         modsScreenScroll = (modsScreenScroll + delta).max(0)
       case Screen.Resources =>
@@ -1098,7 +1122,8 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
           screen = Screen.Settings
           setCursorCaptured(captured = false)
       case Screen.Journal =>
-        if key == GLFW_KEY_ESCAPE || key == GLFW_KEY_J || key == GLFW_KEY_ENTER then enterGame()
+        if key==GLFW_KEY_RIGHT || key==GLFW_KEY_LEFT then journalPage=1-journalPage
+        else if key == GLFW_KEY_ESCAPE || key == GLFW_KEY_J || key == GLFW_KEY_ENTER then enterGame()
       case Screen.JoinGame =>
         if key == GLFW_KEY_ENTER then
           val ip = if joinIpInput.trim.isEmpty then "127.0.0.1" else joinIpInput.trim
@@ -1126,7 +1151,12 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
         else if key == GLFW_KEY_S then
           settingsReturnTo = Screen.Paused
           screen = Screen.Settings
-      case Screen.Inventory | Screen.Catalog | Screen.FurnaceUI =>
+      case Screen.Catalog =>
+        if key==GLFW_KEY_ESCAPE || (key==GLFW_KEY_E && !catalogSearchFocused) then enterGame()
+        else if catalogSearchFocused && key==GLFW_KEY_BACKSPACE && catalogQuery.nonEmpty then
+          catalogQuery=catalogQuery.init; catalogScroll=0
+        else if key==GLFW_KEY_ENTER then catalogSearchFocused=false
+      case Screen.Inventory | Screen.FurnaceUI =>
         if key == GLFW_KEY_E || key == GLFW_KEY_ESCAPE then enterGame()
 
   private def handleMenuMouse(): Unit =
@@ -1150,10 +1180,15 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
         case Screen.Journal =>
           val p = journalPanel
           if UiRect(p.x+p.w/2f-100f*uiScale,p.y+p.h-50f*uiScale,200f*uiScale,34f*uiScale).contains(mx,my) then enterGame()
+          else if UiRect(p.x+24f*uiScale,p.y+p.h-50f*uiScale,100f*uiScale,34f*uiScale).contains(mx,my) ||
+              UiRect(p.x+p.w-124f*uiScale,p.y+p.h-50f*uiScale,100f*uiScale,34f*uiScale).contains(mx,my) then journalPage=1-journalPage
         case Screen.Playing => ()
     if rightDown && !menuRightWasDown && screen == Screen.Inventory then
       val (mx, my) = mouseFramebufferPos()
       handleInventoryClick(mx, my, rightClick = true)
+    if rightDown && !menuRightWasDown && screen==Screen.Catalog then
+      val (mx,my)=mouseFramebufferPos()
+      handleCatalogClick(mx,my,rightClick=true)
     if leftDown && screen == Screen.Settings && sliderActive != null then
       val (mx, my) = mouseFramebufferPos()
       updateSlider(mx)
@@ -1394,141 +1429,52 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
     else if inRect(mx, my, bx, by0 + (bh + gap) * 2f, bw, bh) then leaveGame(Screen.MainMenu)
 
   private def handleInventoryClick(mx: Float, my: Float, rightClick: Boolean): Unit =
-    val cx = framebufferWidth / 2f
-    val cy = framebufferHeight / 2f
-    val s = uiScale
-    val pw = (760f * s).min(framebufferWidth * 0.94f)
-    val ph = (500f * s).min(framebufferHeight * 0.88f)
-    val px = cx - pw / 2f
-    val py = cy - ph / 2f
-
-    val bottomH = (34f * s).min(ph * 0.08f).max(28f)
-    if inRect(mx, my, px + 22f * s, py + ph - 46f * s, 130f * s, bottomH) then
+    val l=BlockboxUiLayout.inventory(framebufferWidth,framebufferHeight,uiScale)
+    if l.close.contains(mx,my) then
+      if releaseHeldItem() then enterGame()
+    else if l.furnace.contains(mx,my) then
       if releaseHeldItem() then openFurnace()
-      return
-    else if inRect(mx, my, px + pw - 104f * s, py + ph - 46f * s, 82f * s, bottomH) then
+    else if l.journal.contains(mx,my) then
+      if releaseHeldItem() then screen=Screen.Journal
+    else if l.output.contains(mx,my) then tryCraftGrid()
+    else
+      val hot=l.hotbar.indexWhere(_.contains(mx,my))
+      val storage=l.storage.indexWhere(_.contains(mx,my))
+      val craft=l.craft.indexWhere(_.contains(mx,my))
+      if hot>=0 then
+        if heldInventoryBlock!=Block.Air then placeHeldItemInHotbar(hot,rightClick)
+        else
+          selectedBlock=hot; takeHotbarSlot(hot,rightClick)
+        selectedItemLabelTimer=1.2f
+      else if storage>=0 then handleBackpackSlotClick(storage,rightClick)
+      else if craft>=0 then handleCraftSlotClick(craft,rightClick)
+
+  private def handleCatalogClick(mx: Float, my: Float,rightClick: Boolean=false): Unit =
+    val l=BlockboxUiLayout.catalog(framebufferWidth,framebufferHeight,uiScale)
+    if l.close.contains(mx,my) then
       if releaseHeldItem() then enterGame()
       return
-
-    val hotbarY = py + ph - 104f * s
-    val hotbarPanelW = pw - 56f * s
-    val hotbarX = px + 28f * s
-    val hotGap = (5f * s).max(4f)
-    val hotSlot = ((hotbarPanelW - hotGap * (hotbarBlocks.length - 1)) / hotbarBlocks.length).min(44f * s).max(28f)
-    val hotBarW = hotSlot * hotbarBlocks.length + hotGap * (hotbarBlocks.length - 1)
-    val hotStartX = hotbarX + (hotbarPanelW - hotBarW) / 2f
-    var i = 0
-    while i < hotbarBlocks.length do
-      val sx = hotStartX + i * (hotSlot + hotGap)
-      if inRect(mx, my, sx, hotbarY, hotSlot, hotSlot) then
-        if heldInventoryBlock != Block.Air then placeHeldItemInHotbar(i, rightClick)
-        else
-          selectedBlock = i
-          takeHotbarSlot(i, rightClick)
-        selectedItemLabelTimer = 1.2f
-        return
-      i += 1
-
-    val gridW = pw * 0.58f
-    val cols = 9
-    val gap = (4f * s).max(3f)
-    val slot = ((gridW - gap * (cols - 1)) / cols).min(44f * s).max(30f)
-    val invX = px + 28f * s
-    val invY = py + 76f * s
-    val items = inventoryStacks
-    i = 0
-    while i < inventoryGridSlots do
-      val col = i % cols
-      val row = i / cols
-      val sx = invX + col * (slot + gap)
-      val sy = invY + row * (slot + gap)
-      if inRect(mx, my, sx, sy, slot, slot) then
-        handleBackpackSlotClick(i, rightClick)
-        return
-      i += 1
-
-    val craftPanelW = (pw - gridW - 78f * s).max(210f * s)
-    val craftX = px + pw - 28f * s - craftPanelW
-    val craftY = py + 76f * s
-    val cGap = 6f * s
-    val cSlot = ((craftPanelW - 56f * s) / 4f).min(42f * s).max(28f)
-    val gridStartX = craftX + 12f * s
-    val gridStartY = craftY + 26f * s
-    var ci = 0
-    while ci < 9 do
-      val col = ci % 3
-      val row0 = ci / 3
-      val sx = gridStartX + col * (cSlot + cGap)
-      val sy = gridStartY + row0 * (cSlot + cGap)
-      if inRect(mx, my, sx, sy, cSlot, cSlot) then
-        handleCraftSlotClick(ci, rightClick)
-        return
-      ci += 1
-    val outSize = cSlot * 1.16f
-    val outX = craftX + craftPanelW - outSize - 16f * s
-    val outY = gridStartY + cSlot + cGap
-    if inRect(mx, my, outX, outY, outSize, outSize) then
-      tryCraftGrid()
+    catalogSearchFocused=l.search.contains(mx,my)
+    if catalogSearchFocused then return
+    val tab=l.tabs.indexWhere(_.contains(mx,my))
+    if tab>=0 then
+      catalogCategory=tab; catalogScroll=0
       return
-
-  private def handleCatalogClick(mx: Float, my: Float): Unit =
-    val cx = framebufferWidth / 2f
-    val cy = framebufferHeight / 2f
-    val s = uiScale
-    val panelW = (700f * s).min(framebufferWidth * 0.94f)
-    val panelH = (500f * s).min(framebufferHeight * 0.88f)
-    val panelX = cx - panelW / 2f
-    val panelY = cy - panelH / 2f
-    val closeW = 72f * s
-    val closeH = 28f * s
-    if inRect(mx, my, panelX + panelW - 88f * s, panelY + 12f * s, closeW, closeH) then
-      if releaseHeldItem() then
-        catalogScroll = 0
-        enterGame()
+    val hot=l.hotbar.indexWhere(_.contains(mx,my))
+    if hot>=0 then
+      selectedBlock=hot
+      if rightClick then
+        hotbarBlocks(hot)=Block.Air; hotbarCounts(hot)=0
+      else if heldInventoryBlock!=Block.Air then placeHeldItemInHotbar(hot)
       return
-
-    val hotbarY = panelY + panelH - 76f * s
-    val hotbarPanelW = panelW - 40f * s
-    val hotbarX = panelX + 20f * s
-    val hotGap = (5f * s).max(4f)
-    val hotSlot = ((hotbarPanelW - hotGap * (hotbarBlocks.length - 1)) / hotbarBlocks.length).min(44f * s).max(28f)
-    val hotBarW = hotSlot * hotbarBlocks.length + hotGap * (hotbarBlocks.length - 1)
-    val hotStartX = hotbarX + (hotbarPanelW - hotBarW) / 2f
-    var i = 0
-    while i < hotbarBlocks.length do
-      val sx = hotStartX + i * (hotSlot + hotGap)
-      if inRect(mx, my, sx, hotbarY, hotSlot, hotSlot) then
-        if heldInventoryBlock != Block.Air then
-          placeHeldItemInHotbar(i)
-        else selectedBlock = i
-        return
-      i += 1
-
-    val slotSize = (48f * s).max(34f).min(54f)
-    val gridX = panelX + 20f * s
-    val gridY = panelY + 52f * s
-    val cols = ((panelW - 54f * s) / slotSize).toInt.max(4).min(12)
-    val items = catalogItems
-    val visibleRows = ((hotbarY - gridY - 26f * s) / slotSize).toInt.max(1)
-    val scrollMax = ((items.length - 1) / cols - visibleRows + 2).max(0)
-    if catalogScroll > scrollMax then catalogScroll = scrollMax
-    i = catalogScroll * cols
-    val catalogEnd = (i + cols * visibleRows).min(items.length)
-    while i < catalogEnd do
-      val idx = i - catalogScroll * cols
-      val col = idx % cols
-      val row = idx / cols
-      val sx = gridX + col * slotSize
-      val sy = gridY + row * slotSize
-      if inRect(mx, my, sx, sy, slotSize, slotSize) then
-        setHeldItem(items(i), maxStackSize)
-        return
-      i += 1
-    val scrollUp = inRect(mx, my, panelX + panelW - 18f * s, panelY + 50f * s, 14f * s, 20f * s)
-    val scrollDown = inRect(mx, my, panelX + panelW - 18f * s, hotbarY - 26f * s, 14f * s, 20f * s)
-    if scrollUp then catalogScroll = (catalogScroll - 1).max(0)
-    if scrollDown then catalogScroll = (catalogScroll + 1).min(scrollMax)
-    if catalogScroll < 0 then catalogScroll = 0
+    val items=catalogItems
+    val scrollMax=((items.length+8)/9-6).max(0)
+    catalogScroll=catalogScroll.max(0).min(scrollMax)
+    val slot=l.slots.indexWhere(_.contains(mx,my))
+    val index=slot+catalogScroll*9
+    if slot>=0 && index<items.length then setHeldItem(items(index),maxStackSize)
+    else if l.scroll.contains(mx,my) then
+      catalogScroll=math.round((my-l.scroll.y)/l.scroll.h*scrollMax).max(0).min(scrollMax)
 
   private def inRect(px: Float, py: Float, x: Float, y: Float, w: Float, h: Float): Boolean =
     px >= x && px <= x + w && py >= y && py <= y + h
@@ -1539,6 +1485,7 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
       glfwSetInputMode(window, GLFW_RAW_MOUSE_MOTION, if captured then GLFW_TRUE else GLFW_FALSE)
 
   private def mouseFramebufferPos(): (Float, Float) =
+    if window==0L then return (framebufferWidth/2f,framebufferHeight/2f)
     glfwGetCursorPos(window, cursorXBuffer, cursorYBuffer)
     glfwGetWindowSize(window, windowWidthBuffer, windowHeightBuffer)
     val sx = framebufferWidth.toFloat / windowWidthBuffer.get(0).max(1)
@@ -2040,6 +1987,11 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
     meta.writeInt(0x52454731) // REG1 custom voxel ID mapping
     meta.writeUTF(CustomBlocks.manifest)
     meta.writeUTF(modManager.rules.snapshot)
+    meta.writeInt(0x53555231) // SUR1: additive survival state; all older inventory ids remain stable.
+    meta.writeFloat(airSupply.remaining)
+    meta.writeInt(furnaceRequested)
+    fieldJournal.writeProgress(meta)
+    meta.writeUTF(ZombieSystem.snapshot(zombies.toVector))
     meta.flush()
     raw.toByteArray
 
@@ -2132,6 +2084,7 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
         terrainHeightCache.clear()
         clearLoadedChunks(saveFirst = false)
         resetInventory()
+        airSupply.reset(); zombies.clear(); zombieSerial=0; RainRenderer.reset()
         networkBlockOverrides.clear()
         val chunkCount = meta.readInt().max(0).min(200000)
         val storedChunks=Vector.fill(chunkCount)((meta.readInt(),meta.readInt()))
@@ -2146,6 +2099,15 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
           if meta.available()>=4 && meta.readInt()==0x52454731 then
             require(meta.readUTF()==CustomBlocks.manifest,"This world requires its original custom-block registry. Restore the world's modpack before loading it.")
             modManager.rules.receive(meta.readUTF())
+            if meta.available()>=4 && meta.readInt()==0x53555231 then
+              val air=meta.readFloat()
+              airSupply.remaining=if air.isFinite then air.max(0f).min(airSupply.capacity) else airSupply.capacity
+              furnaceRequested=meta.readInt().max(0).min(64)
+              fieldJournal.readProgress(meta)
+              ZombieSystem.parseSnapshot(meta.readUTF()).foreach { (id,pos,angle,hp,burn,hurt) =>
+                val z=ZombieSystem.Zombie(id,pos); z.yaw=angle; z.targetYaw=angle; z.health=hp; z.burning=burn
+                zombies+=z; zombieSerial=zombieSerial.max(id+1)
+              }
         storedChunks.foreach((cx,cz) => loadChunkIfSaved(cx,cz))
       )
       true
@@ -2250,6 +2212,12 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
     breakingProgress = 0f
 
   private def openFurnace(): Unit =
+    val nearby=(for x <- -4 to 4; y <- -3 to 2; z <- -4 to 4 yield
+      activeBlockAt(floor(camera.x).toInt+x,floor(camera.y).toInt+y,floor(camera.z).toInt+z)).exists(b => b==Block.Furnace || b==Block.FurnaceLit)
+    if gameMode==GameMode.Survival && !nearby then
+      addChatMessage("Place a stone furnace nearby to smelt. Press J for the survival guide.")
+      return
+    furnaceScroll=0
     screen = Screen.FurnaceUI
     setCursorCaptured(captured = false)
     breakingBlock = null
@@ -2280,6 +2248,11 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
       chatMessages(i) = (msg, t - dt)
     chatMessages.filterInPlace((_, t) => t > -2f)
     cleanupRemotePlayers()
+    updateEnvironmentalDamage(dt)
+    updateBreathing(dt)
+    updateHealthRegen(dt)
+    updateZombies(dt)
+    updatePlayerKnockback(dt)
     if chatOpen || modUiCursorMode then
       updateWeather(dt)
       updateBlockParticles(dt)
@@ -2393,8 +2366,6 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
       else if dest!=null && Seq(dest.x,dest.y,dest.z).forall(_.isFinite) then camera=dest
     updateJournal(dt)
     updateGameFeel(dt, frameStartCamera, moving, sprinting, crouching)
-    updateEnvironmentalDamage(dt)
-    updateHealthRegen(dt)
     updateWater(dt)
     updateWeather(dt)
     updateBubbles(dt)
@@ -2511,6 +2482,10 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
       chatMessages(i) = (msg, t - dt)
     chatMessages.filterInPlace((_, t) => t > -2f)
     cleanupRemotePlayers()
+    updateBreathing(dt)
+    updateEnvironmentalDamage(dt)
+    updateZombies(dt)
+    updatePlayerKnockback(dt)
     // Keep chunk meshes alive while multiplayer menus are open, but cap work so UI remains responsive.
     processChunkWorkMainThread(0, 8)
     flushDirtyChunks()
@@ -2564,8 +2539,10 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
     val rightDown = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS
     if leftDown && (!leftWasDown || breakingBlock != null) && !chatOpen then sendSwing()
     if rightDown && !rightWasDown && !chatOpen then sendSwing()
-    if leftDown && !leftWasDown && gameMode == GameMode.Creative then breakTargetBlock(dropItem = false)
-    if gameMode == GameMode.Survival then updateBlockBreaking(lastFrameTime.toFloat, leftDown)
+    val attacking=leftDown && attackTargetEntity()
+    if !attacking && leftDown && !leftWasDown && gameMode == GameMode.Creative then breakTargetBlock(dropItem = false)
+    if attacking then resetBreaking()
+    else if gameMode == GameMode.Survival then updateBlockBreaking(lastFrameTime.toFloat, leftDown)
     else if !leftDown then resetBreaking()
     if rightDown && !rightWasDown then placeTargetBlock()
     leftWasDown = leftDown
@@ -2578,13 +2555,13 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
     raycast().foreach { hit =>
       val target = hit.block
       val block = activeBlockAt(target._1, target._2, target._3)
-      if !block.solid && block != Block.Torch then resetBreaking()
+      if (!block.solid && block != Block.Torch) || block==Block.Bedrock then resetBreaking()
       else
         val sameTarget = breakingBlock != null && breakingBlock == target
         if !sameTarget then
           breakingBlock = target
           breakingProgress = 0f
-        breakingProgress += dt * modManager.rules.get("miningSpeed") / blockHardness(block)
+        breakingProgress += dt * modManager.rules.get("miningSpeed") * ToolSystem.miningSpeed(block,heldHotbarBlock) * (if isUnderwater then 0.35f else 1f) / blockHardness(block)
         if breakingProgress >= 1f then
           breakTargetBlock(dropItem = true)
           resetBreaking()
@@ -2863,6 +2840,8 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
       if old > playerHealth then
         timeSinceLastDamage = 0f
         hurtOverlay = 1f
+        if isClientOnlyMultiplayer then gameClient.send("HURTME")
+        else if gameServer!=null then gameServer.broadcast(s"HURT|$playerName")
         playHurtSound()
         val shown = (math.ceil(applied.toDouble * 2.0) / 2.0).toFloat
         addChatMessage(s"Took $shown damage${if reason.nonEmpty then s" from $reason" else ""}")
@@ -2871,10 +2850,12 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
         val spawn = findSpawn()
         camera = spawn
         velocity = Vec3(0f, 0f, 0f)
+        playerKnockback=Vec3(0,0,0)
         onGround = false
         fallPeakY = camera.y
         playerHealth = maxPlayerHealth
         playerFood = 20f
+        airSupply.reset()
         timeSinceLastDamage = healthRegenDelay
         addChatMessage("You woke up at spawn")
         modManager.events.fireSpawn(ModPlayerEvent(modManager.api,playerName,"respawn"))
@@ -2900,6 +2881,10 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
     val minY = floor(camera.y - 1.62f).toInt; val maxY = floor(camera.y + 0.20f).toInt
     val minZ = floor(camera.z - half).toInt; val maxZ = floor(camera.z + half).toInt
     (minX to maxX).exists(x => (minY to maxY).exists(y => (minZ to maxZ).exists(z => activeBlockAt(x, y, z) == block)))
+
+  private def updateBreathing(dt: Float): Unit =
+    val damage=airSupply.update(dt,isUnderwater,gameMode==GameMode.Survival)
+    if damage>0 then damagePlayer(damage,"drowning")
 
   private def updateEnvironmentalDamage(dt: Float): Unit =
     if cactusDamageCooldown > 0f then cactusDamageCooldown = (cactusDamageCooldown - dt).max(0f)
@@ -2981,7 +2966,9 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
 
   private def blockAt(pos: Vec3): Block = activeBlockAt(floor(pos.x).toInt, floor(pos.y).toInt, floor(pos.z).toInt)
 
-  private def isUnderwater: Boolean = blockAt(camera) == Block.Water
+  private def isUnderwater: Boolean =
+    val x=floor(camera.x).toInt; val y=floor(camera.y).toInt; val z=floor(camera.z).toInt
+    activeBlockAt(x,y,z)==Block.Water && (activeBlockAt(x,y+1,z)==Block.Water || camera.y<y+(waterLevelAt(x,y,z)/8f)*0.90f)
 
   private def waterSubmersion: Float =
     val probes = Array(camera, camera + Vec3(0f, -0.72f, 0f), camera + Vec3(0f, -1.45f, 0f))
@@ -3114,6 +3101,40 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
             weatherWind = env.wind
             lightningFlash = env.lightning
             environmentReceived = true
+        else if line.startsWith("MOBS") && isClientOnlyMultiplayer then
+          val snapshot=ZombieSystem.parseSnapshot(line)
+          val alive=snapshot.map(_._1).toSet
+          zombies.filterInPlace(z => alive(z.id))
+          snapshot.foreach { (id,pos,angle,hp,burn,hurt) =>
+            val z=zombies.find(_.id==id).getOrElse { val created=ZombieSystem.Zombie(id,pos); zombies+=created; created }
+            z.target=pos; z.targetYaw=angle; z.health=hp; z.burning=burn; z.hurt=hurt
+          }
+        else if line.startsWith("ZHIT|") && gameServer!=null then
+          if parts.length==3 then hitZombie(parts(1),parts(2).toInt)
+        else if line.startsWith("PHIT|") && gameServer!=null then
+          if parts.length==3 then hitPlayer(parts(1),parts(2))
+        else if line.startsWith("PDMG|") && isClientOnlyMultiplayer then
+          if parts.length==5 then
+            val amount=parts(2).toFloat; val dx=parts(3).toFloat; val dz=parts(4).toFloat
+            if amount.isFinite && amount>0 && amount<=12 && dx.isFinite && dz.isFinite && dx*dx+dz*dz<=25 then
+              applyCombatDamage(amount,networkSafeName(parts(1)),Vec3(dx,0,dz))
+        else if line.startsWith("HURT|") then
+          if parts.length==2 then remotePlayers.get(networkSafeName(parts(1))).foreach(_.hurt=1f)
+        else if line.startsWith("ZVOICE|") && isClientOnlyMultiplayer then
+          if parts.length==6 then
+            val event=parts(1).toInt; val variant=parts(2).toInt
+            val pos=Vec3(parts(3).toFloat,parts(4).toFloat,parts(5).toFloat)
+            if event>=0 && event<=3 && variant>=0 && variant<3 && Seq(pos.x,pos.y,pos.z).forall(_.isFinite) then
+              zombieVoice(event,variant,pos)
+        else if line.startsWith("ZDAMAGE|") && isClientOnlyMultiplayer then
+          if parts.length==2 then
+            val amount=parts(1).toFloat
+            if amount.isFinite && amount>=0 && amount<=8 then damagePlayer(amount,"zombie")
+        else if line.startsWith("ZLOOT|") && isClientOnlyMultiplayer then
+          if parts.length==3 then
+            val item=Block.fromOrdinal(parts(1).toInt); val count=parts(2).toInt
+            if Set(Block.CoalLump,Block.IronIngot,Block.CopperIngot).contains(item) && count>=1 && count<=2 then
+              gainItem(item,count); fieldJournal.defeatedZombie()
         else if line.startsWith("RULES|") && isClientOnlyMultiplayer then
           modManager.rules.receive(line.stripPrefix("RULES|"))
         else if line.startsWith("VANILLA_USE|") && isClientOnlyMultiplayer then
@@ -3151,7 +3172,7 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
             else
               val axis=loadedChunkForBlock(edit.x,edit.z).map(c => c.getLogAxis(Math.floorMod(edit.x,16),edit.y,Math.floorMod(edit.z,16)).id).getOrElse(0)
               gameServer.sendTo(sender,BlockboxNet.block(edit.x,edit.y,edit.z,old.ordinal,if old==Block.Water then waterLevelAt(edit.x,edit.y,edit.z) else 0,axis,torchMountAt(edit.x,edit.y,edit.z).id))
-            val (loot,count)=if accepted && broken.exists(_.dropItem) then modManager.drops.getOrElse(old,(old,1)) else (Block.Air,0)
+            val (loot,count)=if accepted && broken.exists(_.dropItem) && ToolSystem.canHarvest(old,remotePlayers.get(sender).map(_.heldBlock).getOrElse(Block.Air)) then modManager.drops.getOrElse(old,ToolSystem.drop(old)) else (Block.Air,0)
             gameServer.sendTo(sender,s"EDIT_RESULT|${edit.x}|${edit.y}|${edit.z}|${if accepted then 1 else 0}|${loot.ordinal}|$count")
         else if line.startsWith("EDIT_RESULT|") && isClientOnlyMultiplayer then
           if parts.length==7 then
@@ -3206,8 +3227,10 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
         else if line.startsWith("GMODE|") then
           if parts.length >= 3 then
             val name = networkSafeName(parts(1))
+            val mode=GameMode.fromOrdinal(parts(2).toInt)
+            remotePlayers.get(name).foreach(_.mode=mode)
             if name.equalsIgnoreCase(playerName) then
-              gameMode = GameMode.fromOrdinal(parts(2).toInt)
+              gameMode = mode
               velocity = Vec3(0f, 0f, 0f); onGround = false
               addChatMessage(s"Game mode set to $gameMode")
         else if line.startsWith("FLY|") then
@@ -3299,6 +3322,9 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
             if name.nonEmpty then knownPlayerNames += name
             rememberPlayerColor(name, colorId)
             if name != playerName then addChatMessage(s"$name joined the game")
+            if gameServer!=null then
+              gameServer.broadcast(s"GMODE|$playerName|${gameMode.ordinal}")
+              remotePlayers.valuesIterator.foreach(p => gameServer.broadcast(s"GMODE|${p.name}|${p.mode.ordinal}"))
         else if line.startsWith("LEFT|") then
           if parts.length >= 2 then
             val name = networkSafeName(parts(1))
@@ -3357,6 +3383,7 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
       val headOffset = angleDeltaDegrees(rp.bodyYaw, rp.yaw)
       if abs(headOffset) > 65f then rp.bodyYaw = rp.yaw - headOffset.max(-65f).min(65f)
       rp.swing = (rp.swing - dt * 3.4f).max(0f)
+      rp.hurt=(rp.hurt-dt*3f).max(0f)
     }
 
   private def sendPlayerPositionNetwork(): Unit =
@@ -3425,13 +3452,14 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
     else glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
     def finishWorldPost(): Unit =
       if shaderScene && shaderPipeline != null then shaderPipeline.finishFrame(framebufferWidth, framebufferHeight, gameTime)
+      if screen!=Screen.Playing && isUnderwater then renderUnderwaterOverlay()
     screen match
       case Screen.Playing =>
         renderWorld()
-        if isUnderwater then renderUnderwaterOverlay()
         finishWorldPost()
         renderPlayerNameTags()
         renderFirstPersonHeldBlock()
+        if isUnderwater then renderUnderwaterOverlay()
         renderHurtOverlay()
         renderHud()
         renderHotbar()
@@ -3481,8 +3509,8 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
     val (fogR, fogG, fogB) = clearColor
     val isUnder = isUnderwater
     val visibleDist = renderDistanceBlocks.toFloat
-    val fogStart = if isUnder then 2f else visibleDist * (0.65f * 1.6f / fogDensity).max(0.25f).min(0.85f)
-    val fogEnd = if isUnder then 18f else visibleDist * 0.95f
+    val fogStart = if isUnder then 0.6f else visibleDist * (0.65f * 1.6f / fogDensity).max(0.25f).min(0.85f)
+    val fogEnd = if isUnder then 25f else visibleDist * (0.95f-localRain*0.22f)
     applyTerrainFog(isUnder)
     setFogColor(fogR, fogG, fogB)
     glMatrixMode(GL_PROJECTION); glLoadIdentity()
@@ -3584,6 +3612,19 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
     if shaderActive then shaderPipeline.setPass(1)
     chunkList.foreach(_.drawCutout(camera))
     glDisable(GL_ALPHA_TEST)
+    if shaderActive then
+      shaderPipeline.end(); shaderPipeline.enableColorOnlyWrites()
+    else if shaderPipeline!=null then shaderPipeline.endCompatibilityLighting()
+    glClientActiveTexture(GL_TEXTURE1); glDisableClientState(GL_TEXTURE_COORD_ARRAY); glClientActiveTexture(GL_TEXTURE0)
+    renderRemotePlayers3D()
+    renderZombies3D()
+    restoreChunkRenderState(isUnder,fogR,fogG,fogB)
+    glEnable(GL_TEXTURE_2D); activeAtlas.bind()
+    glEnableClientState(GL_VERTEX_ARRAY); glEnableClientState(GL_COLOR_ARRAY); glEnableClientState(GL_NORMAL_ARRAY); glEnableClientState(GL_TEXTURE_COORD_ARRAY)
+    if shaderActive then
+      shaderPipeline.beginWorld(fogR,fogG,fogB,fogStart,fogEnd,daylightFactor,gameTime,sunDirection,moonDirection,(camera.x,camera.y,camera.z),near.toFloat,far.toFloat,localRain,localWetness,isUnder)
+      glDisable(GL_FOG)
+    else if shaderPipeline!=null then shaderPipeline.beginCompatibilityLighting(daylightFactor)
     // Batch translucent + water pass
     glEnable(GL_BLEND)
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
@@ -3646,7 +3687,6 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
     renderWeatherRain()
     renderBlockParticles()
     renderTorchEffects()
-    renderRemotePlayers3D()
     if modManager.events.hasListeners("worldRender") then
       val oldProgram=glGetInteger(org.lwjgl.opengl.GL20.GL_CURRENT_PROGRAM)
       glPushAttrib(GL_ALL_ATTRIB_BITS); glPushClientAttrib(GL_CLIENT_ALL_ATTRIB_BITS)
@@ -3723,8 +3763,205 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
     // vertical view component so flight cannot fog the entire ground to sky color.
     val lift = if underwater || shader then 0f else (camera.y-Terrain.seaLevel).max(0f)*sin(toRadians(pitch)).toFloat.max(0f)
     glFogi(GL_FOG_MODE,GL_LINEAR)
-    glFogf(GL_FOG_START,if underwater then 2f else distance*(0.65f*1.6f/fogDensity).max(0.25f).min(0.85f)+lift)
-    glFogf(GL_FOG_END,if underwater then 18f else distance*0.95f+lift)
+    glFogf(GL_FOG_START,if underwater then 0.6f else distance*(0.65f*1.6f/fogDensity).max(0.25f).min(0.85f)+lift)
+    glFogf(GL_FOG_END,if underwater then 25f else distance*(0.95f-localRain*0.22f)+lift)
+
+  private def skyOpenAt(x: Int,y: Int,z: Int): Boolean =
+    var h=y.max(0)
+    while h<Terrain.worldHeight do
+      if activeBlockAt(x,h,z).solid then return false
+      h+=1
+    true
+
+  private def waterDepthAt(pos: Vec3): Float =
+    val x=floor(pos.x).toInt; val z=floor(pos.z).toInt
+    var y=floor(pos.y).toInt
+    if activeBlockAt(x,y,z)!=Block.Water then 0f
+    else
+      while y<Terrain.worldHeight-1 && activeBlockAt(x,y+1,z)==Block.Water do y+=1
+      (y+0.9f-pos.y).max(0f)
+
+  private def renderImmersedEntity(eye: Vec3)(draw: ((Float,Float,Float)) => Unit): Unit =
+    val light=lightColorAt(eye.x,eye.y-0.6f,eye.z)
+    val feet=eye.y-1.62f
+    val x=floor(eye.x).toInt; val z=floor(eye.z).toInt
+    val water=(floor(feet).toInt to ceil(eye.y+0.2f).toInt).filter(y => activeBlockAt(x,y,z)==Block.Water)
+    if water.isEmpty then draw(light)
+    else
+      val top=water.max+0.9f
+      val depth=waterDepthAt(Vec3(eye.x,feet+0.1f,eye.z)).max(1.2f)
+      val tinted=WaterAppearance.tint(light,depth)
+      def clip(sign: Double): Unit =
+        entityWaterPlane.clear(); entityWaterPlane.put(0).put(sign).put(0).put(-top*sign).flip()
+        glClipPlane(GL_CLIP_PLANE0,entityWaterPlane)
+      glEnable(GL_CLIP_PLANE0)
+      clip(1); draw(light)
+      clip(-1); draw(tinted)
+      glDisable(GL_CLIP_PLANE0)
+
+  private def updateZombies(dt: Float): Unit =
+    combatCooldown=(combatCooldown-dt).max(0f)
+    if isClientOnlyMultiplayer then
+      zombies.foreach { z =>
+        val before=z.pos
+        z.hurt=(z.hurt-dt*3f).max(0f)
+        z.pos+=(z.target-z.pos)*(1f-exp(-dt*14f).toFloat)
+        z.yaw+=(((z.targetYaw-z.yaw+540f)%360f)-180f)*(1f-exp(-dt*12f).toFloat)
+        val distance=sqrt(pow(z.pos.x-before.x,2)+pow(z.pos.z-before.z,2)).toFloat
+        z.gait+=distance*4.2f
+        z.stride=approachExp(z.stride,(distance/dt.max(0.001f)/1.65f).min(1f),10f,dt)
+      }
+      return
+    val targets=Vector(ZombieSystem.Target(playerName,camera,gameMode==GameMode.Survival))++
+      remotePlayers.valuesIterator.map(p => ZombieSystem.Target(p.name,p.targetPos,p.mode==GameMode.Survival)).toVector
+    zombieSpawnTimer-=dt
+    if zombieSpawnTimer<=0f && zombies.length<(targets.length*8).min(32) then
+      zombieSpawnTimer=2.5f
+      val around=targets(zombieRng.nextInt(targets.length)).eye
+      var tries=0; var spawned=false
+      while tries<18 && !spawned do
+        val angle=zombieRng.nextFloat()*Pi.toFloat*2f
+        val radius=22f+zombieRng.nextFloat()*30f
+        val x=floor(around.x+sin(angle).toFloat*radius).toInt
+        val z=floor(around.z+cos(angle).toFloat*radius).toInt
+        if loadedChunkForBlock(x,z).nonEmpty then
+          val surface=terrainGen.heightAt(x,z)
+          val top=if tries%3==0 then (around.y-1.6f).toInt+zombieRng.nextInt(13)-6 else surface+1
+          var y=top.min(Terrain.worldHeight-3).max(5)
+          val bottom=(y-10).max(5)
+          while y>=bottom && !spawned do
+            val feet=Vec3(x+0.5f,y.toFloat,z+0.5f)
+            val (sky,block)=lightLevelsAt(x,y+1,z)
+            val exposed=skyOpenAt(x,y+1,z)
+            val effectiveSky=if exposed then 15 else sky
+            if !targets.exists(p => (p.eye-feet).lengthSquared<20*20) &&
+                ZombieSystem.canSpawn(feet,daylightFactor,effectiveSky,block,activeBlockAt) then
+              val mob=ZombieSystem.Zombie(zombieSerial,feet); zombieSerial+=1
+              zombies+=mob; spawned=true
+            y-=1
+        tries+=1
+    zombies.foreach { z =>
+      val x=floor(z.pos.x).toInt; val y=floor(z.pos.y+1.8f).toInt; val zz=floor(z.pos.z).toInt
+      val exposed=daylightFactor>0.72f && skyOpenAt(x,y,zz)
+      val rain=WeatherField.sample(weatherCells,z.pos.x,z.pos.z).rain>0.25f
+      val beforeHealth=z.health
+      z.voiceTimer-=dt
+      if z.voiceTimer<=0f then
+        emitZombieVoice(z,0); z.voiceTimer=6f+zombieRng.nextFloat()*8f
+      ZombieSystem.update(z,dt,targets,exposed,rain,activeBlockAt).foreach { attack =>
+        emitZombieVoice(z,2)
+        if attack.name==playerName then damagePlayer(attack.damage,"zombie")
+        else if gameServer!=null then gameServer.sendTo(attack.name,s"ZDAMAGE|${attack.damage}")
+      }
+      if z.health<beforeHealth then emitZombieVoice(z,if z.health<=0 then 3 else 1)
+    }
+    zombies.filterInPlace(z => z.health>0 && z.pos.y>1 && targets.exists(p => (p.eye-z.pos).lengthSquared<112*112))
+    zombieSyncTimer-=dt
+    if gameServer!=null && zombieSyncTimer<=0 then
+      gameServer.broadcast(ZombieSystem.snapshot(zombies.toVector)); zombieSyncTimer=0.10f
+
+  private def attackTargetEntity(): Boolean =
+    val blockDistance=raycast(CombatSystem.reach).map(_.distance).getOrElse(CombatSystem.reach)
+    val mobs=zombies.filter(_.health>0).flatMap(z => ZombieSystem.rayDistance(camera,viewDirection,z,blockDistance).map(d => (d,Left(z.id))))
+    val players=remotePlayers.valuesIterator.filter(_.mode==GameMode.Survival).flatMap(p =>
+      CombatSystem.rayPlayer(camera,viewDirection,p.pos,blockDistance).map(d => (d,Right(p.name)))).toVector
+    (mobs++players).minByOption(_._1) match
+      case None => false
+      case Some((_,target)) =>
+        if combatCooldown<=0f then
+          combatCooldown=CombatSystem.cooldown.toFloat; sendSwing()
+          target match
+            case Left(id) => if isClientOnlyMultiplayer then gameClient.send(s"ZHIT|$id") else hitZombie(playerName,id)
+            case Right(name) => if isClientOnlyMultiplayer then gameClient.send(s"PHIT|$name") else hitPlayer(playerName,name)
+        true
+
+  private def combatant(name: String): Option[(Vec3,Float,Float,Block,GameMode)] =
+    if name==playerName then Some((camera,yaw,pitch,heldHotbarBlock,gameMode))
+    else remotePlayers.get(name).map(p => (p.targetPos,p.targetYaw,p.targetPitch,p.heldBlock,p.mode))
+
+  private def acceptCombatHit(attacker: String): Boolean =
+    val now=System.nanoTime()*1e-9
+    if now-lastCombatHit.getOrElse(attacker,Double.NegativeInfinity)<CombatSystem.cooldown then false
+    else
+      lastCombatHit(attacker)=now
+      true
+
+  private def hitZombie(attacker: String,id: Int): Unit =
+    for z <- zombies.find(z => z.id==id && z.health>0); (from,ry,rp,held,_) <- combatant(attacker) do
+      val direction=BlockboxRaycast.viewDirection(ry,rp)
+      val wall=BlockboxRaycast.raycast(from,direction,CombatSystem.reach,(x,y,z) => if activeBlockAt(x,y,z).solid then activeBlockAt(x,y,z) else Block.Air)
+        .map(_.distance).getOrElse(CombatSystem.reach)
+      if z.hitCooldown<=0f && ZombieSystem.rayDistance(from,direction,z,wall).nonEmpty && acceptCombatHit(attacker) then
+        z.health-=ToolSystem.damage(held); z.hurt=1f; z.hitCooldown=0.45f
+        val away=Vec3(z.pos.x-from.x,0,z.pos.z-from.z).normalized
+        z.velocity=away*4f+Vec3(0,3f,0); z.grounded=false
+        emitZombieVoice(z,if z.health<=0f then 3 else 1)
+        if z.health<=0f then
+          val loot=if zombieRng.nextFloat()<0.12f then Block.IronIngot else Block.CoalLump
+          if attacker==playerName then
+            gainItem(loot,1)
+            fieldJournal.defeatedZombie()
+          else if gameServer!=null then gameServer.sendTo(attacker,s"ZLOOT|${loot.ordinal}|1")
+
+  private def hitPlayer(attacker: String,victim: String): Unit =
+    if attacker==victim then return
+    for (from,ry,rp,held,_) <- combatant(attacker); (target,_,_,_,mode) <- combatant(victim) do
+      if mode==GameMode.Survival && CombatSystem.canHit(from,ry,rp,target,activeBlockAt) && acceptCombatHit(attacker) then
+        val push=Vec3(target.x-from.x,0,target.z-from.z).normalized*4.2f
+        val amount=ToolSystem.damage(held)
+        if victim==playerName then applyCombatDamage(amount,attacker,push)
+        else if gameServer!=null then
+          gameServer.sendTo(victim,s"PDMG|$attacker|$amount|${push.x}|${push.z}")
+          gameServer.broadcast(s"HURT|$victim")
+          remotePlayers.get(victim).foreach(_.hurt=1f)
+
+  private def applyCombatDamage(amount: Float,attacker: String,push: Vec3): Unit =
+    val before=camera; val health=playerHealth
+    damagePlayer(amount,attacker)
+    if playerHealth<health && (camera-before).lengthSquared<1f then
+      playerKnockback=push
+      velocity=Vec3(velocity.x,velocity.y.max(2.8f),velocity.z); onGround=false
+
+  private def updatePlayerKnockback(dt: Float): Unit =
+    if playerKnockback.lengthSquared>0.001f then
+      movePlayer(playerKnockback.x*dt,0,playerKnockback.z*dt)
+      playerKnockback=playerKnockback*exp(-dt*7f).toFloat
+    else playerKnockback=Vec3(0,0,0)
+
+  private def zombieVoice(event: Int,variant: Int,where: Vec3): Unit =
+    val delta=where-camera
+    val distance=sqrt(delta.lengthSquared).toFloat
+    if distance<28f then
+      val right=Vec3(cos(toRadians(yaw)).toFloat,0,sin(toRadians(yaw)).toFloat)
+      val pan=((delta.x*right.x+delta.z*right.z)/distance.max(1f)).max(-1f).min(1f)
+      val cover=if ZombieSystem.visible(camera,where,activeBlockAt) then 1f else 0.32f
+      val gain=0.85f*pow(1f-distance/28f,1.6).toFloat*cover*(if isUnderwater then 0.55f else 1f)
+      playMonsterSound(event,variant,gain,pan)
+
+  private def emitZombieVoice(z: ZombieSystem.Zombie,event: Int): Unit =
+    val variant=zombieRng.nextInt(if event<=1 then 3 else 2)
+    val where=z.pos+Vec3(0,1.35f,0)
+    zombieVoice(event,variant,where)
+    if gameServer!=null then gameServer.broadcast(s"ZVOICE|$event|$variant|${where.x}|${where.y}|${where.z}")
+
+  private def damageFlash(value: Float): Boolean = value>0f && (value*14f).toInt%2==0
+
+  private def renderZombies3D(): Unit =
+    if zombies.isEmpty then return
+    resetGlArraysAndBuffers()
+    glEnable(GL_DEPTH_TEST); glDepthMask(true); glEnable(GL_FOG); glDisable(GL_BLEND)
+    applyTerrainFog(isUnderwater)
+    BlockboxPlayerModel.beginLighting(viewSpace=false)
+    zombies.foreach { z =>
+      val avatar=z.avatar
+      avatar.pos=z.pos+Vec3(0,1.62f,0); avatar.yaw=z.yaw; avatar.bodyYaw=z.yaw
+      avatar.gait=z.gait; avatar.stride=z.stride
+      renderImmersedEntity(avatar.pos) { light =>
+        BlockboxPlayerModel.render(avatar,camera,(0.17f,0.40f,0.39f),light,gameTime,None,zombie=true,hurt=damageFlash(z.hurt))
+      }
+    }
+    BlockboxPlayerModel.endLighting()
+    zombies.filter(_.burning>0).foreach(z => ZombieFire.render(z,camera,gameTime))
 
   private def renderRemotePlayers3D(): Unit =
     if remotePlayers.isEmpty then return
@@ -3736,9 +3973,10 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
     BlockboxPlayerModel.beginLighting(viewSpace = false)
     remotePlayers.valuesIterator.foreach { rp =>
       if now - rp.lastSeen <= 8.0 then
-        val light = lightColorAt(rp.pos.x, rp.pos.y - 0.6f, rp.pos.z)
-        val held = if rp.heldBlock == Block.Air then None else Some(() => drawHeldItemAtGrip(rp.heldBlock, light))
-        BlockboxPlayerModel.render(rp, camera, colorForId(rp.colorId), light, gameTime, held)
+        renderImmersedEntity(rp.pos) { light =>
+          val held = if rp.heldBlock == Block.Air then None else Some(() => drawHeldItemAtGrip(rp.heldBlock, light))
+          BlockboxPlayerModel.render(rp, camera, colorForId(rp.colorId), light, gameTime, held,hurt=damageFlash(rp.hurt))
+        }
     }
     BlockboxPlayerModel.endLighting()
 
@@ -3803,9 +4041,9 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
     val s = uiScale; val p = journalPanel
     drawPanel(p.x,p.y,p.w,p.h)
     centeredText(framebufferWidth/2f,p.y+25f*s,"Field journal",0.96f,0.91f,0.72f,2.2f*s)
-    centeredText(framebufferWidth/2f,p.y+57f*s,"A few trails to follow. Make the world your own.",0.64f,0.75f,0.70f,1f*s)
+    centeredText(framebufferWidth/2f,p.y+57f*s,s"Survival trails  ${journalPage+1}/2  -  use the arrows to turn pages",0.64f,0.75f,0.70f,1f*s)
     val rowH = ((p.h-146f*s)/6f).min(54f*s)
-    fieldJournal.entries.zipWithIndex.foreach { case (entry,i) =>
+    fieldJournal.entries.slice(journalPage*6,journalPage*6+6).zipWithIndex.foreach { case (entry,i) =>
       val y = p.y+90f*s+i*rowH
       rect(p.x+24f*s,y,p.w-48f*s,rowH-5f*s,0.11f,0.16f,0.16f,0.95f)
       val label = if entry.completed then "DONE" else s"${entry.progress.min(entry.target)}/${entry.target}"
@@ -3815,6 +4053,8 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
       renderTextShadow(p.x+p.w-38f*s-tw,y+8f*s,label,0.66f,0.86f,0.58f,1.1f*s)
     }
     drawButton(p.x+p.w/2f-100f*s,p.y+p.h-50f*s,200f*s,34f*s,"Back to world",accent=true)
+    drawButton(p.x+24f*s,p.y+p.h-50f*s,100f*s,34f*s,"< Trails")
+    drawButton(p.x+p.w-124f*s,p.y+p.h-50f*s,100f*s,34f*s,"Tools >")
 
   private def renderHud(): Unit =
     glDisable(GL_DEPTH_TEST); glDisable(GL_CULL_FACE); setupOrtho()
@@ -3835,7 +4075,6 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
   private def renderFirstPersonHeldBlock(): Unit =
     if hotbarBlocks.isEmpty || modUiCursorMode then return
     val block=if equipProgress>=1f then heldHotbarBlock else equippedBlock
-    val pose=FirstPersonPose.sample(block,viewmodelKick,cameraBobPhase,cameraBobAmount,viewmodelObstruction,equipProgress)
     updateFrameLight()
     resetGlArraysAndBuffers()
     glDisable(GL_FOG); glDisable(GL_CULL_FACE); glDisable(GL_TEXTURE_2D)
@@ -3846,19 +4085,39 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
       glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA)
     glMatrixMode(GL_PROJECTION); glLoadIdentity()
     val aspect=framebufferWidth.toDouble/framebufferHeight.toDouble.max(1)
-    val near=0.05; val top=tan(toRadians(72.0)*0.5)*near
-    glFrustum(if resolved then 0 else -top*aspect,top*aspect,-top,top,near,8)
+    val near=0.05; val top=tan(toRadians(70.0)*0.5)*near
+    glFrustum(if resolved then firstPersonPass.leftEdge*top*aspect else -top*aspect,top*aspect,-top,top,near,8)
     glMatrixMode(GL_MODELVIEW); glLoadIdentity()
     BlockboxPlayerModel.beginLighting(viewSpace = true)
     val lagYaw=((((yaw-viewmodelYaw)%360f)+540f)%360f-180f).max(-40f).min(40f)
     val lagPitch=(pitch-viewmodelPitch).max(-40f).min(40f)
     glRotatef(lagPitch*0.14f,1,0,0); glRotatef(lagYaw*0.14f,0,1,0)
-    glTranslatef(pose.position.x*(aspect.toFloat/1.2f).min(1f),pose.position.y,pose.position.z)
-    glRotatef(pose.rotation.x,1,0,0); glRotatef(pose.rotation.y,0,1,0); glRotatef(pose.rotation.z,0,0,1)
-    glTranslatef(0,-0.39f,0); glRotatef(180,1,0,0)
     val light=viewmodelLight(block)
-    val attachment=if block==Block.Air then None else Some(() => drawHeldItemAtGrip(block,light))
-    BlockboxPlayerModel.arm(colorForId(localColorId),light,1,pose.elbow,pose.grip,attachment)
+    val narrow=(aspect.toFloat/1.2f).min(1f)
+    if block==Block.Air then
+      val hand=FirstPersonPose.handPose(viewmodelKick,cameraBobPhase,cameraBobAmount,viewmodelObstruction,equipProgress)
+      glTranslatef(hand.position.x*narrow,hand.position.y,hand.position.z)
+      glRotatef(hand.yaw,0,1,0); glRotatef(hand.roll,0,0,1)
+      glTranslatef(-1f,3.6f,3.5f); glRotatef(120f,0,0,1); glRotatef(200f,1,0,0); glRotatef(-135f,0,1,0)
+      glTranslatef(5.6f-5f/16,2f/16,0); glRotatef(0.1f*180f/Pi.toFloat,0,0,1)
+      // The vanilla chain expects Minecraft's Y-down model space; Z 180 maps the skin box into it.
+      glRotatef(180f,0,0,1)
+      BlockboxPlayerModel.firstPersonArm(colorForId(localColorId),light)
+    else
+      val held=FirstPersonPose.itemPose(block,viewmodelKick,cameraBobPhase,cameraBobAmount,viewmodelObstruction,equipProgress)
+      glTranslatef(held.position.x*narrow,held.position.y,held.position.z)
+      glRotatef(held.attack.y,0,1,0); glRotatef(held.attack.z,0,0,1); glRotatef(held.attack.x,1,0,0)
+      glRotatef(-45f,0,1,0)
+      val display=held.display
+      glTranslatef(display.position.x,display.position.y,display.position.z)
+      glRotatef(display.rotation.x,1,0,0); glRotatef(display.rotation.y,0,1,0); glRotatef(display.rotation.z,0,0,1)
+      glScalef(display.size,display.size,display.size)
+      if Block.isItem(block) then
+        val center=ItemModel.centerFromGrip
+        glTranslatef(center.x,center.y,center.z)
+        ItemModel.render(block,light)
+      else if block==Block.Torch then drawHeldTorch(light,inFist=false)
+      else drawHeldBlockCube(block,1f,light)
     BlockboxPlayerModel.endLighting()
     if resolved then firstPersonPass.finish()
     glColor4f(1,1,1,1); glBindTexture(GL_TEXTURE_2D,0)
@@ -3878,10 +4137,16 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
     if block==Block.Torch then
       glScalef(grip.size,grip.size,grip.size)
       drawHeldTorch(light)
+    else if Block.isItem(block) then
+      glScalef(grip.size,grip.size,grip.size)
+      ItemModel.render(block,light)
     else drawHeldBlockCube(block,grip.size,light)
     glPopMatrix()
 
-  private def drawHeldTorch(light: (Float, Float, Float)): Unit =
+  /** @param inFist origin at the grip with the butt cut inside the fist; otherwise the
+    * origin is the item sprite's center, where Minecraft's torch sprite has its stick. */
+  private def drawHeldTorch(light: (Float, Float, Float), inFist: Boolean = true): Unit =
+    val origin=if inFist then FirstPersonPose.torchGripHeight else 0.5f
     glEnable(GL_TEXTURE_2D); activeAtlas.bind()
     glTexEnvi(GL_TEXTURE_ENV,GL_TEXTURE_ENV_MODE,GL_MODULATE)
     val lit = glIsEnabled(GL_LIGHTING)
@@ -3902,8 +4167,8 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
           val sway=if tip then (sin(gameTime*7.3f)*0.6+sin(gameTime*12.1f+1.3f)*0.4).toFloat*0.018f else 0f
           val lift=if tip then sin(gameTime*9.563f).toFloat*0.016f else 0f
           // The handle is tilted inside the fist; a full-length butt would poke out of the palm.
-          val y=vertex.y.max(FirstPersonPose.torchGripHeight-0.06f)
-          glVertex3f(vertex.x-0.5f+sway,y-FirstPersonPose.torchGripHeight+lift,vertex.z-0.5f+sway*0.6f)
+          val y=if inFist then vertex.y.max(FirstPersonPose.torchGripHeight-0.06f) else vertex.y
+          glVertex3f(vertex.x-0.5f+sway,y-origin+lift,vertex.z-0.5f+sway*0.6f)
       }
       glEnd()
       if flamePass && lit then glEnable(GL_LIGHTING)
@@ -3964,7 +4229,7 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
     // Reserve independent HUD lanes: hotbar at the bottom, hearts above it, then
     // transient item labels. This prevents the old item-name/health overlap.
     val healthLaneY = framebufferHeight.toFloat - hotbarSlot - 42f * s
-    val y = if gameMode == GameMode.Survival then healthLaneY - 26f * s else healthLaneY
+    val y = if gameMode == GameMode.Survival then healthLaneY - (if isUnderwater || airSupply.remaining<airSupply.capacity then 54f else 26f) * s else healthLaneY
     val label = blockName(block)
     val scale = (0.82f * s).max(0.72f)
     val tw = textWidth(label, scale)
@@ -4040,6 +4305,10 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
         else if playerHealth == threshold - 1 then 0.5f
         else 0f
       drawHeartIcon(x, barY, unit, fill, bgAlpha)
+    if isUnderwater || airSupply.remaining<airSupply.capacity then
+      for i <- 0 until airSupply.bubbles do
+        val popping=i==airSupply.bubbles-1 && (airSupply.remaining/airSupply.capacity*10f)%1f<0.20f
+        BlockboxRender2D.drawBubbleIcon(startX+i*gap,barY-unit-7f*s,unit,popping)
 
   private def renderBlockInfo(): Unit =
     if framebufferHeight < 200 then return
@@ -4165,6 +4434,9 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
     pass(0f, 0f, r, g, b, 1f)
 
   private def renderBlockIcon(block: Block, x: Float, y: Float, size: Float): Unit =
+    if Block.isItem(block) then
+      ItemModel.icon(block,x,y,size)
+      return
     glEnable(GL_TEXTURE_2D); activeAtlas.bind()
     glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE)
 
@@ -4211,17 +4483,11 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
     BlockboxRender2D.renderCrosshair(framebufferWidth, framebufferHeight)
 
   private def renderUnderwaterOverlay(): Unit =
-    BlockboxRender2D.renderUnderwaterOverlay(framebufferWidth, framebufferHeight, glfwGetTime().toFloat)
+    if !UnderwaterEffect.render(framebufferWidth,framebufferHeight,gameTime,waterDepthAt(camera)) then
+      BlockboxRender2D.renderUnderwaterOverlay(framebufferWidth, framebufferHeight, gameTime)
 
   private def clearColor: (Float, Float, Float) =
-    val base = BlockboxSky.clearColor(isUnderwater, dayPhase, daylightFactor, localRain, localCloud, localLightning)
-    if isUnderwater || localRain <= 0.01f then base
-    else
-      val storm = localRain.max(0f).min(1f)
-      val gray = 0.43f * daylightFactor + 0.09f
-      (base._1 * (1f - 0.34f * storm) + gray * 0.20f * storm,
-       base._2 * (1f - 0.31f * storm) + gray * 0.24f * storm,
-       base._3 * (1f - 0.25f * storm) + gray * 0.30f * storm)
+    BlockboxSky.clearColor(isUnderwater,dayPhase,daylightFactor,localRain,localCloud,localLightning)
 
   protected val dayLengthSeconds = BlockboxSky.dayLengthSeconds
   protected val nightLengthSeconds = BlockboxSky.nightLengthSeconds
@@ -4335,46 +4601,12 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
     true
 
   private def renderWeatherRain(): Unit =
-    if localRain < 0.025f || isUnderwater || !cameraHasOpenSky then return
+    if isUnderwater then return
     if localSnowfall then
-      renderSnowfall()
-      return
-    resetGlArraysAndBuffers()
-    glEnable(GL_DEPTH_TEST); glDepthMask(false)
-    glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
-    glDisable(GL_TEXTURE_2D); glDisable(GL_CULL_FACE); glDisable(GL_ALPHA_TEST)
-    glLineWidth((1.0f + localRain * 0.8f).min(1.8f))
-    val radius = (8f + localRain * 9f).toInt
-    val t = gameTime
-    val baseX = floor(camera.x).toInt
-    val baseZ = floor(camera.z).toInt
-    glBegin(GL_LINES)
-    var gx = -radius
-    while gx <= radius do
-      var gz = -radius
-      while gz <= radius do
-        val wx = baseX + gx
-        val wz = baseZ + gz
-        var h = wx * 73428767 ^ wz * 912931 ^ worldSeed.toInt
-        h ^= h >>> 13; h *= 1274126177; h ^= h >>> 16
-        if (h & 7) <= 2 then
-          val jitterX = (((h >>> 8) & 255).toFloat / 255f - 0.5f) * 0.85f
-          val jitterZ = (((h >>> 16) & 255).toFloat / 255f - 0.5f) * 0.85f
-          val phase = (((h & 0xffff).toFloat / 65535f) + t * (0.78f + ((h >>> 24) & 15) * 0.012f)) % 1f
-          val yTop = camera.y + 10f - phase * 22f
-          val terrainTop = terrainGen.heightAt(wx, wz).toFloat + 1f
-          if yTop > terrainTop - 0.5f then
-            val y0 = yTop.max(terrainTop)
-            val len = 0.65f + localRain * 1.35f
-            val wind = weatherWind * 0.13f
-            val alpha = (0.12f + localRain * 0.34f).min(0.46f)
-            glColor4f(0.64f, 0.76f, 0.90f, alpha)
-            glVertex3f(wx.toFloat + jitterX - camera.x, y0, wz.toFloat + jitterZ - camera.z)
-            glVertex3f(wx.toFloat + jitterX - camera.x + wind, (y0 - len).max(terrainTop), wz.toFloat + jitterZ - camera.z + wind * 0.35f)
-        gz += 1
-      gx += 1
-    glEnd()
-    glLineWidth(1f); glDepthMask(true); glDisable(GL_BLEND)
+      if localRain>0.025f then renderSnowfall()
+    else
+      RainRenderer.render(camera,yaw,gameTime,daylightFactor,localRain,weatherWind,weatherCells,worldSeed,activeBlockAt,
+        (x,z) => loadedChunkForBlock(x,z).nonEmpty)
 
   private def renderSnowfall(): Unit =
     resetGlArraysAndBuffers()
@@ -4913,170 +5145,122 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
     drawButton(bx, by0 + bh + gap, bw, bh, "Options")
     drawButton(bx, by0 + (bh + gap) * 2f, bw, bh, if multiplayerMode then "Disconnect to Title" else "Save and Quit to Title")
 
+  private def drawVoxelStack(block: Block,count: Int,p: UiRect,s: Float,showCount: Boolean=true): Unit =
+    if block==Block.Air || count<=0 then return
+    val size=p.w-4*s
+    renderBlockIcon(block,p.x+2*s,p.y+2*s,size)
+    if showCount && count>1 then
+      val label=count.toString; val cs=s*0.95f
+      val x=p.x+p.w-compactNumberWidth(label,cs)-s
+      val y=p.y+p.h-6*cs
+      drawCompactNumber(x+s,y+s,label,cs,0.16f,0.16f,0.16f)
+      drawCompactNumber(x,y,label,cs,1f,1f,1f)
+
+  private def voxelButton(p: UiRect,label: String,s: Float,mx: Float,my: Float): Unit =
+    BlockboxRender2D.voxelPanel(p,s*0.65f)
+    if p.contains(mx,my) then rect(p.x+s,p.y+s,p.w-3*s,p.h-3*s,1,1,1,0.17f)
+    centeredTextFit(p.x+p.w/2,p.y+(p.h-7*s*0.7f)/2,label,0.20f,0.20f,0.20f,0.7f*s,p.w-5*s)
+
+  private def renderInventoryPlayer(p: UiRect,mx: Float,my: Float): Unit =
+    resetGlArraysAndBuffers()
+    glPushAttrib(GL_ALL_ATTRIB_BITS)
+    glViewport(p.x.toInt,(framebufferHeight-p.y-p.h).toInt,p.w.toInt.max(1),p.h.toInt.max(1))
+    glEnable(GL_SCISSOR_TEST); glScissor(p.x.toInt,(framebufferHeight-p.y-p.h).toInt,p.w.toInt.max(1),p.h.toInt.max(1))
+    glDepthMask(true); glClear(GL_DEPTH_BUFFER_BIT)
+    glEnable(GL_DEPTH_TEST); glDisable(GL_FOG); glDisable(GL_BLEND); glDisable(GL_CULL_FACE)
+    glMatrixMode(GL_PROJECTION); glPushMatrix(); glLoadIdentity()
+    val halfW=1.06f*p.w/p.h
+    glOrtho(-halfW,halfW,-0.10,2.02,0.1,20)
+    glMatrixMode(GL_MODELVIEW); glPushMatrix(); glLoadIdentity(); glTranslatef(0,0,-4)
+    glRotatef(6f+(my-p.y-p.h/2)/p.h*8f,1,0,0)
+    BlockboxPlayerModel.beginLighting(viewSpace=true)
+    val angle=180f+((mx-p.x-p.w/2)/p.w*22f).max(-30).min(30)
+    val preview=RemotePlayer(playerName,Vec3(0,1.62f,0),Vec3(0,1.62f,0),angle,angle,0,0,0,localColorId,heldHotbarBlock)
+    preview.pitch=((my-p.y-p.h/2)/p.h*30f).max(-25).min(25)
+    val held=if heldHotbarBlock==Block.Air then None else Some(() => drawHeldItemAtGrip(heldHotbarBlock,(1f,1f,1f)))
+    BlockboxPlayerModel.render(preview,Vec3(0,0,0),colorForId(localColorId),(1f,1f,1f),0,held)
+    BlockboxPlayerModel.endLighting()
+    glMatrixMode(GL_MODELVIEW); glPopMatrix(); glMatrixMode(GL_PROJECTION); glPopMatrix(); glMatrixMode(GL_MODELVIEW)
+    glPopAttrib(); resetGlArraysAndBuffers()
+
   private def renderSurvivalInventory(): Unit =
-    compactHotbarAssignments()
-    glDisable(GL_DEPTH_TEST); glDisable(GL_CULL_FACE); setupOrtho()
-    dimBackground()
-    val cx = framebufferWidth / 2f; val cy = framebufferHeight / 2f; val s = uiScale
-    val pw = (760f * s).min(framebufferWidth * 0.94f)
-    val ph = (500f * s).min(framebufferHeight * 0.88f)
-    val px = cx - pw / 2f; val py = cy - ph / 2f
-    drawPanel(px, py, pw, ph)
-    centeredTextFit(cx, py + 24f * s, "Inventory", 1f, 0.95f, 0.65f, 1.18f * s, pw - 80f * s)
-    rect(px + 18f * s, py + 44f * s, pw - 36f * s, 1f, 0.30f, 0.30f, 0.35f, 0.25f)
+    glDisable(GL_DEPTH_TEST); glDisable(GL_CULL_FACE); setupOrtho(); dimBackground()
+    val l=BlockboxUiLayout.inventory(framebufferWidth,framebufferHeight,uiScale)
+    val p=l.panel; val s=l.scale; val (mx,my)=mouseFramebufferPos()
+    BlockboxRender2D.voxelPanel(p,s)
+    renderText(p.x+9*s,p.y+8*s,"Inventory",0.23f,0.23f,0.23f,s)
+    renderText(p.x+98*s,p.y+17*s,"Crafting",0.23f,0.23f,0.23f,s)
+    rect(l.preview.x-s,l.preview.y-s,l.preview.w+2*s,l.preview.h+2*s,0.35f,0.35f,0.35f,1)
+    rect(l.preview.x,l.preview.y,l.preview.w,l.preview.h,0,0,0,1)
+    renderInventoryPlayer(l.preview,mx,my)
+    var hovered: Option[(Block,UiRect)]=None
+    def slot(block: Block,count: Int,r: UiRect,selected: Boolean=false): Unit =
+      val hover=r.contains(mx,my)
+      BlockboxRender2D.voxelSlot(r,s,hover,selected)
+      drawVoxelStack(block,count,r,s)
+      if hover && block!=Block.Air && count>0 then hovered=Some(block->r)
+    l.storage.indices.foreach(i => slot(backpackBlocks(i),backpackCounts(i),l.storage(i)))
+    l.hotbar.indices.foreach(i => slot(hotbarBlocks(i),hotbarCounts(i),l.hotbar(i),i==selectedBlock))
+    l.craft.indices.foreach(i => slot(craftGridBlocks(i),craftGridCounts(i),l.craft(i)))
+    val result=currentCraftingResult
+    slot(result.map(_.output).getOrElse(Block.Air),result.map(_.outputCount).getOrElse(0),l.output)
+    val arrowX=p.x+162*s; val arrowY=p.y+56*s
+    rect(arrowX,arrowY,13*s,5*s,0.52f,0.52f,0.52f,1)
+    for i <- 0 until 5 do rect(arrowX+(12+i)*s,arrowY+(i-2)*s,s,(9-2*i)*s,0.52f,0.52f,0.52f,1)
+    voxelButton(l.furnace,"Furnace",s,mx,my); voxelButton(l.journal,"Journal",s,mx,my); voxelButton(l.close,"x",s,mx,my)
+    if heldInventoryBlock==Block.Air then hovered.foreach { (block,r) => renderTooltip(r.x+r.w/2,r.y-2*s,blockName(block)) }
+    renderHeldInventoryCursor(mx,my)
 
-    val (mx, my) = mouseFramebufferPos()
-    val gridW = pw * 0.58f
-    val cols = 9
-    val gap = (4f * s).max(3f)
-    val slot = ((gridW - gap * (cols - 1)) / cols).min(44f * s).max(30f)
-    val invX = px + 28f * s
-    val invY = py + 76f * s
-    val items = inventoryStacks
-    var hoveredBlock: Block | Null = null
-    var hoveredX = 0f; var hoveredY = 0f
-
-    rect(invX - 10f * s, invY - 28f * s, gridW + 18f * s, ph - 140f * s, 0.22f, 0.22f, 0.22f, 0.72f)
-    renderTextShadow(invX, invY - 22f * s, "Storage", 0.90f, 0.90f, 0.90f, 0.84f * s)
-    for i <- 0 until inventoryGridSlots do
-      val col = i % cols; val row = i / cols
-      val sx = invX + col * (slot + gap); val sy = invY + row * (slot + gap)
-      val block = if i < items.length then items(i)._1 else Block.Air
-      val count = if i < items.length then items(i)._2 else 0
-      val hasItem = validHotbarBlock(block) && count > 0
-      val isSelected = false
-      val hover = inRect(mx, my, sx, sy, slot, slot)
-      if hover && hasItem then
-        hoveredBlock = block; hoveredX = sx + slot / 2f; hoveredY = sy
-      BlockboxRender2D.drawSlotFrame(sx, sy, slot, isSelected, hover, s)
-      if hasItem && count > 0 then
-        val icon = (slot * 0.58f).min(26f * s).max(16f)
-        renderBlockIcon(block, sx + (slot - icon) / 2f, sy + (slot - icon) / 2f, icon)
-        val ns = count.toString
-        val countScale = (1.6f * s).max(1.3f).min(slot / 18f)
-        val tw = compactNumberWidth(ns, countScale)
-        val nx = sx + slot - tw - 5f * s
-        val ny = sy + slot - 5f * countScale - 4f * s
-        rect(nx - 2f * s, ny - 1f * s, tw + 4f * s, 5f * countScale + 3f * s, 0f, 0f, 0f, 0.60f)
-        drawCompactNumber(nx, ny, ns, countScale, 1f, 1f, 1f)
-
-    val craftPanelW = (pw - gridW - 78f * s).max(210f * s)
-    val craftX = px + pw - 28f * s - craftPanelW
-    val craftY = py + 76f * s
-    rect(craftX - 10f * s, craftY - 28f * s, craftPanelW + 18f * s, ph - 140f * s, 0.22f, 0.22f, 0.22f, 0.72f)
-    centeredTextFit(craftX + craftPanelW / 2f, craftY - 22f * s, "Crafting", 0.90f, 0.90f, 0.90f, 0.88f * s, craftPanelW)
-    centeredTextFit(craftX + craftPanelW / 2f, craftY - 2f * s, "3 x 3 Crafting", 0.62f, 0.62f, 0.62f, 0.64f * s, craftPanelW)
-    val cGap = 6f * s
-    val cSlot = ((craftPanelW - 56f * s) / 4f).min(42f * s).max(28f)
-    val gridStartX = craftX + 12f * s
-    val gridStartY = craftY + 28f * s
-    var ci = 0
-    while ci < 9 do
-      val col = ci % 3
-      val row0 = ci / 3
-      val sx = gridStartX + col * (cSlot + cGap)
-      val sy = gridStartY + row0 * (cSlot + cGap)
-      val b = craftGridBlocks(ci)
-      val hoverCraft = inRect(mx, my, sx, sy, cSlot, cSlot)
-      BlockboxRender2D.drawSlotFrame(sx, sy, cSlot, selected = false, hoverCraft, s)
-      if b != Block.Air && craftGridCounts(ci) > 0 then
-        val icon = (cSlot * 0.60f).min(25f * s).max(16f)
-        renderBlockIcon(b, sx + (cSlot - icon) / 2f, sy + (cSlot - icon) / 2f, icon)
-        if craftGridCounts(ci) > 1 then
-          val ns = craftGridCounts(ci).toString
-          val cs = (1.45f * s).max(1.2f).min(cSlot / 18f)
-          val tw = compactNumberWidth(ns, cs)
-          drawCompactNumber(sx + cSlot - tw - 4f * s, sy + cSlot - 5f * cs - 3f * s, ns, cs, 1f, 1f, 1f)
-        if hoverCraft then
-          hoveredBlock = b; hoveredX = sx + cSlot / 2f; hoveredY = sy
-      ci += 1
-    val outSize = cSlot * 1.16f
-    val outX = craftX + craftPanelW - outSize - 16f * s
-    val outY = gridStartY + cSlot + cGap
-    val result = currentCraftingResult
-    val canCraft = result.exists(canCraftCurrent)
-    val hoverOut = inRect(mx, my, outX, outY, outSize, outSize)
-    rect(outX - 1f * s, outY - 1f * s, outSize + 2f * s, outSize + 2f * s, 0f, 0f, 0f, 0.86f)
-    rect(outX, outY, outSize, outSize, if canCraft then (if hoverOut then 0.26f else 0.18f) else 0.08f, if canCraft then (if hoverOut then 0.30f else 0.22f) else 0.09f, if canCraft then (if hoverOut then 0.24f else 0.16f) else 0.11f, 0.95f)
-    centeredTextFit(outX + outSize / 2f, outY - 18f * s, "output", 0.62f, 0.66f, 0.74f, 0.66f * s, outSize + 34f * s)
-    result.foreach { r =>
-      val icon = (outSize * 0.58f).min(27f * s).max(16f)
-      renderBlockIcon(r.output, outX + (outSize - icon) / 2f, outY + (outSize - icon) / 2f, icon)
-      centeredTextFit(outX + outSize / 2f, outY + outSize + 8f * s, s"${r.outputCount}x ${blockName(r.output)}", if canCraft then 0.80f else 0.45f, if canCraft then 0.86f else 0.48f, if canCraft then 0.72f else 0.50f, 0.48f * s, craftPanelW * 0.46f)
-      if hoverOut then renderTooltip(outX + outSize / 2f, outY - 6f * s, r.label)
-    }
-    if result.isEmpty && InventoryModel.normalizeCraftGrid(craftGridBlocks).nonEmpty then
-      centeredTextFit(craftX + craftPanelW / 2f, craftY + 178f * s, "no matching recipe", 0.72f, 0.48f, 0.45f, 0.48f * s, craftPanelW - 18f * s)
-    else if result.nonEmpty && !canCraft then
-      centeredTextFit(craftX + craftPanelW / 2f, craftY + 178f * s, "missing ingredients", 0.72f, 0.48f, 0.45f, 0.48f * s, craftPanelW - 18f * s)
-
-    val hotbarPanelY = py + ph - 104f * s
-    drawInventoryHotbar(px + 28f * s, hotbarPanelY, pw - 56f * s, s, mx, my)
-    rect(px + 18f * s, py + ph - 54f * s, pw - 36f * s, 1f, 0.30f, 0.30f, 0.35f, 0.20f)
-    drawButton(px + 22f * s, py + ph - 46f * s, 130f * s, (34f * s).min(ph * 0.08f).max(28f), "Furnace")
-    drawButton(px + pw - 104f * s, py + ph - 46f * s, 82f * s, (34f * s).min(ph * 0.08f).max(28f), "Close")
-    if hoveredBlock != null then renderTooltip(hoveredX, hoveredY - 8f * s, blockName(hoveredBlock.asInstanceOf[Block]))
-    renderHeldInventoryCursor(mx, my)
-
+  private val catalogTabs=Vector("All","Blocks","Tools","Nature","Materials")
   private def renderCatalog(): Unit =
-    glDisable(GL_DEPTH_TEST); glDisable(GL_CULL_FACE); setupOrtho()
-    dimBackground()
-    val cx = framebufferWidth / 2f
-    val cy = framebufferHeight / 2f
-    val s = uiScale
-    val panelW = (700f * s).min(framebufferWidth * 0.94f)
-    val panelH = (500f * s).min(framebufferHeight * 0.88f)
-    val panelX = cx - panelW / 2f
-    val panelY = cy - panelH / 2f
-    drawPanel(panelX, panelY, panelW, panelH)
-    rect(panelX + 8f * s, panelY + 8f * s, panelW - 16f * s, 36f * s, 0.14f, 0.16f, 0.22f, 0.80f)
-    renderTextShadow(panelX + 18f * s, panelY + 16f * s, "Block Catalog", 1f, 0.95f, 0.65f, 1.0f * s)
-    drawButton(panelX + panelW - 88f * s, panelY + 12f * s, 72f * s, 28f * s, "X")
-
-    val slotSize = (48f * s).max(34f).min(54f)
-    val gridX = panelX + 20f * s
-    val gridY = panelY + 52f * s
-    val hotbarPanelY = panelY + panelH - 76f * s
-    val cols = ((panelW - 54f * s) / slotSize).toInt.max(4).min(12)
-    val items = catalogItems
-    val visibleRows = ((hotbarPanelY - gridY - 26f * s) / slotSize).toInt.max(1)
-    val scrollMax = ((items.length - 1) / cols - visibleRows + 2).max(0)
-    if catalogScroll > scrollMax then catalogScroll = scrollMax
-    val (mx, my) = mouseFramebufferPos()
-    for i <- items.indices.drop(catalogScroll * cols).take(cols * visibleRows) do
-      val idx = i - catalogScroll * cols
-      val col = idx % cols
-      val row = idx / cols
-      val sx = gridX + col * slotSize
-      val sy = gridY + row * slotSize
-      val block = items(i)
-      val isSelected = hotbarBlocks.isDefinedAt(selectedBlock) && hotbarBlocks(selectedBlock) == block
-      val hover = inRect(mx, my, sx, sy, slotSize, slotSize)
-      val base = if hover then 0.13f else 0.09f
-      rect(sx - 1f * s, sy - 1f * s, slotSize + 2f * s, slotSize + 2f * s, 0.02f, 0.02f, 0.02f, 0.70f)
-      rect(sx, sy, slotSize, slotSize, base, base + 0.01f, base + 0.03f, 0.86f)
-      rect(sx + 1f * s, sy + 1f * s, slotSize - 2f * s, 2f * s, 0.12f, 0.14f, 0.16f, 0.16f)
-      if isSelected then
-        rect(sx - 2f * s, sy - 2f * s, slotSize + 4f * s, 2f * s, 1f, 0.92f, 0.45f, 0.55f)
-        rect(sx - 2f * s, sy + slotSize, slotSize + 4f * s, 2f * s, 1f, 0.92f, 0.45f, 0.55f)
-        rect(sx - 2f * s, sy - 2f * s, 2f * s, slotSize + 4f * s, 1f, 0.92f, 0.45f, 0.55f)
-        rect(sx + slotSize, sy - 2f * s, 2f * s, slotSize + 4f * s, 1f, 0.92f, 0.45f, 0.55f)
-      val icon = (slotSize * 0.56f).min(28f * s).max(18f)
-      renderBlockIcon(block, sx + (slotSize - icon) / 2f, sy + (slotSize - icon) / 2f, icon)
-      if heldInventoryBlock == block then
-        rect(sx + 5f * s, sy + slotSize - 8f * s, slotSize - 10f * s, 3f * s, 1f, 0.86f, 0.30f, 0.85f)
-    if scrollMax > 0 then
-      val scrollBarX = panelX + panelW - 16f * s
-      val scrollBarH = hotbarPanelY - gridY - 8f * s
-      val thumbH = (scrollBarH / (scrollMax + 1)).max(10f * s)
-      val thumbY = panelY + 52f * s + (catalogScroll.toFloat / scrollMax.max(1)) * (scrollBarH - thumbH)
-      rect(scrollBarX, panelY + 52f * s, 12f * s, scrollBarH, 0.02f, 0.02f, 0.02f, 0.40f)
-      rect(scrollBarX, thumbY, 12f * s, thumbH, 0.35f, 0.40f, 0.50f, 0.70f)
-    drawInventoryHotbar(panelX + 20f * s, hotbarPanelY, panelW - 40f * s, s, mx, my)
-    renderHeldInventoryCursor(mx, my)
-    val infoY = panelY + panelH - 18f * s
-    rect(panelX + 12f * s, infoY - 2f * s, panelW - 24f * s, 18f * s, 0.06f, 0.08f, 0.12f, 0.50f)
-    centeredTextFit(cx, infoY, "Choose a block, then choose a hotbar slot", 0.55f, 0.60f, 0.70f, 0.56f * s, panelW - 32f * s)
+    glDisable(GL_DEPTH_TEST); glDisable(GL_CULL_FACE); setupOrtho(); dimBackground()
+    val l=BlockboxUiLayout.catalog(framebufferWidth,framebufferHeight,uiScale)
+    val p=l.panel; val s=l.scale; val (mx,my)=mouseFramebufferPos()
+    val icons=Vector(Block.Grass,Block.Brick,Block.IronSword,Block.Leaves,Block.DiamondGem)
+    l.tabs.zipWithIndex.foreach { (tab,i) =>
+      val active=i==catalogCategory
+      val r=if active then tab else UiRect(tab.x,tab.y+3*s,tab.w,tab.h-3*s)
+      BlockboxRender2D.voxelPanel(r,s)
+      if !active then rect(r.x+3*s,r.y+3*s,r.w-6*s,r.h-6*s,0,0,0,0.12f)
+      renderBlockIcon(icons(i),r.x+(r.w-16*s)/2,r.y+4*s,16*s)
+    }
+    BlockboxRender2D.voxelPanel(p,s)
+    val activeTab=l.tabs(catalogCategory)
+    rect(activeTab.x+3*s,p.y,activeTab.w-6*s,4*s,0.77f,0.77f,0.77f,1)
+    renderText(p.x+12*s,p.y+11*s,catalogTabs(catalogCategory),0.23f,0.23f,0.23f,s)
+    voxelButton(l.close,"x",s,mx,my)
+    val q=l.search
+    BlockboxRender2D.voxelSlot(q,s)
+    rect(q.x+s,q.y+s,q.w-2*s,q.h-2*s,0.30f,0.30f,0.30f,1)
+    val placeholder=catalogQuery.isEmpty && !catalogSearchFocused
+    val label=if placeholder then "Search items..." else catalogQuery+(if catalogSearchFocused && (gameTime*2).toInt%2==0 then "_" else "")
+    renderText(q.x+4*s,q.y+5*s,label,if placeholder then 0.66f else 1f,if placeholder then 0.66f else 1f,if placeholder then 0.66f else 1f,0.9f*s)
+    val items=catalogItems; val scrollMax=((items.length+8)/9-6).max(0)
+    catalogScroll=catalogScroll.max(0).min(scrollMax)
+    var hovered: Option[(Block,UiRect)]=None
+    l.slots.zipWithIndex.foreach { (r,i) =>
+      val index=i+catalogScroll*9; val hover=r.contains(mx,my)
+      BlockboxRender2D.voxelSlot(r,s,hover)
+      if index<items.length then
+        drawVoxelStack(items(index),1,r,s,false)
+        if hover then hovered=Some(items(index)->r)
+    }
+    if items.isEmpty then centeredText(p.x+p.w/2,p.y+120*s,"No items found",0.30f,0.30f,0.30f,s)
+    val track=l.scroll
+    BlockboxRender2D.voxelSlot(track,s)
+    val thumbH=if scrollMax==0 then track.h-2*s else (track.h*6f/(scrollMax+6)).max(12*s)
+    val thumbY=track.y+s+catalogScroll.toFloat/scrollMax.max(1)*(track.h-2*s-thumbH)
+    BlockboxRender2D.voxelPanel(UiRect(track.x+s,thumbY,track.w-2*s,thumbH),s*0.5f)
+    rect(p.x+10*s,p.y+213*s,p.w-20*s,s,0.38f,0.38f,0.38f,1)
+    l.hotbar.zipWithIndex.foreach { (r,i) =>
+      val hover=r.contains(mx,my)
+      BlockboxRender2D.voxelSlot(r,s,hover,i==selectedBlock)
+      drawVoxelStack(hotbarBlocks(i),1,r,s,false)
+      if hover && hotbarBlocks(i)!=Block.Air then hovered=Some(hotbarBlocks(i)->r)
+    }
+    if heldInventoryBlock==Block.Air then hovered.foreach { (block,r) => renderTooltip(r.x+r.w/2,r.y-2*s,blockName(block)) }
+    l.tabs.zipWithIndex.find(_._1.contains(mx,my)).foreach((r,i) => renderTooltip(r.x+r.w/2,r.y,catalogTabs(i)))
+    renderHeldInventoryCursor(mx,my)
 
   protected def blockName(block: Block): String =
     block.displayName.replaceAll("([a-z])([A-Z])", "$1 $2")
@@ -5119,17 +5303,10 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
       i += 1
 
   private def renderHeldInventoryCursor(mx: Float, my: Float): Unit =
-    if heldInventoryBlock != Block.Air then
-      val s = uiScale
-      val size = (34f * s).max(24f)
-      rect(mx + 10f * s, my + 10f * s, size + 8f * s, size + 8f * s, 0f, 0f, 0f, 0.45f)
-      renderBlockIcon(heldInventoryBlock, mx + 14f * s, my + 14f * s, size)
-      if gameMode == GameMode.Survival && heldInventoryCount > 1 then
-        val ns = heldInventoryCount.toString
-        val cs = (1.8f * s).max(1.4f).min(size / 16f)
-        val tw = compactNumberWidth(ns, cs)
-        drawCompactNumber(mx + 14f * s + size - tw - 2f * s, my + 14f * s + size - 5f * cs, ns, cs, 1f, 1f, 1f)
-      renderTooltip(mx + 34f * s, my + 12f * s, s"Holding ${blockName(heldInventoryBlock)}")
+    if heldInventoryBlock!=Block.Air then
+      val s=if screen==Screen.Catalog then BlockboxUiLayout.catalog(framebufferWidth,framebufferHeight,uiScale).scale
+        else BlockboxUiLayout.inventory(framebufferWidth,framebufferHeight,uiScale).scale
+      drawVoxelStack(heldInventoryBlock,heldInventoryCount,UiRect(mx-10*s,my-10*s,20*s,20*s),s,gameMode==GameMode.Survival)
 
   private def renderTooltip(anchorX: Float, anchorY: Float, text: String): Unit =
     if text == null || text.isEmpty then return
@@ -5148,7 +5325,16 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
     renderTextShadow(x + padX, y + padY, text, 0.96f, 0.96f, 0.96f, scale)
 
   private def catalogItems: Array[Block] =
-    Block.all.filter(b => b != Block.Air && b != Block.Water && b != Block.Bedrock && b != Block.FurnaceLit)
+    Block.all.filter { b =>
+      val available=b!=Block.Air && b!=Block.Water && b!=Block.Bedrock && b!=Block.FurnaceLit && CustomBlocks.registered(b)
+      val category=catalogCategory match
+        case 1 => b.solid && !BlockTints.isFoliage(b)
+        case 2 => ToolSystem.isTool(b) || b==Block.Torch || b==Block.Furnace
+        case 3 => BlockTints.isFoliage(b) || Set(Block.Grass,Block.Dirt,Block.Sand,Block.Cactus,Block.Wood,Block.BirchWood,Block.PineWood,Block.AcaciaWood,Block.Snow,Block.Clay).contains(b)
+        case 4 => Block.isItem(b) && !ToolSystem.isTool(b)
+        case _ => true
+      available && category && blockName(b).toLowerCase(java.util.Locale.ROOT).contains(catalogQuery.toLowerCase(java.util.Locale.ROOT))
+    }
 
   private def renderFurnaceUI(): Unit =
     glDisable(GL_DEPTH_TEST); glDisable(GL_CULL_FACE); setupOrtho()
@@ -5166,11 +5352,12 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
     val listY = py + 82f * s
     val listW = (210f * s).min(pw * 0.34f).max(160f * s)
     val rowH = (38f * s).max(30f)
-    rect(listX - 8f * s, listY - 34f * s, listW + 16f * s, rowH * smeltableInputs.length + 48f * s, 0.22f, 0.22f, 0.22f, 0.72f)
-    centeredTextFit(listX + listW / 2f, listY - 24f * s, "Choose input", 0.90f, 0.90f, 0.90f, 0.66f * s, listW)
+    rect(listX - 8f * s, listY - 34f * s, listW + 16f * s, rowH * 6 + 48f * s, 0.22f, 0.22f, 0.22f, 0.72f)
+    centeredTextFit(listX + listW / 2f, listY - 24f * s, "Choose input (scroll)", 0.90f, 0.90f, 0.90f, 0.66f * s, listW)
     val furnaceItems = smeltableInputs.filter(b => smeltResult(b).nonEmpty && totalItemCount(b) > 0)
+    furnaceScroll=furnaceScroll.min((furnaceItems.length-6).max(0))
     for i <- 0 until inventoryGridSlots.min(6) do
-      val b = if i < furnaceItems.length then furnaceItems(i) else Block.Air
+      val b = if i+furnaceScroll < furnaceItems.length then furnaceItems(i+furnaceScroll) else Block.Air
       val y = listY + i * rowH
       val count = if b == Block.Air then 0 else totalItemCount(b)
       val selected = b != Block.Air && furnaceInput == b
@@ -5217,13 +5404,13 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
     rect(arrowX, arrowY, arrowW, 13f * s, 0.02f, 0.02f, 0.025f, 0.72f)
     val progress = (furnaceProgress / 4f).max(0f).min(1f)
     rect(arrowX + 2f * s, arrowY + 2f * s, (arrowW - 4f * s) * progress, 9f * s, 0.95f, 0.58f, 0.16f, 0.82f)
-    centeredTextFit(arrowX + arrowW / 2f, arrowY - 16f * s, "smelts instantly per click", 0.50f, 0.56f, 0.68f, 0.46f * s, arrowW + 40f * s)
+    centeredTextFit(arrowX + arrowW / 2f, arrowY - 16f * s, if furnaceRequested>0 then "Smelting..." else "4 seconds per item", 0.50f, 0.56f, 0.68f, 0.46f * s, arrowW + 40f * s)
 
     val fuelY = py + 212f * s
     rect(workX + 8f * s, fuelY, workW - 16f * s, 58f * s, 0.22f, 0.22f, 0.22f, 0.72f)
-    val woodFuelCount = fuelBlocks.filter(_ != Block.Coal).map(totalItemCount).sum
-    renderTextShadow(workX + 18f * s, fuelY + 10f * s, s"Fuel: Coal ${totalItemCount(Block.Coal)} | Wood/Planks $woodFuelCount", 0.76f, 0.82f, 0.92f, 0.58f * s)
-    val fuelText = if furnaceFuelRemaining > 0f then f"Buffered fuel: $furnaceFuelRemaining%.0f ticks" else "Buffered fuel: empty"
+    val woodFuelCount = fuelBlocks.filter(b => b != Block.Coal && b!=Block.CoalLump).map(totalItemCount).sum
+    renderTextShadow(workX + 18f * s, fuelY + 10f * s, s"Fuel: Coal ${totalItemCount(Block.Coal)+totalItemCount(Block.CoalLump)} | Wood/Planks $woodFuelCount", 0.76f, 0.82f, 0.92f, 0.58f * s)
+    val fuelText = if furnaceFuelRemaining > 0f then f"Buffered fuel: $furnaceFuelRemaining%.1f smelts" else "Buffered fuel: empty"
     renderTextShadow(workX + 18f * s, fuelY + 32f * s, fuelText, 0.62f, 0.68f, 0.78f, 0.52f * s)
     val recipeText = furnaceInput match
       case Block.Air => "Pick an input from the list."
@@ -5253,13 +5440,15 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
     val listW = (210f * s).min(pw * 0.34f).max(160f * s)
     val rowH = (38f * s).max(30f)
     val furnaceItems = smeltableInputs.filter(b => smeltResult(b).nonEmpty && totalItemCount(b) > 0)
+    furnaceScroll=furnaceScroll.min((furnaceItems.length-6).max(0))
     var i = 0
     while i < inventoryGridSlots.min(6) do
       val y = listY + i * rowH
       if inRect(mx, my, listX, y, listW, rowH - 4f * s) then
-        if i < furnaceItems.length then
-          val b = furnaceItems(i)
+        if i+furnaceScroll < furnaceItems.length then
+          val b = furnaceItems(i+furnaceScroll)
           furnaceInput = b
+          furnaceRequested=0
           furnaceProgress = 0f
         else furnaceInput = Block.Air
         return
@@ -5800,15 +5989,17 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
         val (x, y, z) = hit.block
         val block = activeBlockAt(x, y, z)
         if pendingPlayerEdits.contains((x,y,z)) || pendingPlayerEdits.size>=128 then return
-        val initial=ModBlockBreakEvent(modManager.api,playerName,x,y,z,block,cancelled=false,dropItem=dropItem)
+        if block==Block.Bedrock then return
+        val harvest=dropItem && ToolSystem.canHarvest(block,heldHotbarBlock)
+        val initial=ModBlockBreakEvent(modManager.api,playerName,x,y,z,block,cancelled=false,dropItem=harvest)
         val event=if isClientOnlyMultiplayer then initial else modManager.fireBlockBreak(initial)
         if !event.cancelled then
-          val (loot,quantity)=modManager.drops.getOrElse(block,(block,1))
+          val (loot,quantity)=modManager.drops.getOrElse(block,ToolSystem.drop(block))
           val needsDropRoom = event.dropItem && gameMode == GameMode.Survival && loot != Block.Air && block != Block.Water
           if needsDropRoom && inventoryRoomFor(loot) < quantity then
             addChatMessage("Inventory full")
           else
-            if event.dropItem && block != Block.Air && block != Block.Water && !isClientOnlyMultiplayer then gainItem(loot, quantity)
+            if event.dropItem && gameMode==GameMode.Survival && loot!=Block.Air && block != Block.Air && block != Block.Water && !isClientOnlyMultiplayer then gainItem(loot, quantity)
             if isClientOnlyMultiplayer then pendingPlayerEdits((x,y,z))=(Block.Air,0,event.dropItem && gameMode==GameMode.Survival)
             if block != Block.Air && block != Block.Water then spawnBlockBreakParticles(x, y, z, block)
             setActiveBlock(x, y, z, Block.Air)
@@ -5830,7 +6021,7 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
             return
           val interaction=modManager.events.fireBlockInteract(ModInteractionEvent(modManager.api,playerName,bx,by,bz,targetBlock))
           if interaction.cancelled || interaction.handled then return
-        if targetBlock == Block.Furnace then
+        if targetBlock == Block.Furnace || targetBlock==Block.FurnaceLit then
           openFurnace()
         else
           val (x, y, z) = hit.place

@@ -54,10 +54,10 @@ object BlockboxPlayerModel:
     glDisable(GL_COLOR_MATERIAL); glDisable(GL_NORMALIZE)
     lit = false
 
-  private def bindSkin(shirt: (Float, Float, Float), light: (Float, Float, Float)): Unit =
+  private def bindSkin(shirt: (Float, Float, Float), light: (Float, Float, Float),zombie: Boolean = false,hurt: Boolean = false): Unit =
     tint = light
     glEnable(GL_TEXTURE_2D)
-    glBindTexture(GL_TEXTURE_2D, BlockboxSkin.texture(shirt))
+    glBindTexture(GL_TEXTURE_2D, if hurt then BlockboxSkin.hurtTexture(shirt,zombie) else if zombie then BlockboxSkin.zombieTexture else BlockboxSkin.texture(shirt))
     glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE)
 
   private def unbindSkin(): Unit =
@@ -65,7 +65,7 @@ object BlockboxPlayerModel:
     glBindTexture(GL_TEXTURE_2D, 0)
     glDisable(GL_TEXTURE_2D)
 
-  def render(player: RemotePlayer, camera: Vec3, color: (Float, Float, Float), light: (Float, Float, Float), time: Float = 0f, heldItem: Option[() => Unit] = None): Unit =
+  def render(player: RemotePlayer, camera: Vec3, color: (Float, Float, Float), light: (Float, Float, Float), time: Float = 0f, heldItem: Option[() => Unit] = None,zombie: Boolean = false,hurt: Boolean = false): Unit =
     val stride = player.stride
     val walk = sin(player.gait).toFloat * 32f * stride
     val mine = sin((1f - player.swing) * Pi).toFloat * (if player.swing > 0f then 1f else 0f)
@@ -74,7 +74,7 @@ object BlockboxPlayerModel:
     val breath = sin(time * 1.9f).toFloat * 0.006f * idle
     val legLength = 12 * px
     val shoulder = 24 * px
-    bindSkin(color, light)
+    bindSkin(color, light,zombie,hurt)
     glPushMatrix()
     glTranslatef(player.pos.x - camera.x, player.pos.y - 1.62f + abs(cos(player.gait).toFloat) * 0.025f * stride, player.pos.z - camera.z)
     glRotatef(-player.bodyYaw, 0f, 1f, 0f)
@@ -104,9 +104,10 @@ object BlockboxPlayerModel:
       val sway = sin(time * 1.3f + side).toFloat * 2.2f * idle
       glPushMatrix(); glTranslatef(side * (6 * px + 0.003f), shoulder - 0.04f + breath, 0f)
       glRotatef(side * (3f + sway * 0.5f) + action * 12f, 0f, 0f, 1f)
-      glRotatef(-leg * 0.85f + action * 85f + sway, 1f, 0f, 0f)
       val holding = side == 1 && heldItem.isDefined
-      armGeometry(side, -abs(leg) * 0.18f + action * 22f, (if holding then 0.9f else 0.15f) + action * 0.75f, if holding then heldItem else None)
+      glRotatef(if zombie then 87f+sway+sin(time*3+side).toFloat*3f else -leg * (if holding then 0.18f else 0.85f) + action * 65f + sway + (if holding then 24f else 0f), 1f, 0f, 0f)
+      armGeometry(side, if zombie then 0f else if holding then 12f+action*16f else -abs(leg)*0.18f+action*22f,
+        (if holding then 0.9f else 0.15f)+action*0.75f, if holding then heldItem else None)
       glPopMatrix()
       side += 2
     glPopMatrix()
@@ -117,6 +118,14 @@ object BlockboxPlayerModel:
           held: Option[() => Unit] = None): Unit =
     bindSkin(shirt, light)
     armGeometry(side, elbow, grip, held)
+    unbindSkin()
+
+  /** Minecraft's straight first-person right arm: one 4x12x4 box in 1/16 units, the
+    * shoulder pivot at the origin and the fist 10 pixels below it.
+    */
+  def firstPersonArm(shirt: (Float,Float,Float), light: (Float,Float,Float)): Unit =
+    bindSkin(shirt, light)
+    skinBox(-1f/16, -10f/16, -2f/16, 3f/16, 2f/16, 2f/16, 40, 16, 4, 12, 4)
     unbindSkin()
 
   private def armGeometry(side: Int, elbow: Float, grip: Float, held: Option[() => Unit]): Unit =

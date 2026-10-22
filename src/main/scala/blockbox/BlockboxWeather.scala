@@ -30,7 +30,7 @@ object BlockboxWeather:
           val z=dz+rz*offset+cos(angle).toFloat*depth
           val alpha=c.strength*(1f-fraction*fraction)*0.075f
           glColor4f(light*0.75f,light*0.85f,light,alpha)
-          glVertex3f(x-rx*width,189f,z-rz*width); glVertex3f(x+rx*width,189f,z+rz*width)
+          glVertex3f(x-rx*width,163f,z-rz*width); glVertex3f(x+rx*width,163f,z+rz*width)
           glColor4f(light*0.75f,light*0.85f,light,0f)
           glVertex3f(x+rx*width,25f,z+rz*width); glVertex3f(x-rx*width,25f,z-rz*width)
           i+=1
@@ -44,7 +44,7 @@ object BlockboxWeather:
         glBegin(GL_LINE_STRIP)
         for i <- 0 to 9 do
           val jitter=if i==0 || i==9 then 0f else sin(i*4.17f+(strike.id%997).toFloat).toFloat*6f
-          glVertex3f(strike.x-camera.x+jitter,185f-i*16.5f,strike.z-camera.z+jitter*0.45f)
+          glVertex3f(strike.x-camera.x+jitter,163f-i*14f,strike.z-camera.z+jitter*0.45f)
         glEnd()
       bolt(5f,alpha*0.22f); bolt(1.7f,alpha)
     }

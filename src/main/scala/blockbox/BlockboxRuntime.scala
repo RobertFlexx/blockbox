@@ -149,6 +149,9 @@ private object BlockboxProceduralAudioEngine:
         rainSamples=RecordedAudio.load("weather/rain-loop.ogg",loop=true).getOrElse(Array.emptyFloatArray)
         Array.emptyFloatArray,0f,1f,0f))
 
+  def recording(name: String,gain: Float,pan: Float): Unit =
+    enqueue(Request(() => RecordedAudio.load(name).getOrElse(Array.emptyFloatArray),gain.max(0f).min(1.5f),1f,pan.max(-1f).min(1f)))
+
   def submit(seconds: Float)(sample: (Int, Float) => Float): Unit =
     enqueue(Request(() =>
       val count=(rate*seconds.max(0.005f).min(2f)).toInt
@@ -280,6 +283,11 @@ trait BlockboxAudio:
   protected def playThunderSound(intensity: Float,pan: Float=0f): Unit = effect(BlockboxSounds.Action.Thunder,Block.Stone,intensity.max(0.02f).min(1.2f),0.92f,pan)
   protected def updateRainAmbience(intensity: Float): Unit = BlockboxProceduralAudioEngine.rain(if soundEnabled then intensity else 0f)
   protected def playHurtSound(): Unit = effect(BlockboxSounds.Action.Hurt,Block.Wood,0.90f)
+  protected def playMonsterSound(event: Int,variant: Int,gain: Float,pan: Float): Unit =
+    if soundEnabled && gain>0.005f then
+      val bank=Vector("idle","hurt","attack","death")(event.max(0).min(3))
+      val count=if event<=1 then 3 else 2
+      BlockboxProceduralAudioEngine.recording(s"zombie/${bank}_${Math.floorMod(variant,count)}.ogg",gain,pan)
   protected def shutdownAudio(): Unit = BlockboxProceduralAudioEngine.shutdown()
 
   protected def playTone(freq: Float,seconds: Float,volume: Float,decay: Float): Unit =

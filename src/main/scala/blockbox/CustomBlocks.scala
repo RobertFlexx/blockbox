@@ -9,7 +9,7 @@ object CustomBlocks:
   private val table=new Array[Definition](256)
   private val names=new java.util.concurrent.ConcurrentHashMap[String,Block]()
   @volatile private var sealedRegistry=false
-  def isSlot(block: Block): Boolean = block.ordinal>=35
+  def isSlot(block: Block): Boolean = block.ordinal>=Block.Custom00.ordinal && block.ordinal<=Block.Custom31.ordinal
   def definition(block: Block): Option[Definition] = Option(table(block.ordinal))
   def raw(block: Block): Definition = table(block.ordinal)
   def registered(block: Block): Boolean = !isSlot(block) || table(block.ordinal)!=null

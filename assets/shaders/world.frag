@@ -8,6 +8,8 @@ uniform float uFogEnd;
 uniform float uDaylight;
 uniform float uTime;
 uniform int uPass;
+uniform int isEyeInWater;
+uniform float rainStrength;
 uniform vec3 uSunDir;
 uniform vec3 uMoonDir;
 
@@ -50,7 +52,7 @@ void main() {
     vec3 direct = sunColor * sunFacing * uDaylight * 0.18 + vec3(0.55, 0.70, 1.0) * moonFacing * night * 0.05;
     // Open daylight trades a little sky fill for the sun term so sunlit tops peak
     // near 1.0 and faces turned away from the sun keep their shape.
-    vec3 color = albedo.rgb * (ambient * mix(1.0, 0.86, vSkyLight * uDaylight) + direct * exposure);
+    vec3 color = albedo.rgb * (ambient * mix(1.0, 0.86, vSkyLight * uDaylight) + direct * exposure * (1.0-rainStrength*0.85));
 
     // A tiny time-varying water grade gives oceans/lakes life without moving the
     // actual mesh or breaking block collision/flow behavior.
@@ -69,6 +71,13 @@ void main() {
 
     // Gentle shoulder so sunlit highlights and flames roll off instead of clipping.
     color = color / (vec3(0.94) + color * 0.06);
+    if (isEyeInWater != 0) {
+        float waves=sin((vLocalXZ.x+vLocalXZ.y)*1.5707963+uTime*0.8)
+                   +sin((vLocalXZ.x-vLocalXZ.y)*0.7853982-uTime*0.65);
+        float caustic=pow(max(1.0-abs(waves)*2.4,0.0),6.0);
+        color+=vec3(0.10,0.18,0.16)*caustic*max(n.y,0.0)*vSkyLight*uDaylight;
+        color*=exp(-vec3(0.022,0.007,0.003)*vFogDepth);
+    }
     float fogRange = max(uFogEnd - uFogStart, 0.001);
     float fog = saturate((uFogEnd - vFogDepth) / fogRange);
     color = mix(uFogColor, color, fog);

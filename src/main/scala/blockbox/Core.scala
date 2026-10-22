@@ -91,6 +91,27 @@ enum Block(private val baseSolid: Boolean, private val baseRgb: (Float, Float, F
   case Custom29 extends Block(false,(1f,1f,1f))
   case Custom30 extends Block(false,(1f,1f,1f))
   case Custom31 extends Block(false,(1f,1f,1f))
+  // Append items after all legacy/custom ids: existing worlds keep their block palette.
+  case Stick extends Block(false, (0.48f,0.31f,0.15f), true)
+  case CoalLump extends Block(false, (0.18f,0.19f,0.22f), true)
+  case DiamondGem extends Block(false, (0.26f,0.91f,0.84f), true)
+  case CopperIngot extends Block(false, (0.86f,0.48f,0.27f), true)
+  case WoodenPickaxe extends Block(false, (0.63f,0.43f,0.22f), true)
+  case WoodenAxe extends Block(false, (0.63f,0.43f,0.22f), true)
+  case WoodenShovel extends Block(false, (0.63f,0.43f,0.22f), true)
+  case WoodenSword extends Block(false, (0.63f,0.43f,0.22f), true)
+  case StonePickaxe extends Block(false, (0.54f,0.56f,0.59f), true)
+  case StoneAxe extends Block(false, (0.54f,0.56f,0.59f), true)
+  case StoneShovel extends Block(false, (0.54f,0.56f,0.59f), true)
+  case StoneSword extends Block(false, (0.54f,0.56f,0.59f), true)
+  case IronPickaxe extends Block(false, (0.83f,0.87f,0.89f), true)
+  case IronAxe extends Block(false, (0.83f,0.87f,0.89f), true)
+  case IronShovel extends Block(false, (0.83f,0.87f,0.89f), true)
+  case IronSword extends Block(false, (0.83f,0.87f,0.89f), true)
+  case DiamondPickaxe extends Block(false, (0.26f,0.91f,0.84f), true)
+  case DiamondAxe extends Block(false, (0.26f,0.91f,0.84f), true)
+  case DiamondShovel extends Block(false, (0.26f,0.91f,0.84f), true)
+  case DiamondSword extends Block(false, (0.26f,0.91f,0.84f), true)
   def solid: Boolean =
     val d=CustomBlocks.raw(this)
     if d==null then baseSolid else d.solid
@@ -128,6 +149,8 @@ object Block:
   def names: Array[String] = all.map(_.displayName)
   def isLog(b: Block): Boolean =
     b == Wood || b == BirchWood || b == PineWood || b == AcaciaWood
+  def isItem(b: Block): Boolean =
+    b == IronIngot || b == GoldIngot || b.ordinal >= Stick.ordinal
 
 enum FaceKind:
   case Top, Bottom, North, South, East, West
@@ -191,3 +214,5 @@ final case class RemotePlayer(
   var gait: Float = 0f
   var stride: Float = 0f
   var swing: Float = 0f
+  var hurt: Float = 0f
+  var mode: GameMode = GameMode.Survival

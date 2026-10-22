@@ -12,7 +12,7 @@ import scala.math.*
   */
 object BlockboxClouds:
   private val cell = 12f
-  private val altitude = 192f
+  private val altitude = 164f
   private var vbo = 0
   private var originX = Int.MinValue
   private var originZ = Int.MinValue
@@ -54,9 +54,9 @@ object BlockboxClouds:
         val detail = field(wx * 0.235f - 6.8f, wz * 0.235f + 4.1f, seed)
         val shape = broad * 0.46f + medium * 0.39f + detail * 0.15f
         val wet=WeatherField.sample(storms,wx*cell-drift,wz*cell+drift*0.28f).cloud
-        val threshold = 0.60f - wet * 0.16f
+        val threshold = 0.60f - wet * 0.28f
         stormy(z*span+x)=wet>0.32f
-        if shape > threshold then heights(z*span+x)=5f+floor((shape-threshold)*65f).toFloat.min(16f)+wet*24f
+        if shape > threshold then heights(z*span+x)=4f+floor((shape-threshold)*20f).toFloat.min(8f)*2f+floor(wet*5f).toFloat*4f
         x += 1
       z += 1
     val groups = Array.fill(12)(ArrayBuffer.empty[Float])
@@ -139,7 +139,7 @@ object BlockboxClouds:
     val densityLocation = if shaded then GL20.glGetUniformLocation(program, "density") else -1
     var group = 0
     while group < 12 do
-      val density=if group>=6 then 0.52f else 1f
+      val density=if group>=6 then 0.42f else 1f
       if shaded then
         if densityLocation >= 0 then GL20.glUniform1f(densityLocation, density)
         (group%6) match

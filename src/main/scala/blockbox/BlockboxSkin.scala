@@ -21,6 +21,8 @@ object BlockboxSkin:
 
   private type Rgb = (Int, Int, Int)
   private val cache = mutable.HashMap.empty[Int, Int]
+  private var undeadTexture=0
+  private var undeadHurtTexture=0
 
   private val skinTone: Rgb = (222, 172, 128)
   private val hairTone: Rgb = (68, 44, 29)
@@ -201,10 +203,8 @@ object BlockboxSkin:
 
   private def armTexel(cloth: Rgb)(face: Face, x: Int, y: Int, w: Int, h: Int): Int = face match
     case Face.Top => fabric(cloth, x, y, 71, 0.98f)
-    case Face.Bottom =>
-      // Closed fist seen from below: curled finger rows with darker gaps.
-      val gap = y % 2 == 1 && x >= 1 && x <= w - 2
-      skin(x, y, 72, if gap then 0.80f else if x == 0 || x == w - 1 then 0.86f else 0.93f)
+    // The fist end is plain skin, like Minecraft's: first person looks straight at it.
+    case Face.Bottom => skin(x, y, 72, 0.97f)
     case _ =>
       val sideK = face match
         case Face.Front => 1.02f
@@ -215,27 +215,10 @@ object BlockboxSkin:
         val k = if y == 7 then 0.80f else if y == 6 then 0.93f else 1f
         fabric(cloth, x, y, 73 + face.ordinal, k * (if face == Face.Back then 0.95f else 1f))
       else if y == 8 then skin(x, y, 79, sideK * 0.82f)
-      else if y < 19 then
+      else
         // Lit forearm with a soft highlight along the middle of each face.
         val ridge = if x == w / 2 || x == w / 2 - 1 then 1.02f else if x == 0 || x == w - 1 then 0.96f else 1f
         skin(x, y, 80 + face.ordinal, sideK * ridge)
-      else handTexel(face, x, y - 19, w, sideK)
-
-  /** The last five texel rows: wrist crease, knuckles, fingers and the thumb. */
-  private def handTexel(face: Face, x: Int, row: Int, w: Int, sideK: Float): Int =
-    face match
-      case Face.Right =>
-        if row == 0 then skin(x, row, 91, sideK * 0.95f)
-        else if row == 1 then skin(x, row, 92, sideK * (if x % 2 == 0 then 1.06f else 0.95f))
-        else skin(x, row, 93, sideK * (if x == 2 || x == 4 || x == 6 then 0.84f else 1f))
-      case Face.Front =>
-        val thumb = x <= 2 && row <= 3
-        if thumb then skin(x, row, 94, sideK * (if x == 2 || row == 3 then 0.88f else 1.04f))
-        else skin(x, row, 95, sideK * (if row >= 2 && x % 2 == 1 then 0.88f else 0.97f))
-      case Face.Left =>
-        // Palm side: curled finger tips along the bottom.
-        skin(x, row, 96, sideK * (if row == 2 then 0.86f else if row >= 3 && x % 2 == 0 then 0.92f else 0.98f))
-      case _ => skin(x, row, 97, sideK * (if row == 0 then 0.94f else 0.98f))
 
   private def legTexel(face: Face, x: Int, y: Int, w: Int, h: Int): Int = face match
     case Face.Top => denim(x, y, 101, 0.92f)
@@ -268,6 +251,51 @@ object BlockboxSkin:
     val key = (channel(shirt._1 * 255f) << 16) | (channel(shirt._2 * 255f) << 8) | channel(shirt._3 * 255f)
     cache.getOrElseUpdate(key, upload(pixels(shirt)))
 
+  def zombiePixels: Array[Int] =
+    val img=pixels((0.17f,0.40f,0.39f))
+    def rot(x: Int,y: Int): Int =
+      val patch=if hash(x/3,y/3,815)>0.72f then 0.76f else 1f
+      argb(shade((91,132,59),patch*(0.88f+hash(x,y,816)*0.20f)))
+    box(img,0,0,8,8,8,false) { (face,x,y,w,h) =>
+      if face==Face.Front && y>=6 && y<=8 && ((x>=2 && x<=5)||(x>=10 && x<=13)) then
+        argb(if y==6 then (28,41,20) else if x==4 || x==11 then (39,46,22) else (147,150,83))
+      else if face==Face.Front && y>=12 && y<=13 && x>=5 && x<=10 then argb((39,55,26))
+      else rot(x,y)
+    }
+    box(img,32,0,8,8,8,false)((_,_,_,_,_) => Clear)
+    for (u,v,mirror) <- Seq((40,16,false),(32,48,true)) do
+      box(img,u,v,4,12,4,mirror) { (face,x,y,w,h) =>
+        val tear=7+(hash(x/2,0,820)*5).toInt
+        if y>=tear || (y>=4 && x>=2 && x<=4 && hash(x/2,y/3,821)>0.55f) then rot(x,y)
+        else fabric((44,100,95),x,y,822,0.80f)
+      }
+    box(img,16,16,8,12,4,false) { (face,x,y,w,h) =>
+      val tear=y>h-5 && hash(x/3,0,823)>0.45f || x>=5 && x<=8 && y>=8 && y<=12
+      if tear then rot(x,y) else fabric((44,100,95),x,y,824,if y>h-6 then 0.70f else 0.94f)
+    }
+    for (u,v,mirror) <- Seq((0,16,false),(16,48,true)) do
+      box(img,u,v,4,12,4,mirror) { (face,x,y,w,h) =>
+        if y>h-3 || (y>=10 && y<=15 && x>=2 && x<=4) then rot(x,y)
+        else fabric((65,62,92),x,y,825,0.86f+hash(x/3,y/3,826)*0.14f)
+      }
+    img
+
+  def zombieTexture: Int =
+    if undeadTexture==0 then undeadTexture=upload(zombiePixels)
+    undeadTexture
+
+  private def redden(img: Array[Int]): Array[Int] = img.map { p =>
+    val r=((p>>>16)&255); val g=((p>>>8)&255); val b=p&255
+    (p&0xff000000) | (((r*0.32f+255*0.68f).toInt)<<16) | (((g*0.27f).toInt)<<8) | (b*0.27f).toInt
+  }
+  def hurtTexture(shirt: (Float,Float,Float),zombie: Boolean): Int =
+    if zombie then
+      if undeadHurtTexture==0 then undeadHurtTexture=upload(redden(zombiePixels))
+      undeadHurtTexture
+    else
+      val key=0x1000000 | (channel(shirt._1*255)<<16) | (channel(shirt._2*255)<<8) | channel(shirt._3*255)
+      cache.getOrElseUpdate(key,upload(redden(pixels(shirt))))
+
   private def upload(img: Array[Int]): Int =
     val buffer = BufferUtils.createByteBuffer(Size * Size * 4)
     var i = 0
@@ -292,3 +320,7 @@ object BlockboxSkin:
   def dispose(): Unit =
     cache.valuesIterator.foreach(glDeleteTextures)
     cache.clear()
+    if undeadTexture!=0 then glDeleteTextures(undeadTexture)
+    undeadTexture=0
+    if undeadHurtTexture!=0 then glDeleteTextures(undeadHurtTexture)
+    undeadHurtTexture=0

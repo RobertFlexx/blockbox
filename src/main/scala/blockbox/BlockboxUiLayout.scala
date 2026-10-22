@@ -5,9 +5,28 @@ final case class UiRect(x: Float, y: Float, w: Float, h: Float):
 
 final case class MainMenuLayout(panel: UiRect, buttons: Vector[UiRect], scale: Float)
 final case class SettingsLayout(panel: UiRect, tabs: Vector[UiRect], content: UiRect, done: UiRect)
+final case class InventoryLayout(panel: UiRect,preview: UiRect,storage: Vector[UiRect],hotbar: Vector[UiRect],craft: Vector[UiRect],
+  output: UiRect,furnace: UiRect,journal: UiRect,close: UiRect,scale: Float)
+final case class CatalogLayout(panel: UiRect,tabs: Vector[UiRect],search: UiRect,slots: Vector[UiRect],hotbar: Vector[UiRect],
+  scroll: UiRect,close: UiRect,scale: Float)
 
 /** Drawing and hit testing share these layouts at every GUI scale. */
 object BlockboxUiLayout:
+  def inventory(w: Float,h: Float,requested: Float): InventoryLayout =
+    val s=(requested*2.6f).min((w-24f)/216f).min((h-24f)/206f).max(0.6f)
+    val p=UiRect((w-216*s)/2,(h-206*s)/2,216*s,206*s)
+    def r(x: Float,y: Float,ww: Float,hh: Float): UiRect = UiRect(p.x+x*s,p.y+y*s,ww*s,hh*s)
+    InventoryLayout(p,r(9,22,64,76),Vector.tabulate(27)(i => r(9+(i%9)*22,112+(i/9)*22,20,20)),
+      Vector.tabulate(9)(i => r(9+i*22,183,20,20)),Vector.tabulate(9)(i => r(98+(i%3)*20,30+(i/3)*20,18,18)),
+      r(184,50,20,20),r(79,94,55,14),r(139,94,67,14),r(197,5,13,12),s)
+
+  def catalog(w: Float,h: Float,requested: Float): CatalogLayout =
+    val s=(requested*2.2f).min((w-24)/252f).min((h-32)/278f).max(0.6f)
+    val p=UiRect((w-252*s)/2,(h-278*s)/2+24*s,252*s,250*s)
+    def r(x: Float,y: Float,ww: Float,hh: Float): UiRect = UiRect(p.x+x*s,p.y+y*s,ww*s,hh*s)
+    CatalogLayout(p,Vector.tabulate(5)(i => r(8+i*42,-23,36,25)),r(12,28,216,17),
+      Vector.tabulate(54)(i => r(12+(i%9)*24,54+(i/9)*24,22,22)),Vector.tabulate(9)(i => r(12+i*24,222,22,22)),
+      r(236,54,6,142),r(234,7,12,12),s)
   def mainMenu(w: Float, h: Float, requestedScale: Float): MainMenuLayout =
     val s = requestedScale.min((w - 32f) / 680f).min((h - 44f) / 490f).max(0.35f)
     val panel = UiRect((w - 680f*s)/2f,(h - 490f*s)/2f,680f*s,490f*s)

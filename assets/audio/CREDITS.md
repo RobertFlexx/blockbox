@@ -23,3 +23,16 @@ location. The runtime decoder resamples to 44.1 kHz, removes DC, applies headroo
 and short one-shot fades, and smooths the rain loop boundary. Playback uses small
 pitch variations and stereo positioning. Procedural foley supplements materials
 for which this set has no recording.
+
+## Zombie voices
+
+`zombie/*.ogg` contains ten voice performances by **artisticdude** from the
+[Zombies Sound Pack](https://opengameart.org/content/zombies-sound-pack), created
+for the free and open-source RPG Summoning Wars (2011). The original pack is
+released under [CC0 1.0](https://creativecommons.org/publicdomain/zero/1.0/).
+Source archive: <https://opengameart.org/sites/default/files/zombies.zip>.
+
+The source WAVs were converted to mono 44.1 kHz Vorbis. These are recorded monster
+voices, with separate ambient, hurt, attack and death variations; their original
+pitch is preserved. The runtime applies positional attenuation and stereo pan.
+The original numbered WAV is recorded in each manifest entry.

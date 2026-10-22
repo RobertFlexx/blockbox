@@ -138,6 +138,7 @@ trait BlockboxCommands:
       if gameMode == mode then addChatMessage(s"Already in $mode mode")
       else toggleTo(mode)
     else if gameServer != null then
+      remotePlayers.get(safe).foreach(_.mode=mode)
       gameServer.broadcast("GMODE|" + networkEscape(safe) + "|" + mode.ordinal.toString)
       addChatMessage(s"Set $safe to $mode")
     else addChatMessage("Only the host can change another player's gamemode")
@@ -399,6 +400,7 @@ trait BlockboxCommands:
 
   protected def toggleTo(mode: GameMode): Unit =
     gameMode = mode
+    if gameServer!=null then gameServer.broadcast(s"GMODE|$playerName|${mode.ordinal}")
     if mode == GameMode.Survival then flyEnabled = false
     velocity = Vec3(0f, 0f, 0f); onGround = false
     addChatMessage(s"Game mode set to $mode")

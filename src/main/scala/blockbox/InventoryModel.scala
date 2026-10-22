@@ -6,8 +6,8 @@ final case class CraftShape(width: Int, height: Int, cells: Vector[Block])
 final case class CraftRecipe(width: Int, height: Int, cells: Vector[Block], output: Block, outputCount: Int, label: String)
 
 object InventoryModel:
-  val smeltableInputs: Array[Block] = Array(Block.Sand, Block.Clay, Block.Stone, Block.Wood, Block.BirchWood, Block.PineWood, Block.AcaciaWood, Block.IronOre, Block.GoldOre)
-  val fuelBlocks: Array[Block] = Array(Block.Coal, Block.Wood, Block.BirchWood, Block.PineWood, Block.AcaciaWood, Block.Planks, Block.BirchPlanks, Block.PinePlanks, Block.AcaciaPlanks)
+  val smeltableInputs: Array[Block] = Array(Block.Sand, Block.Clay, Block.Stone, Block.Wood, Block.BirchWood, Block.PineWood, Block.AcaciaWood, Block.Copper, Block.IronOre, Block.GoldOre)
+  val fuelBlocks: Array[Block] = Array(Block.CoalLump, Block.Coal, Block.Wood, Block.BirchWood, Block.PineWood, Block.AcaciaWood, Block.Planks, Block.BirchPlanks, Block.PinePlanks, Block.AcaciaPlanks, Block.Stick)
 
   private def craftRecipe(rows: Seq[Seq[Block]], output: Block, outputCount: Int, label: String): CraftRecipe =
     val h = rows.length.max(1)
@@ -20,7 +20,7 @@ object InventoryModel:
 
   private def row(blocks: Block*): Seq[Block] = blocks
 
-  val craftingRecipes: Array[CraftRecipe] = Array(
+  private val basicRecipes: Array[CraftRecipe] = Array(
     craftRecipe(Seq(row(Block.Wood)), Block.Planks, 4, "oak wood -> planks"),
     craftRecipe(Seq(row(Block.BirchWood)), Block.BirchPlanks, 4, "birch wood -> planks"),
     craftRecipe(Seq(row(Block.PineWood)), Block.PinePlanks, 4, "pine wood -> planks"),
@@ -63,7 +63,28 @@ object InventoryModel:
     craftRecipe(Seq(row(Block.BirchLeaves, Block.BirchLeaves), row(Block.BirchLeaves, Block.BirchLeaves)), Block.BirchLeaves, 4, "birch leaf bundle"),
     craftRecipe(Seq(row(Block.PineLeaves, Block.PineLeaves), row(Block.PineLeaves, Block.PineLeaves)), Block.PineLeaves, 4, "pine leaf bundle"),
     craftRecipe(Seq(row(Block.AcaciaLeaves, Block.AcaciaLeaves), row(Block.AcaciaLeaves, Block.AcaciaLeaves)), Block.AcaciaLeaves, 4, "acacia leaf bundle")
-  )
+  ).filterNot(r => r.label.contains("crate -> furnace") || r.label.contains("quick ") || r.label.contains("bloom"))
+
+  private val toolRecipes: Array[CraftRecipe] = ToolSystem.materials.flatMap { case (material,items) =>
+    val s=Block.Stick; val a=Block.Air
+    Vector(
+      craftRecipe(Seq(row(material,material,material),row(a,s,a),row(a,s,a)),items(0),1,"pickaxe: head over two sticks"),
+      craftRecipe(Seq(row(material,material),row(material,s),row(a,s)),items(1),1,"axe: three head pieces and two sticks"),
+      craftRecipe(Seq(row(material),row(s),row(s)),items(2),1,"shovel: head over two sticks"),
+      craftRecipe(Seq(row(material),row(material),row(s)),items(3),1,"sword: two blade pieces over a stick"))
+  }.toArray
+  val craftingRecipes: Array[CraftRecipe] = basicRecipes ++ Array(
+    craftRecipe(Seq(row(Block.Planks),row(Block.Planks)),Block.Stick,4,"two planks -> four sticks"),
+    craftRecipe(Seq(row(Block.CoalLump),row(Block.Stick)),Block.Torch,4,"coal over stick -> four torches"),
+    craftRecipe(Seq(row(Block.Coal),row(Block.Stick)),Block.Torch,4,"coal over stick -> four torches")
+  ) ++ toolRecipes
+
+  def matches(recipe: CraftRecipe,shape: CraftShape): Boolean =
+    def same(cells: Vector[Block]): Boolean = cells.zip(shape.cells).forall { (wanted,actual) =>
+      wanted==actual || ((ToolSystem.isTool(recipe.output) || recipe.output==Block.Stick) && wanted==Block.Planks && ToolSystem.isPlanks(actual))
+    }
+    recipe.width==shape.width && recipe.height==shape.height &&
+      (same(recipe.cells) || (ToolSystem.isTool(recipe.output) && same(recipe.cells.grouped(recipe.width).flatMap(_.reverse).toVector)))
 
   def normalizeCraftGrid(cells: Array[Block]): Option[CraftShape] =
     var minX = 3; var minY = 3; var maxX = -1; var maxY = -1
@@ -89,17 +110,18 @@ object InventoryModel:
 
   def craftingResult(cells: Array[Block]): Option[CraftRecipe] =
     normalizeCraftGrid(cells).flatMap { shape =>
-      craftingRecipes.find(r => r.width == shape.width && r.height == shape.height && r.cells == shape.cells)
+      craftingRecipes.find(r => matches(r,shape))
     }
 
   def smeltResult(input: Block): Option[(Block, Int)] = input match
     case Block.Sand => Some((Block.Glass, 1))
     case Block.Clay => Some((Block.Brick, 1))
     case Block.Stone => Some((Block.Brick, 2))
-    case Block.Wood | Block.BirchWood | Block.PineWood | Block.AcaciaWood => Some((Block.Coal, 1))
+    case Block.Wood | Block.BirchWood | Block.PineWood | Block.AcaciaWood => Some((Block.CoalLump, 1))
+    case Block.Copper => Some((Block.CopperIngot, 1))
     case Block.IronOre => Some((Block.IronIngot, 1))
     case Block.GoldOre => Some((Block.GoldIngot, 1))
     case _ => None
 
   def fuelBurnTime(fuel: Block): Float =
-    if fuel == Block.Planks || fuel == Block.BirchPlanks || fuel == Block.PinePlanks || fuel == Block.AcaciaPlanks then 3f else 4f
+    if fuel==Block.Coal || fuel==Block.CoalLump then 8f else if fuel==Block.Stick then 0.5f else if ToolSystem.isPlanks(fuel) then 1.5f else 2f

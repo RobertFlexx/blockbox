@@ -307,6 +307,24 @@ final class GameServer(
             if editBudget.allow(System.nanoTime()) then
               if !serverEvents.offer(clean) then throw IOException("Server queue full")
               broadcast(clean)
+          else if registered && packet.is("ZHIT") then
+            try
+              packet.requireExact(2)
+              val id=BlockboxNet.parseInt(packet.part(1),0,Int.MaxValue)
+              if editBudget.allow(System.nanoTime()) then serverEvents.offer(s"ZHIT|$onlineName|$id")
+            catch case e: Exception => noteBadPacket("ZHIT",e)
+          else if registered && packet.is("PHIT") then
+            try
+              packet.requireExact(2)
+              val victim=safeName(packet.part(1))
+              if victim.nonEmpty && victim!=onlineName && editBudget.allow(System.nanoTime()) then
+                serverEvents.offer(s"PHIT|$onlineName|$victim")
+            catch case e: Exception => noteBadPacket("PHIT",e)
+          else if registered && packet.is("HURTME") then
+            packet.requireExact(1)
+            if editBudget.allow(System.nanoTime()) then
+              val clean=s"HURT|$onlineName"
+              serverEvents.offer(clean); broadcast(clean)
           else if registered && line.startsWith("CMD|") then
             if !chatBudget.allow(System.nanoTime()) then throw IOException("Command rate exceeded")
             val text = if parts.length >= 2 then parts.drop(1).mkString("|") else ""

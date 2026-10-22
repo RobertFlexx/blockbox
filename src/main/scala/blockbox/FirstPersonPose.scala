@@ -2,36 +2,65 @@ package blockbox
 
 import scala.math.*
 
-/** Camera pose and grip attachment shared by the hand and its held item. */
+/** Minecraft's first-person chains (ItemInHandRenderer, right hand, camera space) and
+  * the third-person grip attachments.
+  */
 object FirstPersonPose:
-  final case class Pose(position: Vec3, rotation: Vec3, elbow: Float, grip: Float)
   final case class Attachment(position: Vec3, rotation: Vec3, size: Float)
+  /** The attack angles are applied Y, Z, X and followed by a fixed Y -45. */
+  final case class ItemPose(position: Vec3, attack: Vec3, display: Attachment)
+  /** The bare arm's offset and swing; the fixed vanilla arm chain follows it. */
+  final case class HandPose(position: Vec3, yaw: Float, roll: Float)
 
-  /** @param equip 0 while the hand is fully lowered for an item switch, 1 when raised */
-  def sample(block: Block, kick: Float, bobPhase: Float, bobAmount: Float, obstruction: Float, equip: Float = 1f): Pose =
-    val action=kick.max(0f).min(1f)
-    val swing=if action>0f then sin(sqrt(1f-action)*Pi).toFloat else 0f
-    val twist=if action>0f then sin(pow(1f-action,2)*Pi).toFloat else 0f
-    val blocked=obstruction.max(0f).min(1f)
-    val bob=bobAmount.max(0f).min(1f)
-    val lowered=1f-equip.max(0f).min(1f)
-    val drop=lowered*lowered*(3f-2f*lowered)
-    Pose(
-      Vec3(0.64f+sin(bobPhase).toFloat*0.008f*bob-swing*0.12f,
-        -0.48f+(0.5f-0.5f*cos(bobPhase*2).toFloat)*0.009f*bob-swing*0.035f-blocked*0.23f-drop*0.62f,
-        -1.04f+blocked*0.23f),
-      Vec3(-16f-swing*19f+blocked*22f+drop*24f,-17f+twist*11f,20f+swing*11f+blocked*9f),
-      7f+swing*10f+blocked*10f,if block==Block.Air then 0.20f+swing*0.65f else 0.95f)
+  private def swingProgress(kick: Float): Float = if kick>0 then 1f-kick.max(0).min(1) else 0f
+
+  /** Vanilla renderPlayerArm, plus a small walk bob and wall retraction.
+    * @param equip 0 while the hand is fully lowered for an item switch, 1 when raised */
+  def handPose(kick: Float,bobPhase: Float,bob: Float,obstruction: Float,equip: Float): HandPose =
+    val progress=swingProgress(kick)
+    val root=sqrt(progress).toFloat
+    val blocked=obstruction.max(0).min(1)
+    val lowered=1f-equip.max(0).min(1)
+    HandPose(Vec3(0.64f-0.3f*sin(root*Pi).toFloat+sin(bobPhase).toFloat*0.012f*bob,
+      -0.6f+0.4f*sin(root*2*Pi).toFloat-lowered*0.6f-blocked*0.08f+sin(bobPhase*2).toFloat*0.008f*bob,
+      -0.72f-0.4f*sin(progress*Pi).toFloat+blocked*0.06f),
+      45f+70f*sin(root*Pi).toFloat,-20f*sin(progress*progress*Pi).toFloat)
+
+  /** firstperson_righthand of Minecraft's item/generated and block/block models. */
+  val generatedDisplay=Attachment(Vec3(1.13f/16,3.2f/16,1.13f/16),Vec3(0,-90,25),0.68f)
+  val blockDisplay=Attachment(Vec3(0,0,0),Vec3(0,45,0),0.40f)
 
   /** Where the torch's local origin (its grip, 0.12 above the foot) sits in the fist. */
   val torchGripHeight = 0.12f
 
-  // Held cubes sit outside the fist; the torch passes through it and leans forward out of
-  // the hand. Both attach inside the elbow transform, so walking, recoil and wall
-  // retraction cannot change how they sit in the hand.
+  // Third person: held cubes sit outside the fist; the torch passes through it and leans
+  // forward out of the hand. Both attach inside the elbow transform, so walking and
+  // recoil cannot change how they sit in the hand.
   def attachment(block: Block): Attachment =
-    if block==Block.Torch then Attachment(Vec3(0.004f,-0.305f,-0.012f),Vec3(156f,0f,-6f),0.96f)
-    else Attachment(Vec3(-0.08f,-0.32f,0.38f),Vec3(-18f,25f,8f),0.32f)
+    if block==Block.Torch then Attachment(Vec3(0f,-0.30f,-0.055f),Vec3(-28f,0f,0f),0.72f)
+    // In the resting forearm frame these Euler angles put the broad face in a
+    // vertical plane and the shaft ahead of the fist, slightly downward/inward.
+    // The handle's diagonal in the source art is included in this rotation.
+    else if ToolSystem.isTool(block) then
+      Attachment(Vec3(0f,-0.31f,-0.055f),Vec3(-36f,60f,-65f),0.80f)
+    else if Block.isItem(block) then Attachment(Vec3(0f,-0.31f,-0.07f),Vec3(-70f,0f,0f),0.55f)
+    else Attachment(Vec3(0f,-0.30f,-0.32f),Vec3(0f,20f,0f),0.30f)
+
+  /** Vanilla applyItemArmTransform and applyItemArmAttackTransform, then the held
+    * thing's display transform. Item sprites and the torch are centered on (0.5, 0.5)
+    * after it, blocks are a centered unit cube; no arm is drawn, as in Minecraft. */
+  def itemPose(item: Block,kick: Float,bobPhase: Float,bob: Float,obstruction: Float,equip: Float): ItemPose =
+    val progress=swingProgress(kick)
+    val root=sqrt(progress).toFloat
+    val swing=sin(root*Pi).toFloat
+    val squared=sin(progress*progress*Pi).toFloat
+    val blocked=obstruction.max(0).min(1)
+    val lowered=1f-equip.max(0).min(1)
+    ItemPose(Vec3(0.56f-0.4f*swing+sin(bobPhase).toFloat*0.012f*bob,
+      -0.52f+0.2f*sin(root*2*Pi).toFloat-lowered*0.6f-blocked*0.08f+sin(bobPhase*2).toFloat*0.008f*bob,
+      -0.72f-0.2f*sin(progress*Pi).toFloat+blocked*0.06f),
+      Vec3(-80f*swing,45f-20f*squared,-20f*swing),
+      if Block.isItem(item) || item==Block.Torch then generatedDisplay else blockDisplay)
 
   def obstructionLevel(clearance: Float): Float =
     val t=((1.35f-clearance)/0.95f).max(0f).min(1f)

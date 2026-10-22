@@ -63,6 +63,11 @@ right now it has:
 * mods, groovy scripts or jars (see MODDING.md)
 * no proprietary assets
 
+The survival update adds sixteen solid 3D tools, wood/stone/iron/diamond progression,
+clustered ore deposits, timed furnace smelting, a two-page field journal, drowning
+and an air-bubble meter, water-tinted characters, storm rain and night-spawning zombies.
+See [SURVIVAL.md](SURVIVAL.md) for recipes, ore depths and controls.
+
 it is not finished, but it is real and it runs.
 
 ## why i am making it
@@ -219,7 +224,7 @@ new tree shapes and cave entrances only show up in chunks that get generated aft
 
 multiplayer is experimental.
 
-there is lan hosting and joining, player names, chat, player positions, block updates, and some server side checks. the host owns the clock and the weather. everyone in the session has to be on the same version, right now that is protocol 6.
+there is lan hosting and joining, player names, chat, player positions, block updates, and some server side checks. the host owns the clock and the weather. everyone in the session has to be on the same version, right now that is protocol 7.
 
 it is not perfect yet. chunk sync and usernames are still being improved. the goal is to make it feel more like a real little server instead of just a quick hacked together connection.
 

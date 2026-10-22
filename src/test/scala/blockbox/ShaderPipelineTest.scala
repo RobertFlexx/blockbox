@@ -71,13 +71,15 @@ object ShaderPipelineTest:
         name->values
       }.toMap
     finally recorded.close()
-    assert(clips.size==37)
+    assert(clips.size==47)
     val rain=clips("weather/rain-loop.ogg")
     assert(math.abs(rain.head-rain.last)<0.025f,"decoded ambience has a smooth loop boundary")
     PresentationTest.writeWav(output.resolve("recorded-footsteps.wav"),Seq("grass","concrete","wood","snow").flatMap { material =>
       (0 until 3).flatMap(i => clips(f"kenney/footstep_${material}_${i}%03d.ogg").toVector++Vector.fill(10000)(0f))
     }.toArray)
     PresentationTest.writeWav(output.resolve("recorded-weather.wav"),rain.take(44100*8)++Array.fill(15000)(0f)++clips("weather/thunder-distant.ogg"))
+    PresentationTest.writeWav(output.resolve("recorded-zombies.wav"),Seq("idle_0","idle_1","idle_2","attack_0","hurt_0","hurt_1","death_0","death_1")
+      .flatMap(name => clips(s"zombie/$name.ogg").toVector++Vector.fill(12000)(0f)).toArray)
     assert(RecordedAudio.load("../outside.ogg").isEmpty)
     val temporary=Files.createTempDirectory("blockbox-sky-polish")
     blockbox.io.BlockboxFiles.copyRecursive(root.resolve("assets/shaders"),temporary.resolve("assets/shaders"))
@@ -147,7 +149,7 @@ object ShaderPipelineTest:
           chunks.values.foreach(_.dispose()); chunks.clear()
       finally
         chunks.values.foreach(_.dispose()); atlas.destroy()
-      println("[polish-render] 37 recordings, loop continuity, HDR sun/moon and distant storm passed")
+      println("[polish-render] 47 recordings, loop continuity, HDR sun/moon and distant storm passed")
     finally pipeline.destroy(); BlockboxSky.destroy(); blockbox.io.BlockboxFiles.deleteRecursive(temporary)
 
   private def readPixel(): Array[Float] =
@@ -298,9 +300,13 @@ object ShaderPipelineTest:
       noError("title UI")
       torchFrames(game,atlas,pipeline,chunks,output,width,height)
       firstPersonFrames(game,output,width,height)
+      heldToolFrames(game,output,width,height)
+      survivalFrames(game,atlas,pipeline,chunks,output,width,height)
+      inventoryFrames(game,output,width,height)
     finally
       chunks.values.foreach(_.dispose()); atlas.destroy(); pipeline.destroy(); fovea.release()
       get[FirstPersonPass](game,"firstPersonPass").destroy(); BlockboxSky.destroy(); TorchEffects.destroy(); BlockboxSkin.dispose()
+      RainRenderer.destroy(); UnderwaterEffect.destroy()
       blockbox.io.BlockboxFiles.deleteRecursive(temporary)
 
   def playerPreview(output: Path,width: Int,height: Int): Unit =
@@ -342,14 +348,23 @@ object ShaderPipelineTest:
       sheet.setRGB(x,y,if (p>>>24)<128 then checker else p&0xffffff)
     ImageIO.write(sheet,"png",output.resolve("skin.png").toFile)
 
-  private def firstPersonFrames(game: Blockbox,output: Path,width: Int,height: Int): Unit =
+  private def firstPersonFrames(game: Blockbox,output: Path,width: Int,surfaceHeight: Int): Unit =
+    // Framed at 16:9 like vanilla screenshots; tools run off the right edge on narrower screens.
+    val height=width*9/16
+    set(game,"framebufferHeight",height)
+    try firstPersonPoses(game,output,width,height)
+    finally set(game,"framebufferHeight",surfaceHeight)
+
+  private def firstPersonPoses(game: Blockbox,output: Path,width: Int,height: Int): Unit =
     val held=game.getClass.getDeclaredMethod("renderFirstPersonHeldBlock"); held.setAccessible(true)
     val hotbar=get[Array[Block]](game,"hotbarBlocks")
     set(game,"selectedBlock",0); set(game,"viewmodelKick",0f); set(game,"worldClock",150.0)
     set(game,"antiAliasing",true)
     for (block,name,kick,obstruction) <- Seq((Block.Air,"first-person-empty",0f,0f),(Block.Torch,"first-person-torch",0f,0f),
       (Block.Stone,"first-person-block",0f,0f),(Block.Air,"first-person-mining",0.60f,0f),(Block.Stone,"first-person-near-wall",0.60f,1f),
-      (Block.Torch,"first-person-torch-mining",0.60f,0f)) do
+      (Block.Torch,"first-person-torch-mining",0.60f,0f),(Block.IronPickaxe,"first-person-pickaxe",0f,0f),
+      (Block.DiamondSword,"first-person-sword",0f,0f),(Block.StoneAxe,"first-person-axe",0f,0f),
+      (Block.IronShovel,"first-person-shovel",0.6f,0f)) do
       hotbar(0)=block
       set(game,"viewmodelKick",kick)
       set(game,"viewmodelObstruction",obstruction)
@@ -362,12 +377,146 @@ object ShaderPipelineTest:
         math.abs((pixels.get(i*4)&255)-31)+math.abs((pixels.get(i*4+1)&255)-46)+math.abs((pixels.get(i*4+2)&255)-51)>12
       }
       assert(changed>2000,s"$name must draw a visible hand")
-      assert((0 until width*height/8).forall { i =>
-        val x=i%(width/4); val y=i/(width/4); val j=(y*width+x)*4
+      // Inside the multisampled pass (right three quarters) but clear of every pose.
+      assert((height/2 until height).forall { y => (width/4 until width*3/8).forall { x =>
+        val j=(y*width+x)*4
         math.abs((pixels.get(j)&255)-31)+math.abs((pixels.get(j+1)&255)-46)+math.abs((pixels.get(j+2)&255)-51)<5
-      },"transparent hand resolve preserves the scene behind it")
+      }},"transparent hand resolve preserves the scene behind it")
       capture(output.resolve(name+".png"),width,height)
       noError(name)
+
+  private def survivalFrames(game: Blockbox,atlas: TextureAtlas,pipeline: BlockboxShaderPipeline,
+                             chunks: mutable.AnyRefMap[(Int,Int),Chunk],output: Path,width: Int,height: Int): Unit =
+    chunks.values.foreach(_.dispose()); chunks.clear()
+    val gen=TerrainGenerator(42)
+    set(game,"terrainGen",gen); set(game,"worldSeed",42L); set(game,"worldClock",150.0)
+    for cx <- -2 to 2; cz <- -2 to 2 do
+      val blocks=new Array[Byte](16*16*Terrain.worldHeight)
+      for x <- 0 until 16; z <- 0 until 16 do
+        val wx=cx*16+x; val wz=cz*16+z
+        val pond=wx>=2 && wx<=18 && wz>= -10 && wz<=5
+        for y <- 0 to 39 do
+          val block=if pond && y>=36 then Block.Water else if pond && y==35 then Block.Sand else if y==39 then Block.Grass else if y>=37 then Block.Dirt else Block.Stone
+          blocks((y*16+z)*16+x)=block.id
+      chunks((cx,cz))=Chunk(cx,cz,atlas,gen,blocks)
+    def put(x: Int,y: Int,z: Int,block: Block): Unit =
+      chunks((Math.floorDiv(x,16),Math.floorDiv(z,16))).setBlock(Math.floorMod(x,16),y,Math.floorMod(z,16),block)
+    // Edited water is preserved above sea level by the legacy-water repair.
+    for x <- 2 to 18; z <- -10 to 5; y <- 36 to 39 do put(x,y,z,Block.Water)
+    for (x,z) <- Seq((-10,-7),(-5,-18),(24,-3),(20,-18),(-16,5),(-9,15),(25,16)) do
+      for y <- 40 to 45 do put(x,y,z,Block.Wood)
+      for dx <- -2 to 2; dz <- -2 to 2; y <- 44 to 47 if !(math.abs(dx)==2 && math.abs(dz)==2) && (dx!=0 || dz!=0 || y>45) do put(x+dx,y,z+dz,Block.Leaves)
+    put(-2,40,4,Block.Furnace)
+    chunks.values.foreach { c =>
+      for dx <- -1 to 1; dz <- -1 to 1 if dx!=0 || dz!=0 do chunks.get((c.cx+dx,c.cz+dz)).foreach(c.setNeighbor(dx,dz,_))
+    }
+    chunks.values.foreach(c => assert(c.forceBuildNowAndUpload()))
+    val remotes=get[mutable.HashMap[String,RemotePlayer]](game,"remotePlayers")
+    val mobs=get[ArrayBuffer[ZombieSystem.Zombie]](game,"zombies")
+    val hotbar=get[Array[Block]](game,"hotbarBlocks"); val counts=get[Array[Int]](game,"hotbarCounts")
+    hotbar(0)=Block.IronPickaxe; counts(0)=1; hotbar(1)=Block.IronSword; counts(1)=1
+    set(game,"selectedBlock",0); set(game,"viewmodelKick",0f); set(game,"viewmodelObstruction",0f)
+    val world=game.getClass.getDeclaredMethod("renderWorld"); world.setAccessible(true)
+    val hand=game.getClass.getDeclaredMethod("renderFirstPersonHeldBlock"); hand.setAccessible(true)
+    val water=game.getClass.getDeclaredMethod("renderUnderwaterOverlay"); water.setAccessible(true)
+    val health=game.getClass.getDeclaredMethod("renderHealth"); health.setAccessible(true)
+    val bar=game.getClass.getDeclaredMethod("renderHotbar"); bar.setAccessible(true)
+    set(game,"shadersEnabled",true); set(game,"foveatedRendering",false); set(game,"cloudsEnabled",true)
+    assert(pipeline.selectPack("minecraft-plus"))
+    def frame(name: String,eye: Vec3,heading: Float,look: Float,rain: Float,under: Boolean=false,shaders: Boolean=true): Unit =
+      set(game,"camera",eye); set(game,"yaw",heading); set(game,"pitch",look)
+      set(game,"viewmodelYaw",heading); set(game,"viewmodelPitch",look)
+      set(game,"shadersEnabled",shaders)
+      set(game,"localRain",rain); set(game,"localCloud",rain); set(game,"stormCloudCover",rain)
+      set(game,"localWetness",rain); set(game,"weatherWind",0.5f)
+      set(game,"weatherCells",Vector(WeatherField.Cell(0,0,260f,rain,42)))
+      remotes.values.foreach(_.lastSeen=org.lwjgl.glfw.GLFW.glfwGetTime())
+      glBindFramebuffer(GL_FRAMEBUFFER,0); glViewport(0,0,width,height)
+      if shaders then
+        assert(pipeline.prepareFrame(width,height)); pipeline.clearPreparedFrame(0.22f,0.27f,0.34f)
+      else {glClearColor(0.22f,0.27f,0.34f,1); glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT)}
+      if under then
+        val submerged=game.getClass.getDeclaredMethod("isUnderwater"); submerged.setAccessible(true)
+        assert(submerged.invoke(game)==java.lang.Boolean.TRUE,"the underwater review must contain actual water at eye level")
+      world.invoke(game)
+      if shaders then pipeline.finishFrame(width,height,150)
+      hand.invoke(game)
+      if under then water.invoke(game)
+      BlockboxRender2D.setupOrtho(width,height); glDisable(GL_DEPTH_TEST)
+      health.invoke(game); bar.invoke(game)
+      capture(output.resolve(name+".png"),width,height); noError(name)
+    val dry=RemotePlayer("Iron explorer",Vec3(-3,41.62f,0),Vec3(-3,41.62f,0),145,145,0,0,0,0,Block.IronPickaxe)
+    remotes(dry.name)=dry
+    val wet=RemotePlayer("Swimming",Vec3(8,40.4f,-2),Vec3(8,40.4f,-2),150,150,0,0,0,1,Block.DiamondSword)
+    remotes(wet.name)=wet
+    frame("survival-clear",Vec3(0,43,14),0,13,0)
+    frame("survival-storm",Vec3(0,43,14),0,13,1)
+    for pack <- Seq("aether-ultra","clarity","nocturne","default") do
+      assert(pipeline.selectPack(pack)); frame("survival-storm-"+pack,Vec3(0,43,14),0,13,1)
+    assert(pipeline.selectPack("minecraft-plus"))
+    get[AirSupply](game,"airSupply").remaining=7f
+    frame("survival-underwater",Vec3(8,38.2f,4),0,3,0,true)
+    frame("survival-underwater-compatibility",Vec3(8,38.2f,4),0,3,0,true,false)
+    get[AirSupply](game,"airSupply").reset()
+    val zombie=ZombieSystem.Zombie(1,Vec3(-2,40,-2)); zombie.yaw=160; zombie.gait=0.8f; zombie.stride=0.5f
+    mobs+=zombie
+    set(game,"worldClock",850.0)
+    frame("survival-zombie-night",Vec3(0,41.8f,6),0,1,0)
+    zombie.hurt=1f; dry.hurt=1f
+    frame("survival-damage-flash",Vec3(0,41.8f,6),0,1,0)
+    zombie.hurt=0f; dry.hurt=0f
+    set(game,"worldClock",150.0); zombie.burning=4f
+    frame("survival-zombie-burning",Vec3(0,41.8f,6),0,1,0)
+    remotes.clear(); mobs.clear()
+    // Review the same extruded silhouettes in the UI at native pixel scale.
+    glBindFramebuffer(GL_FRAMEBUFFER,0); glClearColor(0.08f,0.11f,0.13f,1); glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT)
+    BlockboxRender2D.setupOrtho(width,height); glDisable(GL_DEPTH_TEST)
+    for ((_,items),tier) <- ToolSystem.materials.zipWithIndex; (item,i) <- items.zipWithIndex do
+      ItemModel.icon(item,100f+i*180f,40f+tier*140f,100)
+    capture(output.resolve("survival-tool-catalog.png"),width,height); noError("solid tools and UI icons")
+
+  private def inventoryFrames(game: Blockbox,output: Path,width: Int,height: Int): Unit =
+    val hotbar=get[Array[Block]](game,"hotbarBlocks"); val hotCounts=get[Array[Int]](game,"hotbarCounts")
+    val storage=get[Array[Block]](game,"backpackBlocks"); val counts=get[Array[Int]](game,"backpackCounts")
+    val crafting=get[Array[Block]](game,"craftGridBlocks"); val craftCounts=get[Array[Int]](game,"craftGridCounts")
+    Seq(Block.IronSword,Block.IronPickaxe,Block.StoneAxe,Block.IronShovel,Block.Torch,Block.Planks,Block.Stone,Block.CoalLump,Block.IronIngot).zipWithIndex.foreach { (b,i) =>
+      hotbar(i)=b; hotCounts(i)=if ToolSystem.isTool(b) then 1 else 24
+    }
+    Seq(Block.Stone,Block.Wood,Block.Sand,Block.DiamondGem,Block.GoldOre,Block.IronOre,Block.Copper,Block.Leaves,Block.Stick).zipWithIndex.foreach { (b,i) => storage(i)=b; counts(i)=64-i*5 }
+    for i <- 0 until 3 do {crafting(i)=Block.IronIngot; craftCounts(i)=3}
+    for i <- Seq(4,7) do {crafting(i)=Block.Stick; craftCounts(i)=3}
+    set(game,"selectedBlock",0); set(game,"heldInventoryBlock",Block.Air); set(game,"gameMode",GameMode.Survival)
+    val inventory=game.getClass.getDeclaredMethod("renderSurvivalInventory"); inventory.setAccessible(true)
+    val catalog=game.getClass.getDeclaredMethod("renderCatalog"); catalog.setAccessible(true)
+    for (w,h,name,isCatalog,category,query) <- Seq((width,height,"inventory",false,0,""),
+      (640,360,"inventory-compact",false,0,""),(width,height,"catalog",true,0,""),
+      (width,height,"catalog-tools",true,2,""),(width,height,"catalog-search",true,0,"diamond")) do
+      glBindFramebuffer(GL_FRAMEBUFFER,0); glViewport(0,0,w,h); glUseProgram(0)
+      glClearColor(0.18f,0.26f,0.20f,1); glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT)
+      set(game,"framebufferWidth",w); set(game,"framebufferHeight",h)
+      set(game,"catalogCategory",category); set(game,"catalogQuery",query)
+      if isCatalog then catalog.invoke(game) else inventory.invoke(game)
+      capture(output.resolve(s"survival-$name.png"),w,h); noError(name)
+    set(game,"framebufferWidth",width); set(game,"framebufferHeight",height)
+    glViewport(0,0,width,height)
+
+  private def heldToolFrames(game: Blockbox,output: Path,width: Int,height: Int): Unit =
+    val grip=game.getClass.getDeclaredMethod("drawHeldItemAtGrip",classOf[Block],classOf[Tuple3[?,?,?]])
+    grip.setAccessible(true)
+    for (name,heading) <- Seq(("front",180f),("three-quarter",220f),("side",270f)) do
+      glBindFramebuffer(GL_FRAMEBUFFER,0); glViewport(0,0,width,height)
+      glClearColor(0.12f,0.18f,0.20f,1); glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT)
+      BlockboxRender2D.resetGlArraysAndBuffers(); glUseProgram(0)
+      glEnable(GL_DEPTH_TEST); glDepthMask(true); glDisable(GL_BLEND); glDisable(GL_FOG); glDisable(GL_CULL_FACE)
+      glMatrixMode(GL_PROJECTION); glLoadIdentity(); glOrtho(-3.1,3.1,-0.10,2.85,0.1,20)
+      glMatrixMode(GL_MODELVIEW); glLoadIdentity(); glRotatef(8f,1,0,0)
+      BlockboxPlayerModel.beginLighting(viewSpace=false)
+      for (item,i) <- Seq(Block.DiamondSword,Block.IronPickaxe,Block.StoneAxe,Block.IronShovel).zipWithIndex do
+        val player=RemotePlayer("Held tool",Vec3(-2.3f+i*1.55f,1.62f,-5),Vec3(0,0,0),heading,heading,0,0,0,i,item)
+        val held=Some(() => {grip.invoke(game,item,(1f,1f,1f)); ()})
+        BlockboxPlayerModel.render(player,Vec3(0,0,0),PlayerAppearance.shirts(i),(1f,1f,1f),0f,held)
+      BlockboxPlayerModel.endLighting()
+      capture(output.resolve("third-person-tools-"+name+".png"),width,height); noError("held tool "+name)
 
   def atmosphereFrames(output: Path,width: Int,height: Int): Unit =
     glBindFramebuffer(GL_FRAMEBUFFER,0); glViewport(0,0,width,height)
