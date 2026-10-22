@@ -19,6 +19,7 @@ import org.lwjgl.glfw.GLFWFramebufferSizeCallback
 import org.lwjgl.glfw.GLFWKeyCallback
 import org.lwjgl.glfw.GLFWCharCallback
 import org.lwjgl.glfw.GLFWScrollCallback
+import org.lwjgl.glfw.GLFWWindowFocusCallback
 import org.lwjgl.opengl.GL
 import org.lwjgl.opengl.GL11.*
 import org.lwjgl.opengl.GL15.*
@@ -186,6 +187,9 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
   private var lastPosSend = 0.0
   private var lastPosKeepalive = 0.0
   private var lastNetworkSentPos = camera
+  private var lastNetworkHeldBlock = -1
+  private var windowFocused = true
+  private var ignoreInputUntil = 0.0
   private var lastNetworkSentYaw = yaw
   private var lastNetworkSentPitch = pitch
   private var lastMultiplayerHeartbeat = 0.0
@@ -722,6 +726,7 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
         glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3)
         glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_COMPAT_PROFILE)
       glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE)
+      glfwWindowHint(GLFW_AUTO_ICONIFY, GLFW_FALSE)
       glfwWindowHint(GLFW_SAMPLES, samples)
       glfwWindowHint(GLFW_SCALE_TO_MONITOR, GLFW_TRUE)
       glfwWindowHintString(GLFW_WAYLAND_APP_ID, "blockbox")
@@ -767,6 +772,7 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
           System.err.println(s"Blockbox: context '$label' failed: GL.createCapabilities returned null")
           return false
         glfwSwapInterval(if vsync then 1 else 0)
+        glfwSetWindowAttrib(window, GLFW_AUTO_ICONIFY, GLFW_FALSE)
         glfwShowWindow(window)
         msaaSamples = if samples > 0 then glGetInteger(GL_SAMPLES).max(0) else 0
         applyAntiAliasingState()
@@ -841,7 +847,13 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
     glClearColor(0.52f, 0.72f, 0.95f, 1f)
     glfwSetKeyCallback(window, new GLFWKeyCallback {
       override def invoke(window: Long, key: Int, scancode: Int, action: Int, mods: Int): Unit =
+        // Alt-tab and other desktop chords must not be read as Escape or a menu key.
+        if (mods & GLFW_MOD_ALT) != 0 then return
+        if glfwGetWindowAttrib(window, GLFW_FOCUSED) == GLFW_FALSE then return
         if action == GLFW_PRESS || (action == GLFW_REPEAT && repeatableKey(key)) then onKey(key)
+    })
+    glfwSetWindowFocusCallback(window, new GLFWWindowFocusCallback {
+      override def invoke(window: Long, focused: Boolean): Unit = onWindowFocus(focused)
     })
     glfwSetCharCallback(window, new GLFWCharCallback {
       override def invoke(window: Long, codepoint: Int): Unit = onChar(codepoint)
@@ -883,7 +895,24 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
     render()
     flushUserSettings()
     glfwSwapBuffers(window)
+    val screenBeforeEvents = screen
     glfwPollEvents()
+    // Focus loss can still deliver the key that opened the pause menu. Put the
+    // player back in the world; tabbing out is not quitting.
+    if !windowFocused && screenBeforeEvents == Screen.Playing && screen == Screen.Paused then
+      screen = Screen.Playing
+
+  private def onWindowFocus(focused: Boolean): Unit =
+    windowFocused = focused
+    ignoreInputUntil = glfwGetTime() + 0.3
+    if !focused then
+      if vsync then glfwSwapInterval(0)
+      if screen == Screen.Playing then setCursorCaptured(false)
+    else
+      glfwSwapInterval(if vsync then 1 else 0)
+      if screen == Screen.Playing && !chatOpen && !modUiCursorMode then
+        setCursorCaptured(true)
+        firstMouse = true
 
   private def onChar(codepoint: Int): Unit =
     if chatOpen then
@@ -956,6 +985,7 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
     placeableBlocks.contains(block) || (CustomBlocks.isSlot(block) && CustomBlocks.registered(block))
 
   private def onKey(key: Int): Unit =
+    if !windowFocused || glfwGetTime() < ignoreInputUntil then return
     if modManager.fireKeyPress(ModKeyEvent(modManager.api,key,modScreenName)).cancelled then return
     if key == GLFW_KEY_F11 then toggleFullscreen()
     else screen match
@@ -1664,7 +1694,8 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
         modManager.serverModpackHash,
         modManager.serverModpackList,
         () => publishedEnvironment,
-        () => publishedRules
+        () => publishedRules,
+        () => heldHotbarBlock.id & 0xff
       )
       gameServer = server
       verifyLocalServer(server.localPort) match
@@ -2260,6 +2291,14 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
       return
     if modUiCursorMode then
       handleModGuiMouse()
+      sendPlayerPositionNetwork()
+      return
+    if !windowFocused then
+      firstMouse = true
+      updateWeather(dt)
+      updateBlockParticles(dt)
+      updateTorchEffects(dt)
+      updateGameFeel(dt, camera, false, false, false)
       sendPlayerPositionNetwork()
       return
     val frameStartCamera = camera
@@ -3208,21 +3247,23 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
               val x = parseNetworkFloat(parts(2)); val y = parseNetworkFloat(parts(3)); val z = parseNetworkFloat(parts(4))
               val pyaw = parseNetworkFloat(parts(5)); val ppitch = parseNetworkFloat(parts(6))
               val colorId = if parts.length >= 8 then normalizeColorId(parts(7).toInt) else colorForPlayer(name)
+              val held = if parts.length >= 9 then Block.fromId((parts(8).toInt & 0xff).toByte) else Block.Air
               rememberPlayerColor(name, colorId)
               val nextPos = Vec3(x, y, z)
               remotePlayers.get(name) match
                 case Some(rp) =>
                   // Interpolate ordinary packets, but snap genuine teleports/large
                   // corrections so smoothing can never leave a player ghosting across
-                  // half the map.
+                  // half the map. The held block is applied as soon as the packet arrives.
                   if (nextPos - rp.pos).lengthSquared > 144f then rp.pos = nextPos
                   rp.targetPos = nextPos
                   rp.targetYaw = pyaw
                   rp.targetPitch = ppitch
                   rp.lastSeen = glfwGetTime()
                   rp.colorId = colorId
+                  rp.heldBlock = held
                 case None =>
-                  remotePlayers(name) = RemotePlayer(name, nextPos, nextPos, pyaw, pyaw, ppitch, ppitch, glfwGetTime(), colorId)
+                  remotePlayers(name) = RemotePlayer(name, nextPos, nextPos, pyaw, pyaw, ppitch, ppitch, glfwGetTime(), colorId, held)
         else if line.startsWith("TPOS|") then
           if parts.length >= 5 then
             val name = networkSafeName(parts(1))
@@ -3324,15 +3365,18 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
       val moved = (camera - lastNetworkSentPos).lengthSquared > 0.0004f
       val turned = abs(angleDeltaDegrees(lastNetworkSentYaw, yaw)) > 0.22f || abs(lastNetworkSentPitch - pitch) > 0.22f
       val keepaliveDue = now - lastPosKeepalive >= 0.75
-      // Moving players update at up to 20 Hz for responsiveness. Stationary players
-      // stop flooding the TCP stream and only send a small keepalive periodically.
-      if now - lastPosSend >= 0.05 && (moved || turned || keepaliveDue) then
+      val heldId = heldHotbarBlock.id & 0xff
+      val heldChanged = heldId != lastNetworkHeldBlock
+      // Moving players update at up to 20 Hz. A hotbar change is sent on the same
+      // frame, so the other client shows the new block with no extra wait.
+      if heldChanged || (now - lastPosSend >= 0.05 && (moved || turned || keepaliveDue)) then
         lastPosSend = now
         if keepaliveDue then lastPosKeepalive = now
         lastNetworkSentPos = camera
         lastNetworkSentYaw = yaw
         lastNetworkSentPitch = pitch
-        val msg = "POS|" + networkEscape(playerName) + "|" + networkFloat(camera.x) + "|" + networkFloat(camera.y) + "|" + networkFloat(camera.z) + "|" + networkFloat(yaw) + "|" + networkFloat(pitch) + "|" + localColorId.toString
+        lastNetworkHeldBlock = heldId
+        val msg = "POS|" + networkEscape(playerName) + "|" + networkFloat(camera.x) + "|" + networkFloat(camera.y) + "|" + networkFloat(camera.z) + "|" + networkFloat(yaw) + "|" + networkFloat(pitch) + "|" + localColorId.toString + "|" + heldId.toString
         if gameClient != null && gameClient.isConnected then gameClient.send(msg)
         else if gameServer != null then gameServer.broadcast(msg)
       if gameServer != null && now - lastMultiplayerHeartbeat >= 2.0 then
@@ -3692,7 +3736,9 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
     BlockboxPlayerModel.beginLighting(viewSpace = false)
     remotePlayers.valuesIterator.foreach { rp =>
       if now - rp.lastSeen <= 8.0 then
-        BlockboxPlayerModel.render(rp, camera, colorForId(rp.colorId), lightColorAt(rp.pos.x, rp.pos.y - 0.6f, rp.pos.z), gameTime)
+        val light = lightColorAt(rp.pos.x, rp.pos.y - 0.6f, rp.pos.z)
+        val held = if rp.heldBlock == Block.Air then None else Some(() => drawHeldItemAtGrip(rp.heldBlock, light))
+        BlockboxPlayerModel.render(rp, camera, colorForId(rp.colorId), light, gameTime, held)
     }
     BlockboxPlayerModel.endLighting()
 

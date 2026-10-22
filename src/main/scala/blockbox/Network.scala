@@ -24,7 +24,8 @@ final class GameServer(
   requiredModHash: String,
   requiredModList: String,
   environmentSnapshot: () => String,
-  rulesSnapshot: () => String = () => ""
+  rulesSnapshot: () => String = () => "",
+  hostHeld: () => Int = () => 0
 ):
   import GameServer.*
   // Keep this explicitly IPv4 for local/LAN testing. 0.0.0.0 accepts 127.0.0.1, LAN, and ZeroTier IPv4.
@@ -44,7 +45,7 @@ final class GameServer(
         try
           val sock = serverSocket.accept()
           BlockboxSockets.configureTcp(sock)
-          sock.setSoTimeout(15000)
+          sock.setSoTimeout(120000)
           if connectionCount.incrementAndGet() > BlockboxNet.MAX_PLAYERS + 8 then
             connectionCount.decrementAndGet()
             BlockboxSockets.closeQuietly(sock)
@@ -96,8 +97,8 @@ final class GameServer(
 
   private def parseNetworkFloat(value: String): Float = BlockboxNet.parseFloat(value)
 
-  private def posMessage(name: String, pos: Vec3, yaw: Float, pitch: Float, colorId: Int): String =
-    BlockboxNet.pos(name, pos.x, pos.y, pos.z, yaw, pitch, colorId, colorCount)
+  private def posMessage(name: String, pos: Vec3, yaw: Float, pitch: Float, colorId: Int, heldBlock: Int = 0): String =
+    BlockboxNet.pos(name, pos.x, pos.y, pos.z, yaw, pitch, colorId, colorCount, heldBlock)
 
   private def blockMessage(x: Int, y: Int, z: Int, blockId: Byte, waterLevel: Int = 0, logAxis: Int = 0, torchMount: Int = 0): String =
     BlockboxNet.block(x, y, z, blockId.toInt, waterLevel, logAxis, torchMount)
@@ -106,10 +107,10 @@ final class GameServer(
     BlockboxNet.readProtocolLine(in)
 
   private def sendCurrentPositionsTo(client: ClientHandler): Unit =
-    client.send(posMessage(safeHostName, hostPosition(), hostYaw(), hostPitch(), safeHostColor))
+    client.send(posMessage(safeHostName, hostPosition(), hostYaw(), hostPitch(), safeHostColor, hostHeld()))
     clients.synchronized {
       clients.filter(c => (c ne client) && c.active && c.registered && c.hasPosition).foreach { c =>
-        client.send(posMessage(c.onlineName, c.lastPos, c.lastYaw, c.lastPitch, c.colorId))
+        client.send(posMessage(c.onlineName, c.lastPos, c.lastYaw, c.lastPitch, c.colorId, c.lastHeld))
       }
     }
 
@@ -164,6 +165,7 @@ final class GameServer(
     @volatile var lastPos: Vec3 = spawn
     @volatile var lastYaw: Float = 0f
     @volatile var lastPitch: Float = 0f
+    @volatile var lastHeld: Int = 0
     private var badPackets = 0
 
     private def noteBadPacket(kind: String, error: Exception): Unit =
@@ -294,8 +296,8 @@ final class GameServer(
               val pp = BlockboxNet.parsePosition(packet, colorCount)
               lastPos = Vec3(pp.x, pp.y, pp.z)
               hasPosition = true
-              lastYaw = pp.yaw; lastPitch = pp.pitch
-              val clean = posMessage(onlineName, lastPos, pp.yaw, pp.pitch, colorId)
+              lastYaw = pp.yaw; lastPitch = pp.pitch; lastHeld = pp.heldBlock
+              val clean = posMessage(onlineName, lastPos, pp.yaw, pp.pitch, colorId, pp.heldBlock)
               if !serverEvents.offer(clean) then throw IOException("Server queue full")
               broadcast(clean)
             catch case e: Exception => noteBadPacket("POS", e)
@@ -442,7 +444,7 @@ final class GameClient(host: String, port: Int):
         disconnect()
         return false
       connected = true
-      sock.setSoTimeout(15000)
+      sock.setSoTimeout(120000)
       writerThread = BlockboxSockets.daemonThread("blockbox-client-writer", () =>
         try
           while connected do

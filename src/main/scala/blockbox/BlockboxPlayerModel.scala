@@ -65,7 +65,7 @@ object BlockboxPlayerModel:
     glBindTexture(GL_TEXTURE_2D, 0)
     glDisable(GL_TEXTURE_2D)
 
-  def render(player: RemotePlayer, camera: Vec3, color: (Float, Float, Float), light: (Float, Float, Float), time: Float = 0f): Unit =
+  def render(player: RemotePlayer, camera: Vec3, color: (Float, Float, Float), light: (Float, Float, Float), time: Float = 0f, heldItem: Option[() => Unit] = None): Unit =
     val stride = player.stride
     val walk = sin(player.gait).toFloat * 32f * stride
     val mine = sin((1f - player.swing) * Pi).toFloat * (if player.swing > 0f then 1f else 0f)
@@ -105,7 +105,8 @@ object BlockboxPlayerModel:
       glPushMatrix(); glTranslatef(side * (6 * px + 0.003f), shoulder - 0.04f + breath, 0f)
       glRotatef(side * (3f + sway * 0.5f) + action * 12f, 0f, 0f, 1f)
       glRotatef(-leg * 0.85f + action * 85f + sway, 1f, 0f, 0f)
-      armGeometry(side, -abs(leg) * 0.18f + action * 22f, 0.15f + action * 0.75f, None)
+      val holding = side == 1 && heldItem.isDefined
+      armGeometry(side, -abs(leg) * 0.18f + action * 22f, (if holding then 0.9f else 0.15f) + action * 0.75f, if holding then heldItem else None)
       glPopMatrix()
       side += 2
     glPopMatrix()

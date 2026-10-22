@@ -420,19 +420,15 @@ final class Chunk(val cx: Int, val cz: Int, initialAtlas: TextureAtlas, gen: Ter
           // Static generated water keeps clean top-only lakes/oceans. Dynamic water draws
           // every exposed side, including stacked waterfall sides when water exists above.
           true
-    def openAt(x: Int, y: Int, z: Int): Boolean =
-      y >= 0 && y < height && { val b = localBlock(x, y, z); b == Block.Air || b == Block.Water }
-    // Fancy foliage, one layer deep: a leaf face toward another leaf is drawn when that
-    // neighbour is on the canopy surface, so holes show leaves behind them, not sky.
-    def surfaceFoliage(x: Int, y: Int, z: Int): Boolean =
-      openAt(x + 1, y, z) || openAt(x - 1, y, z) || openAt(x, y + 1, z) || openAt(x, y - 1, z) || openAt(x, y, z + 1) || openAt(x, y, z - 1)
     def isVisible(nlx: Int, ny: Int, nlz: Int, block: Block): Boolean =
       val nb = localBlock(nlx, ny, nlz)
       if nb == Block.Air then true
       else if block == Block.Water then isWaterSideVisible(nlx, ny, nlz)
       else if nb == Block.Water then true
+      // Leaves hide the face they share with another leaf. The outer shell still draws.
+      else if BlockTints.isFoliage(block) && BlockTints.isFoliage(nb) then false
       else if nb.cutout && !nb.solid then true
-      else if block.cutout && nb.cutout then surfaceFoliage(nlx, ny, nlz)
+      else if block.cutout && nb.cutout then true
       else if nb.cutout then block != nb
       else if block.solid && nb.solid && !block.translucent && !nb.translucent && !block.cutout && !nb.cutout then false
       else nb.translucent && nb != block

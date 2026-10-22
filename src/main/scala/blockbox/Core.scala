@@ -184,7 +184,8 @@ final case class RemotePlayer(
   var pitch: Float,
   var targetPitch: Float,
   var lastSeen: Double,
-  var colorId: Int
+  var colorId: Int,
+  var heldBlock: Block = Block.Air
 ):
   var bodyYaw: Float = yaw
   var gait: Float = 0f

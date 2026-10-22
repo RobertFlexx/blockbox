@@ -120,8 +120,9 @@ public final class BlockboxNet {
     public final float yaw;
     public final float pitch;
     public final int color;
+    public final int heldBlock;
 
-    private PositionPacket(String name, float x, float y, float z, float yaw, float pitch, int color) {
+    private PositionPacket(String name, float x, float y, float z, float yaw, float pitch, int color, int heldBlock) {
       this.name = name;
       this.x = x;
       this.y = y;
@@ -129,6 +130,7 @@ public final class BlockboxNet {
       this.yaw = yaw;
       this.pitch = pitch;
       this.color = color;
+      this.heldBlock = heldBlock;
     }
   }
 
@@ -193,13 +195,16 @@ public final class BlockboxNet {
     int received = 0;
     long started = System.nanoTime();
     while (true) {
-      if (System.nanoTime() - started > 15_000_000_000L) throw new IOException("Protocol line deadline exceeded");
       int ch = in.read();
       if (ch < 0) {
         if (line.length() == 0) return null;
         break;
       }
       if (ch == '\n') break;
+      // Once bytes of a line have arrived, don't wait forever for the rest.
+      // Idle time between lines is the socket timeout, not this deadline, so
+      // alt-tabbing for a bit does not look like a dead connection.
+      if (line.length() > 0 && System.nanoTime() - started > 15_000_000_000L) throw new IOException("Protocol line deadline exceeded");
       if (++received > MAX_LINE_LENGTH + 1) throw new IOException("Protocol line too long");
       if (ch == '\r') continue;
       if (line.length() >= MAX_LINE_LENGTH) throw new IOException("Protocol line too long");
@@ -363,7 +368,8 @@ public final class BlockboxNet {
     float pitch = Math.max(-90f, Math.min(90f, parseFloat(packet.part(6))));
     int colors = Math.max(1, colorCount);
     int color = packet.size() >= 8 ? Math.floorMod(parseInt(packet.part(7), Integer.MIN_VALUE, Integer.MAX_VALUE), colors) : 0;
-    return new PositionPacket(name, x, y, z, yaw, pitch, color);
+    int heldBlock = packet.size() >= 9 ? parseInt(packet.part(8), 0, 255) : 0;
+    return new PositionPacket(name, x, y, z, yaw, pitch, color, heldBlock);
   }
 
   public static String playerToken(String name, int color, int colorCount) {
@@ -371,7 +377,11 @@ public final class BlockboxNet {
   }
 
   public static String pos(String name, float x, float y, float z, float yaw, float pitch, int color, int colorCount) {
-    return line(POS, safeName(name), floatText(x), floatText(y), floatText(z), floatText(yaw), floatText(pitch), Integer.toString(Math.floorMod(color, Math.max(1, colorCount))));
+    return pos(name, x, y, z, yaw, pitch, color, colorCount, 0);
+  }
+
+  public static String pos(String name, float x, float y, float z, float yaw, float pitch, int color, int colorCount, int heldBlock) {
+    return line(POS, safeName(name), floatText(x), floatText(y), floatText(z), floatText(yaw), floatText(pitch), Integer.toString(Math.floorMod(color, Math.max(1, colorCount))), Integer.toString(Math.max(0, Math.min(255, heldBlock))));
   }
 
   public static String block(int x, int y, int z, int blockId) {
