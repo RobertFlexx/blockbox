@@ -9,11 +9,23 @@ object Terrain:
   val worldHeight = 128
   val chunkSize = 16
 
-final class TerrainGenerator(val seed: Long):
+enum TerrainBiome:
+  case Ocean, Beach, Wetlands, Plains, Prairie, Meadow, Forest, OldGrowthForest, BirchForest, Savanna, Desert, Badlands, Taiga, SnowyTundra, Alpine, StonyHighlands, JaggedPeaks, RockyCoast, DuneDesert, SnowyTaiga, RedwoodForest
+
+enum CaveBiome:
+  case Normal, Limestone, Lush, Crystal, Rooted, DeepStone
+
+final case class CaveEntrance(x: Float, y: Float, z: Float, dx: Float, dz: Float, length: Float, radius: Float, bend: Float)
+
+final class TerrainGenerator(val seed: Long,decorate: (Int,Int,Array[Byte]) => Unit=(_,_,_) => ()):
   private val seedHash = (seed ^ (seed >>> 32)).toInt
   private val maxTerrainCacheEntries = 262144
   private val heightCache = new ConcurrentHashMap[Long, java.lang.Integer]()
-  private val grassTintCache = new ConcurrentHashMap[Long, Array[(Float, Float, Float)]]()
+  private val entranceCache = new ConcurrentHashMap[Long, Option[CaveEntrance]]()
+  private final case class TintColumn(height: Int,color: (Float,Float,Float))
+  private final case class BiomeColumn(height: Int,biome: TerrainBiome)
+  private val grassTintCache = new ConcurrentHashMap[Long,TintColumn]()
+  private val biomeCache = new ConcurrentHashMap[Long,BiomeColumn]()
 
   private def columnKey(x: Int, z: Int): Long =
     (x.toLong << 32) ^ (z.toLong & 0xffffffffL)
@@ -103,6 +115,47 @@ final class TerrainGenerator(val seed: Long):
     val groves = fbm2D((x - 340.0) * 0.0085, (z + 190.0) * 0.0085, 3, 613) * 0.16f
     broad + groves
 
+  private def badlandsRegionAt(x: Int, z: Int): Float =
+    val broad = fbm2D((x - 3180.0) * 0.00072, (z + 1760.0) * 0.00072, 5, 1801)
+    val broken = fbm2D((x + 540.0) * 0.0026, (z - 940.0) * 0.0026, 3, 1802) * 0.22f
+    broad + broken
+
+  private def wetlandRegionAt(x: Int, z: Int): Float =
+    val broad = fbm2D((x + 2410.0) * 0.00090, (z + 1150.0) * 0.00090, 5, 1811)
+    val pools = fbm2D((x - 730.0) * 0.0031, (z + 420.0) * 0.0031, 3, 1812) * 0.20f
+    broad + pools
+
+  private def oldGrowthRegionAt(x: Int, z: Int): Float =
+    val broad = fbm2D((x - 4200.0) * 0.00082, (z + 2700.0) * 0.00082, 5, 1861)
+    val groves = fbm2D((x + 610.0) * 0.0027, (z - 880.0) * 0.0027, 3, 1862) * 0.22f
+    broad + groves
+
+  private def prairieRegionAt(x: Int, z: Int): Float =
+    val broad = fbm2D((x + 3300.0) * 0.00072, (z - 2400.0) * 0.00072, 5, 1871)
+    val sweep = fbm2D((x - 310.0) * 0.0021, (z + 570.0) * 0.0021, 3, 1872) * 0.16f
+    broad + sweep
+
+  private def stonyHighlandRegionAt(x: Int, z: Int): Float =
+    val broad = fbm2D((x - 1900.0) * 0.00105, (z + 3600.0) * 0.00105, 4, 1881)
+    val broken = ridgedNoise((x + 940.0) * 0.0042, (z - 670.0) * 0.0042, 1882, 3) * 0.28f
+    broad + broken
+
+  private def mountainBiomeStrengthAt(x: Int, z: Int): Float =
+    val chains = fbm2D((x - 1500.0) * 0.00078, (z + 700.0) * 0.00078, 5, 202)
+    val ridges = ridgedNoise((x + 410.0) * 0.0028, (z - 70.0) * 0.0028, 201, 4)
+    (smooth01((chains + 0.34f) / 0.80f) * (0.58f + ridges * 0.42f)).max(0f).min(1f)
+
+  private def badlandsAt(x: Int, z: Int, h: Int): Boolean =
+    h > Terrain.seaLevel + 4 && h < Terrain.seaLevel + 58 && badlandsRegionAt(x, z) > 0.30f && moistureAt(x, z) < 0.03f && temperatureAt(x, z, h) > 0.02f
+
+  private def wetlandAt(x: Int, z: Int, h: Int): Boolean =
+    h >= Terrain.seaLevel - 1 && h <= Terrain.seaLevel + 12 && wetlandRegionAt(x, z) > 0.28f && moistureAt(x, z) > 0.12f && desertRegionAt(x, z) < 0.20f
+
+  private def taigaAt(x: Int, z: Int, h: Int): Boolean =
+    val t = temperatureAt(x, z, h)
+    val m = moistureAt(x, z)
+    t < -0.20f && t > -0.78f && m > -0.22f && forestRegionAt(x, z) > -0.28f
+
   private def riverStrengthAt(x: Int, z: Int): Float =
     val fx = x.toDouble; val fz = z.toDouble
     val channelA = abs(fbm2D((fx + 260.0) * 0.0019, (fz - 530.0) * 0.0019, 5, 2401))
@@ -171,21 +224,14 @@ final class TerrainGenerator(val seed: Long):
     val coolEnough = 1f - smooth01((temperatureAt(x, z, h) - 0.30f + edgeNoise * 0.30f) / 0.34f)
     if coldAt(x, z, h) || desertAt(x, z, h) || h <= Terrain.seaLevel + 2 then 0f else (wet * grove * coolEnough).max(0f).min(1f)
 
-  def grassTintAt(x: Int, z: Int, h: Int): (Float, Float, Float) =
-    if h < 0 || h >= Terrain.worldHeight then computeGrassTintAt(x, z, h)
+  def grassTintAt(x: Int,z: Int,h: Int): (Float,Float,Float) =
+    val key=columnKey(x,z)
+    val cached=grassTintCache.get(key)
+    if cached!=null && cached.height==h then cached.color
     else
-      val key = columnKey(x, z)
-      var column = grassTintCache.get(key)
-      if column == null then
-        val created = new Array[(Float, Float, Float)](Terrain.worldHeight)
-        val existing = if grassTintCache.size() < maxTerrainCacheEntries then grassTintCache.putIfAbsent(key, created) else null
-        column = if existing != null then existing else created
-      val cached = column(h)
-      if cached != null then cached
-      else
-        val computed = computeGrassTintAt(x, z, h)
-        column(h) = computed
-        computed
+      val color=computeGrassTintAt(x,z,h)
+      if grassTintCache.size()<maxTerrainCacheEntries then grassTintCache.putIfAbsent(key,TintColumn(h,color))
+      color
 
   private def computeGrassTintAt(x: Int, z: Int, h: Int): (Float, Float, Float) =
     val savanna = savannaBlendAt(x, z, h).max(0f).min(1f)
@@ -196,9 +242,9 @@ final class TerrainGenerator(val seed: Long):
     // Stronger biome color anchors keep the grass blocks visibly different after
     // texture modulation and lighting: plains is rich green, birch is pale/lush,
     // and savanna is dry olive.
-    var r = (plains * 0.42f + birch * 0.66f + savanna * 0.54f) / total
-    var g = (plains * 0.82f + birch * 0.94f + savanna * 0.58f) / total
-    var b = (plains * 0.25f + birch * 0.36f + savanna * 0.13f) / total
+    var r = (plains * 0.52f + birch * 0.68f + savanna * 0.63f) / total
+    var g = (plains * 0.76f + birch * 0.83f + savanna * 0.62f) / total
+    var b = (plains * 0.34f + birch * 0.44f + savanna * 0.28f) / total
     if cold > 0f then
       val w = (cold * 0.82f).max(0f).min(1f)
       r = r * (1f - w) + 0.50f * w
@@ -224,40 +270,118 @@ final class TerrainGenerator(val seed: Long):
     h > Terrain.seaLevel + 34 && localSlopeAt(x, z, h) >= 5
 
   private def spruceAt(x: Int, z: Int, h: Int): Boolean =
-    coldAt(x, z, h) && moistureAt(x, z) > -0.28f
+    (coldAt(x, z, h) && moistureAt(x, z) > -0.28f) || taigaAt(x, z, h)
 
   private def caveMouthDepthAt(x: Int, z: Int, h: Int): Int =
     if h <= Terrain.seaLevel + 8 || h >= Terrain.worldHeight - 16 then 0
     else
-      // Sparse side-of-hill entrances. Wider irregular throats make caves read like
-      // natural Minecraft-style hillside mouths instead of circular top-down gashes.
-      val cellSize = 60
-      val cellX = Math.floorDiv(x, cellSize)
-      val cellZ = Math.floorDiv(z, cellSize)
-      val gate = hash(cellX, cellZ, 0, 8600)
-        if gate < 0.840f then 0
-      else
-        val anchorX = cellX * cellSize + 12 + (hash(cellX, 0, cellZ, 8601) * (cellSize - 24)).toInt
-        val anchorZ = cellZ * cellSize + 12 + (hash(cellX, 1, cellZ, 8602) * (cellSize - 24)).toInt
-        val dx = (x - anchorX).toFloat
-        val dz = (z - anchorZ).toFloat
-        val angle = hash(cellX, 4, cellZ, 8606) * Pi.toFloat * 2f
-        val dirX = cos(angle).toFloat
-        val dirZ = sin(angle).toFloat
-        val forward = dx * dirX + dz * dirZ
-        val side = abs(-dx * dirZ + dz * dirX)
-        val length = 24f + hash(cellX, 5, cellZ, 8607) * 38f
-        val throatRadius = 1.75f + hash(cellX, 6, cellZ, 8608) * 1.85f
-        val taper = 1.58f - forward / (length * 1.75f)
-        val slopeSignal = ridgedNoise((x + 120.0) * 0.006, (z - 280.0) * 0.006, 8604, 3)
-        val raggedEdge = valueNoise2D((x + 300.0) * 0.12, (z - 170.0) * 0.12, 8611) * 0.38f
-        val terrainOk = h > Terrain.seaLevel + 14 && (slopeSignal > 0.38f || h > Terrain.seaLevel + 38)
-        if terrainOk && forward >= -2f && forward <= length && side <= throatRadius * taper.max(0.46f) + raggedEdge then
-          val sideEdge = 1f - (side / throatRadius.max(0.001f)).min(1f)
-          val entrance = 3.0f + sideEdge * 3.4f
-          val slopedDown = forward.max(0f) * (0.28f + hash(cellX, 7, cellZ, 8609) * 0.20f)
-          (entrance + slopedDown).toInt.max(2).min(32)
-        else 0
+      // A second entrance family creates rare irregular sinkholes on otherwise broad
+      // uplands. They are cell-anchored and seam-stable, and immediately transition
+      // into the same cave network rather than being decorative dead-end pits.
+      val sinkCell = 92
+      val scx = Math.floorDiv(x, sinkCell); val scz = Math.floorDiv(z, sinkCell)
+      if hash(scx, 0, scz, 8650) > 0.935f && h > Terrain.seaLevel + 16 then
+        val sx = scx * sinkCell + 14 + (hash(scx, 1, scz, 8651) * (sinkCell - 28)).toInt
+        val sz = scz * sinkCell + 14 + (hash(scx, 2, scz, 8652) * (sinkCell - 28)).toInt
+        val dx0 = (x - sx).toFloat; val dz0 = (z - sz).toFloat
+        val radius = 2.2f + hash(scx, 3, scz, 8653) * 2.9f
+        val ragged = valueNoise2D((x + 91.0) * 0.17, (z - 43.0) * 0.17, 8654) * 0.55f
+        val d = sqrt(dx0 * dx0 + dz0 * dz0).toFloat
+        if d < radius + ragged then
+          val core = 1f - (d / radius.max(0.2f)).min(1f)
+          return (6f + core * 15f + hash(scx, 4, scz, 8655) * 6f).toInt.max(4).min(27)
+      0
+
+  /** Sparse, seeded tunnel anchors. Neighboring chunks ask for the same world-space
+    * paths, so an entrance can cross any chunk/cell boundary without being clipped.
+    */
+  private[blockbox] def caveEntranceForCell(cx: Int, cz: Int): Option[CaveEntrance] =
+    val key = columnKey(cx,cz)
+    val cached = entranceCache.get(key)
+    if cached != null then cached
+    else
+      val result =
+        if hash(cx,0,cz,8670) < 0.74f then None
+        else
+          val x = cx*80 + 16 + (hash(cx,1,cz,8671)*48f).toInt
+          val z = cz*80 + 16 + (hash(cx,2,cz,8672)*48f).toInt
+          val h = heightAt(x,z)
+          if h <= Terrain.seaLevel+8 || h >= Terrain.worldHeight-16 then None
+          else
+            val initialAngle = hash(cx,3,cz,8673)*Pi.toFloat*2f
+            var angle = initialAngle
+            var bestHeight = Int.MinValue
+            var i = 0
+            while i < 4 do
+              val a = initialAngle+i*Pi.toFloat*0.5f
+              val ahead = heightAt(x+(cos(a)*12).toInt,z+(sin(a)*12).toInt)
+              if ahead > bestHeight then
+                bestHeight = ahead; angle = a
+              i += 1
+            Some(CaveEntrance(x,h+0.5f,z,cos(angle).toFloat,sin(angle).toFloat,
+              46f+hash(cx,4,cz,8674)*28f,2.3f+hash(cx,5,cz,8675)*1.2f,(hash(cx,6,cz,8676)-0.5f)*18f))
+      if entranceCache.size() > 8192 then entranceCache.clear()
+      entranceCache.put(key,result)
+      result
+
+  private def carveEntrances(blocks: Array[Byte], baseX: Int, baseZ: Int): Unit =
+    def carve(a: Vec3, b: Vec3, startRadius: Float, endRadius: Float, verticalScale: Float): Unit =
+      val extent = startRadius.max(endRadius)+1f
+      val minX = floor(a.x.min(b.x)-extent).toInt.max(baseX)
+      val maxX = ceil(a.x.max(b.x)+extent).toInt.min(baseX+Terrain.chunkSize-1)
+      val minZ = floor(a.z.min(b.z)-extent).toInt.max(baseZ)
+      val maxZ = ceil(a.z.max(b.z)+extent).toInt.min(baseZ+Terrain.chunkSize-1)
+      if minX > maxX || minZ > maxZ then return
+      val minY = floor(a.y.min(b.y)-extent*verticalScale).toInt.max(5)
+      val maxY = ceil(a.y.max(b.y)+extent*verticalScale).toInt.min(Terrain.worldHeight-2)
+      val dx = b.x-a.x; val dz = b.z-a.z
+      val lengthSq = (dx*dx+dz*dz).max(0.001f)
+      var x = minX
+      while x <= maxX do
+        var z = minZ
+        while z <= maxZ do
+          val t = (((x+0.5f-a.x)*dx+(z+0.5f-a.z)*dz)/lengthSq).max(0f).min(1f)
+          val px = a.x+dx*t; val pz = a.z+dz*t; val py = a.y+(b.y-a.y)*t
+          val radius = startRadius+(endRadius-startRadius)*t
+          val horizontal = ((x+0.5f-px)*(x+0.5f-px)+(z+0.5f-pz)*(z+0.5f-pz))/(radius*radius)
+          if horizontal < 1.1f then
+            var y = minY
+            while y <= maxY do
+              val dy = (y+0.5f-py)/(radius*verticalScale)
+              val shape = horizontal+dy*dy
+              val edge = if shape > 0.72f then valueNoise3D(x*0.19,y*0.17,z*0.19,8677)*0.12f else 0f
+              if shape < 1f+edge then
+                val index = (y*Terrain.chunkSize+z-baseZ)*Terrain.chunkSize+x-baseX
+                if blocks(index) != Block.Water.id && blocks(index) != Block.Bedrock.id then blocks(index) = Block.Air.id
+              y += 1
+          z += 1
+        x += 1
+    var cx = Math.floorDiv(baseX-110,80)
+    val endCX = Math.floorDiv(baseX+Terrain.chunkSize+110,80)
+    val endCZ = Math.floorDiv(baseZ+Terrain.chunkSize+110,80)
+    while cx <= endCX do
+      var cz = Math.floorDiv(baseZ-110,80)
+      while cz <= endCZ do
+        caveEntranceForCell(cx,cz).foreach { e =>
+          val sideX = -e.dz; val sideZ = e.dx
+          val a = Vec3(e.x,e.y,e.z)
+          val b = Vec3(e.x+e.dx*12f,e.y-5f,e.z+e.dz*12f)
+          val c = Vec3(e.x+e.dx*e.length*0.55f+sideX*e.bend,e.y-16f,e.z+e.dz*e.length*0.55f+sideZ*e.bend)
+          val d = Vec3(e.x+e.dx*e.length,e.y-31f,e.z+e.dz*e.length)
+          carve(a,b,e.radius*1.15f,e.radius,0.90f)
+          carve(b,c,e.radius,e.radius*1.25f,0.90f)
+          carve(c,d,e.radius*1.25f,e.radius*1.7f,0.90f)
+          // The descending entrance opens into a chamber and two traversable
+          // branches, joining nearby noise caves instead of ending as a blind pit.
+          carve(d,d,e.radius*2.4f,e.radius*2.4f,0.68f)
+          var side = -1
+          while side <= 1 do
+            val branch = Vec3(d.x+e.dx*16f+sideX*side*20f,(d.y-6f).max(10f),d.z+e.dz*16f+sideZ*side*20f)
+            carve(d,branch,e.radius,e.radius*0.9f,0.95f)
+            side += 2
+        }
+        cz += 1
+      cx += 1
 
   private def caveWaterSourceAt(x: Int, y: Int, z: Int): Boolean =
     if y <= 8 || y >= Terrain.seaLevel - 6 then false
@@ -267,6 +391,39 @@ final class TerrainGenerator(val seed: Long):
       val cy = Math.floorDiv(y, 5)
       val cz = Math.floorDiv(z, cell)
       hash(cx, cy, cz, 8700) > 0.976f && valueNoise3D((x + 500.0) * 0.026, (y - 40.0) * 0.022, (z - 300.0) * 0.026, 8701) > 0.14f
+
+  def caveBiomeAt(x: Int, y: Int, z: Int, h: Int): CaveBiome =
+    val depth = h - y
+    if depth < 16 then CaveBiome.Normal
+    else
+      // Cave materials are queried for huge numbers of underground voxels. Use
+      // stable coarse 3-D region hashes here instead of several interpolated noise
+      // octaves per block; cave *shape* remains noise-driven, while biome regions
+      // become effectively free to classify on worker threads.
+      val cx = Math.floorDiv(x, 44)
+      val cy = Math.floorDiv(y, 22)
+      val cz = Math.floorDiv(z, 44)
+      val region = hash(cx, cy, cz, 8751)
+      val detail = hash(Math.floorDiv(x + 19, 28), Math.floorDiv(y - 7, 18), Math.floorDiv(z - 13, 28), 8752)
+      if y < 22 && region < 0.18f then CaveBiome.DeepStone
+      else if depth > 34 && region > 0.72f && detail > 0.56f then CaveBiome.Crystal
+      else if detail > 0.70f && y > 18 then CaveBiome.Lush
+      else if region > 0.52f && region < 0.72f then CaveBiome.Limestone
+      else if detail < 0.20f && depth > 26 then CaveBiome.Rooted
+      else CaveBiome.Normal
+
+  private def caveWallBlock(x: Int, y: Int, z: Int, h: Int): Block =
+    caveBiomeAt(x, y, z, h) match
+      case CaveBiome.Limestone => if hash(x, y, z, 8761) > 0.30f then Block.Clay else Block.Stone
+      case CaveBiome.Lush => if hash(x, y, z, 8762) > 0.24f then Block.Dirt else Block.Clay
+      case CaveBiome.Crystal =>
+        val crystal = hash(x, y, z, 8763)
+        if crystal > 0.992f && y < 28 then Block.Diamond
+        else if crystal > 0.955f then Block.Copper
+        else Block.Stone
+      case CaveBiome.Rooted => if hash(x, y, z, 8764) > 0.74f then Block.Dirt else Block.Stone
+      case CaveBiome.DeepStone => if hash(x, y, z, 8765) > 0.88f then Block.Coal else Block.Stone
+      case CaveBiome.Normal => Block.Stone
 
   private def caveNoise(x: Int, y: Int, z: Int, h: Int): Boolean =
     caveNoise(x, y, z, h, caveMouthDepthAt(x, z, h))
@@ -282,20 +439,37 @@ final class TerrainGenerator(val seed: Long):
     if y >= h - 10 then return false
     val lowEnough = y > 7 && depth > 13f
     val dx = x.toDouble; val dy = y.toDouble; val dz = z.toDouble
-    val region = valueNoise3D(dx * 0.0037, dy * 0.0026, dz * 0.0037, 77)
-    if region < -0.68f then return false
-    val roomA = valueNoise3D(dx * 0.0080, dy * 0.0054, dz * 0.0080, 99)
-    val roomB = valueNoise3D((dx + 700.0) * 0.0108, dy * 0.0079, (dz - 500.0) * 0.0108, 199)
-    val roomC = valueNoise3D((dx - 230.0) * 0.0047, dy * 0.0035, (dz + 830.0) * 0.0047, 777)
-    val cavern = lowEnough && depth > 20f && region > -0.26f && roomA > 0.20f && roomB > -0.34f && roomC > -0.38f
-    val bigRoom = lowEnough && depth > 34f && region > -0.04f && roomA > 0.32f && roomB > -0.22f
-    val giantPocket = lowEnough && depth > 46f && roomC > 0.28f && region > -0.06f && roomA > 0.00f
-    val tubeA = abs(valueNoise2D(dx * 0.0055, dz * 0.0055, 333))
-    val tubeB = abs(valueNoise2D((dx + 120.0) * 0.0064, (dz - 90.0) * 0.0064, 444))
-    val verticalBand = valueNoise3D(dx * 0.0047, dy * 0.0104, dz * 0.0047, 555)
-    val tubeC = abs(valueNoise2D((dx - 360.0) * 0.0044, (dz + 210.0) * 0.0044, 445))
-    val tunnel = lowEnough && depth > 13f && y < Terrain.seaLevel + 70 && ((tubeA < 0.037f && verticalBand > -0.52f) || (tubeB < 0.033f && verticalBand > -0.45f) || (tubeC < 0.024f && verticalBand > -0.30f))
-    cavern || bigRoom || giantPocket || tunnel
+
+    // 3D domain warping prevents the old cave tubes from looking like vertical
+    // cookie-cutter cylinders. Two cheap warp samples bend every cave family in
+    // all three dimensions while remaining deterministic across chunk seams.
+    val warpX = valueNoise3D(dx * 0.0032, dy * 0.0030, dz * 0.0032, 9001).toDouble * 14.0
+    val warpZ = valueNoise3D((dx + 430.0) * 0.0032, (dy - 170.0) * 0.0030, (dz - 290.0) * 0.0032, 9002).toDouble * 14.0
+    val wx = dx + warpX
+    val wz = dz + warpZ
+
+    val region = valueNoise3D(wx * 0.0037, dy * 0.0026, wz * 0.0037, 77)
+    if region < -0.66f then return false
+
+    // "Cheese" caverns: large connected rooms with depth-dependent thresholds.
+    val cheeseA = valueNoise3D(wx * 0.0082, dy * 0.0055, wz * 0.0082, 99)
+    val cheeseB = valueNoise3D((wx + 700.0) * 0.0110, dy * 0.0077, (wz - 500.0) * 0.0110, 199)
+    val cheese = cheeseA * 0.68f + cheeseB * 0.32f
+    val cheeseThreshold = 0.29f - smooth01((depth - 24f) / 54f) * 0.10f
+    val cavern = lowEnough && depth > 21f && region > -0.30f && cheese > cheeseThreshold
+    val megaRoom = lowEnough && depth > 44f && region > -0.03f && cheeseA > 0.34f && cheeseB > -0.16f
+
+    // True 3D spaghetti/noodle caves. Intersecting fields creates long winding
+    // passages that rise, fall and merge instead of following only X/Z contours.
+    val spaghettiA = abs(valueNoise3D((wx + 120.0) * 0.0145, dy * 0.0180, (wz - 90.0) * 0.0145, 333))
+    val spaghettiB = abs(valueNoise3D((wx - 360.0) * 0.0125, (dy + 80.0) * 0.0150, (wz + 210.0) * 0.0125, 444))
+    val spaghetti = lowEnough && y < Terrain.seaLevel + 70 && ((spaghettiA < 0.070f && spaghettiB < 0.38f) || (spaghettiB < 0.060f && spaghettiA < 0.42f))
+
+    val ravinePath = abs(valueNoise2D((wx + 150.0) * 0.0038, (wz - 470.0) * 0.0038, 445))
+    val ravineShape = abs(valueNoise3D(wx * 0.0062, dy * 0.0125, wz * 0.0062, 555))
+    val ravine = depth > 18f && depth < 78f && ravinePath < 0.030f && ravineShape < 0.56f
+
+    cavern || megaRoom || spaghetti || ravine
 
   def heightAt(x: Int, z: Int): Int =
     val key = columnKey(x, z)
@@ -331,8 +505,12 @@ final class TerrainGenerator(val seed: Long):
     val highlands = ridgedNoise((wx + 130.0) * 0.0025, (wz - 710.0) * 0.0025, 1002, 5).toDouble * 27.0 * highlandMask.toDouble
     val mountainCore = ridgedNoise((wx + 410.0) * 0.0028, (wz - 70.0) * 0.0028, 201, 5).toDouble
     val mountainDetail = ridgedNoise((wx - 240.0) * 0.0072, (wz + 520.0) * 0.0072, 301, 3).toDouble * 12.0
+    val erosion = fbm2D((wx + 910.0) * 0.00175, (wz - 810.0) * 0.00175, 4, 205).toDouble
     val peakShape = pow(mountainCore.max(0.001), 1.55)
     val mountains = (peakShape * 62.0 + mountainDetail) * mountainMask.toDouble
+    val lowErosion = smooth01(((0.28 - erosion) / 0.76).toFloat).toDouble
+    val jaggedMask = mountainMask.toDouble * lowErosion * smooth01(((mountainCore - 0.50) / 0.42).toFloat).toDouble
+    val jaggedPeaks = pow(ridgedNoise((wx + 1260.0) * 0.0105, (wz - 940.0) * 0.0105, 206, 3).toDouble, 2.15) * 20.0 * jaggedMask
 
     // Divots and soft valleys break up the flat green-sheet look without creating ugly holes.
     val valley = abs(fbm2D((wx - 90.0) * 0.0027, (wz + 120.0) * 0.0027, 5, 251).toDouble)
@@ -343,30 +521,39 @@ final class TerrainGenerator(val seed: Long):
     val dimple = smooth01((max(0.0, 0.095 - abs(fbm2D((wx + 70.0) * 0.0068, (wz - 190.0) * 0.0068, 4, 252).toDouble)) / 0.095).toFloat).toDouble
     val divots = dimple * (2.0 + 4.0 * hillMask)
 
-    val desertish = desertRegionAt(x, z) > 0.10f && moistureAt(x, z) < 0.12f && temperatureAt(x, z, Terrain.seaLevel + 8) > -0.02f
+    // Reuse climate samples through the whole height calculation. These fields are
+    // multi-octave noise and used to be recomputed several times per column.
+    val temp0 = temperatureAt(x, z, Terrain.seaLevel + 10)
+    val moist0 = moistureAt(x, z)
+    val desertScore0 = desertRegionAt(x, z)
+    val desertish = desertScore0 > 0.10f && moist0 < 0.12f && temp0 > -0.02f
     val dryRelief =
       if desertish then
         val dune = fbm2D((wx + 220.0) * 0.010, (wz - 180.0) * 0.010, 3, 811).toDouble * 4.2
         val mesaMask = smooth01(((fbm2D((wx - 600.0) * 0.00155, (wz + 330.0) * 0.00155, 4, 813) + 0.20f) / 0.70f)).toDouble
         val mesa = ridgedNoise((wx - 500.0) * 0.0048, (wz + 260.0) * 0.0048, 812, 3).toDouble * 12.0 * mesaMask
-        dune + mesa
+        val badlandsMask = smooth01((badlandsRegionAt(x, z) - 0.20f) / 0.42f).toDouble
+        val terraceRaw = ridgedNoise((wx + 840.0) * 0.0037, (wz - 1140.0) * 0.0037, 814, 4).toDouble * 18.0
+        val terrace = (floor(terraceRaw / 3.5) * 3.5) * badlandsMask
+        val duneBlend=smooth01((desertScore0-0.18f)/0.24f)*smooth01((-moist0+0.02f)/0.24f)
+        val windRidge=pow((sin((wx+wz*0.38)*0.075+valueNoise2D(wx*0.012,wz*0.012,815)*2.8)+1)*0.5,1.6)*7.0
+        dune*(1-duneBlend)+windRidge*duneBlend+mesa*(1-duneBlend*0.6)+terrace
       else 0.0
 
     // Biome-specific relief, blended softly so there are no hard biome cliffs.
-    val temp0 = temperatureAt(x, z, Terrain.seaLevel + 10)
-    val moist0 = moistureAt(x, z)
-    val savannaReliefBlend = smooth01((temp0 + 0.02f) / 0.32f).toDouble * smooth01((0.18f - moist0) / 0.42f).toDouble * smooth01((desertRegionAt(x, z) + 0.18f) / 0.62f).toDouble * (if desertish then 0.15 else 1.0)
+    val savannaReliefBlend = smooth01((temp0 + 0.02f) / 0.32f).toDouble * smooth01((0.18f - moist0) / 0.42f).toDouble * smooth01((desertScore0 + 0.18f) / 0.62f).toDouble * (if desertish then 0.15 else 1.0)
     val birchReliefBlend = smooth01((moist0 - 0.04f) / 0.46f).toDouble * smooth01((forestRegionAt(x, z) - 0.04f) / 0.48f).toDouble * (1.0 - savannaReliefBlend.min(1.0) * 0.75)
     val savannaRoll = (ridgedNoise((wx + 320.0) * 0.0045, (wz - 160.0) * 0.0045, 824, 3).toDouble * 7.5 - 2.0) * savannaReliefBlend
     val birchRoll = fbm2D((wx - 130.0) * 0.0064, (wz + 360.0) * 0.0064, 3, 825).toDouble * 3.4 * birchReliefBlend
 
-    val base =
+    val preBase =
       Terrain.seaLevel + 8.0 +
       continent * 22.0 +
       regional +
       rolling +
       highlands +
       mountains +
+      jaggedPeaks +
       dryRelief +
       savannaRoll +
       birchRoll +
@@ -374,24 +561,109 @@ final class TerrainGenerator(val seed: Long):
       valleyCut -
       divots
 
+    // Wetland macro cells flatten gently toward the water table, producing broad
+    // marshy lowlands instead of isolated one-block puddles.
+    val wetMask = smooth01((wetlandRegionAt(x, z) - 0.26f) / 0.46f).toDouble * smooth01((moist0 - 0.04f) / 0.42f).toDouble
+    val wetTarget = Terrain.seaLevel + 2.0 + fbm2D((wx + 330.0) * 0.011, (wz - 650.0) * 0.011, 2, 1813).toDouble * 2.8
+    val wetBlend = (wetMask * smooth01(((Terrain.seaLevel + 24.0 - preBase) / 30.0).toFloat)).min(0.72)
+    val base = preBase * (1.0 - wetBlend) + wetTarget * wetBlend
+
     base.round.toInt.max(1).min(Terrain.worldHeight - 8)
 
+  def biomeAt(x: Int,z: Int,h: Int): TerrainBiome =
+    val key=columnKey(x,z)
+    val cached=biomeCache.get(key)
+    if cached!=null && cached.height==h then cached.biome
+    else
+      val result=computeBiomeAt(x,z,h)
+      if biomeCache.size()<maxTerrainCacheEntries then biomeCache.putIfAbsent(key,BiomeColumn(h,result))
+      result
+
+  private def computeBiomeAt(x: Int, z: Int, h: Int): TerrainBiome =
+    if h < Terrain.seaLevel - 1 then TerrainBiome.Ocean
+    else if beachAt(h) then
+      if stonyHighlandRegionAt(x,z)>0.12f || temperatureAt(x,z,h)< -0.24f then TerrainBiome.RockyCoast else TerrainBiome.Beach
+    else
+      // Classify from one shared climate sample set. The earlier version called the
+      // helper predicates in sequence, causing temperature/moisture FBM to be sampled
+      // over and over for the same column.
+      val t = temperatureAt(x, z, h)
+      val m = moistureAt(x, z)
+      val mountain = if h > Terrain.seaLevel + 48 then mountainBiomeStrengthAt(x, z) else 0f
+      if h > Terrain.seaLevel + 72 && mountain > 0.50f then TerrainBiome.JaggedPeaks
+      else if h > Terrain.seaLevel + 52 && mountain > 0.34f then TerrainBiome.Alpine
+      else
+        val badlands = h > Terrain.seaLevel + 4 && h < Terrain.seaLevel + 58 && m < 0.03f && t > 0.02f && badlandsRegionAt(x, z) > 0.30f
+        if badlands then TerrainBiome.Badlands
+        else
+          val desertScore = desertRegionAt(x, z)
+          val freshwater = h <= Terrain.seaLevel + 7 && (riverStrengthAt(x, z) > 0.62f || lakeStrengthAt(x, z) > 0.58f)
+          val desert = h < Terrain.seaLevel + 52 && !freshwater && ((desertScore > 0.16f && m < 0.08f && t > -0.06f) || (desertScore > 0.28f && m < 0.20f && t > 0.03f))
+          if desert then
+            if desertScore>0.24f && m< -0.04f then TerrainBiome.DuneDesert else TerrainBiome.Desert
+          else
+            val wetland = h <= Terrain.seaLevel + 12 && wetlandRegionAt(x, z) > 0.28f && m > 0.12f && desertScore < 0.20f
+            if wetland then TerrainBiome.Wetlands
+            else
+              val coldRegion = coldRegionAt(x, z)
+              val cold =
+                (h > Terrain.seaLevel + 76 && t < -0.08f && coldRegion < 0.42f) ||
+                  (t < -0.62f && coldRegion < 0.05f) ||
+                  (t < -0.78f && coldRegion < 0.25f)
+              if cold && m < 0.10f then TerrainBiome.SnowyTundra
+              else
+                val forest = forestRegionAt(x, z)
+                val taiga = t < -0.20f && t > -0.78f && m > -0.22f && forest > -0.28f
+                if taiga then
+                  if t< -0.38f || cold then TerrainBiome.SnowyTaiga else TerrainBiome.Taiga
+                else if h > Terrain.seaLevel + 38 && mountain > 0.20f && mountain < 0.50f && stonyHighlandRegionAt(x, z) > 0.26f then TerrainBiome.StonyHighlands
+                else
+                  val savanna = h > Terrain.seaLevel + 3 && h < Terrain.seaLevel + 58 && t > 0.06f && m < 0.05f && desertScore > -0.12f
+                  if savanna then TerrainBiome.Savanna
+                  else
+                    val oldGrowth = forest > 0.30f && m > 0.08f && t > -0.22f && t < 0.48f && oldGrowthRegionAt(x, z) > 0.18f
+                    val birch = !cold && m > 0.12f && forest > 0.18f && hash(Math.floorDiv(x, 22), 0, Math.floorDiv(z, 22), 6200) > 0.44f
+                    val prairie = forest < 0.02f && m > -0.30f && m < 0.20f && t > -0.16f && t < 0.48f && prairieRegionAt(x, z) > 0.18f
+                    if oldGrowth && m>0.20f && h<Terrain.seaLevel+42 then TerrainBiome.RedwoodForest
+                    else if oldGrowth then TerrainBiome.OldGrowthForest
+                    else if birch then TerrainBiome.BirchForest
+                    else if forest > 0.12f && m > -0.28f then TerrainBiome.Forest
+                    else if prairie then TerrainBiome.Prairie
+                    else if h > Terrain.seaLevel + 24 && m > -0.18f && t < 0.34f then TerrainBiome.Meadow
+                    else TerrainBiome.Plains
+
   def surfaceBlock(x: Int, y: Int, z: Int, h: Int): Block =
-    val beach = beachAt(h)
-    val freshwaterShore = freshwaterShoreAt(x, z, h)
-    if beach || freshwaterShore || desertAt(x, z, h) then Block.Sand
-    else if coldAt(x, z, h) then Block.Snow
-    else if cliffAt(x, z, h) then Block.Stone
-    else if rockyAt(x, z, h) && hash(x, h, z, 733) > 0.82f then Block.Stone
-    else Block.Grass
+    val biome = biomeAt(x, z, h)
+    val shore = freshwaterShoreAt(x, z, h)
+    if shore && h <= Terrain.seaLevel + 8 then Block.Sand
+    else biome match
+      case TerrainBiome.Ocean | TerrainBiome.Beach | TerrainBiome.Desert | TerrainBiome.DuneDesert => Block.Sand
+      case TerrainBiome.Badlands => Block.Clay
+      case TerrainBiome.SnowyTundra | TerrainBiome.SnowyTaiga => Block.Snow
+      case TerrainBiome.RockyCoast => Block.Stone
+      case TerrainBiome.JaggedPeaks => if h > Terrain.seaLevel + 88 || hash(x, h, z, 735) > 0.46f then Block.Snow else Block.Stone
+      case TerrainBiome.StonyHighlands => if hash(x, h, z, 739) > 0.28f then Block.Stone else Block.Grass
+      case TerrainBiome.Alpine =>
+        if coldAt(x, z, h) then Block.Snow
+        else if cliffAt(x, z, h) || rockyAt(x, z, h) then Block.Stone
+        else Block.Grass
+      case _ =>
+        if cliffAt(x, z, h) then Block.Stone
+        else if rockyAt(x, z, h) && hash(x, h, z, 733) > 0.82f then Block.Stone
+        else Block.Grass
 
   def fillBlock(x: Int, y: Int, z: Int, h: Int): Block =
+    val biome = biomeAt(x, z, h)
     val beach = beachAt(h)
     val freshwaterShore = freshwaterShoreAt(x, z, h)
-    val desert = desertAt(x, z, h)
+    val sandy = beach || freshwaterShore || (biome == TerrainBiome.Desert || biome == TerrainBiome.DuneDesert)
+    val badlands = biome == TerrainBiome.Badlands
     val surface = surfaceBlock(x, y, z, h)
     if y == h then surface
-    else if y > h - (if desert then 2 else 3) && (beach || freshwaterShore || desert) then Block.Sand
+    else if badlands && y > h - 13 then
+      val band = Math.floorMod(y + (valueNoise2D(x * 0.018, z * 0.018, 1820) * 4f).toInt, 11)
+      if band <= 1 then Block.Sand else Block.Clay
+    else if y > h - 3 && sandy then Block.Sand
     else if surface == Block.Stone && y > h - (if cliffAt(x, z, h) then 7 else 4) then Block.Stone
     else if y > h - 6 && cliffAt(x, z, h) && hash(x, y, z, 734) > 0.20f then Block.Stone
     else if y > h - 18 then Block.Dirt
@@ -403,6 +675,7 @@ final class TerrainGenerator(val seed: Long):
     else if y < h - 28 && y < 30 && hash(x, y, z, 91) > 0.97f then Block.GoldOre
     else if y < h - 28 && y < 16 && hash(x, y, z, 101) > 0.985f then Block.Diamond
     else if y <= 4 then Block.Bedrock
+    else if y < h - 16 then caveWallBlock(x, y, z, h)
     else Block.Stone
 
   def furnaceAt(x: Int, z: Int, h: Int, surface: Block): Option[(Int, Int, Int)] =
@@ -412,24 +685,30 @@ final class TerrainGenerator(val seed: Long):
   def treeAt(x: Int, z: Int, h: Int, surface: Block): Option[(Int, Int, Int, Int)] =
     if h <= Terrain.seaLevel + 2 || surface == Block.Sand || surface == Block.Stone || caveMouthDepthAt(x, z, h) > 0 then return None
     val forestNoise = forestRegionAt(x, z)
-    val spruce = spruceAt(x, z, h)
+    val biome = biomeAt(x, z, h)
+    val redwood=biome==TerrainBiome.RedwoodForest
+    val oldGrowth = biome == TerrainBiome.OldGrowthForest || redwood
+    val spruce = spruceAt(x, z, h) || biome==TerrainBiome.SnowyTaiga || redwood
     val savanna = savannaAt(x, z, h)
     val birch = birchGroveAt(x, z, h)
-    val spacingCell = if spruce then 7 else if savanna then 10 else if birch then 8 else if forestNoise > 0.34f then 8 else 11
+    val spacingCell = if oldGrowth then 7 else if spruce then 7 else if savanna then 10 else if birch then 8 else if forestNoise > 0.34f then 8 else 11
     val cellX = Math.floorDiv(x, spacingCell)
     val cellZ = Math.floorDiv(z, spacingCell)
     val cellGate = hash(cellX, cellZ, 0, 913)
     val treeChance = hash(x, z, 0, 19)
     val dense = forestNoise > 0.22f && moistureAt(x, z) > -0.42f
     val threshold =
-      if spruce then 0.972f
+      if oldGrowth then 0.958f
+      else if spruce then 0.972f
       else if savanna then 0.976f
       else if birch then 0.974f
       else if dense then 0.978f
       else if forestNoise > -0.08f then 0.991f
       else 0.9970f
     val height =
-      if spruce then 8 + (hash(x, z, 0, 42) * 5).toInt
+      if redwood then 18 + (hash(x,z,0,47)*10).toInt
+      else if oldGrowth then 9 + (hash(x, z, 0, 47) * 7).toInt
+      else if spruce then 8 + (hash(x, z, 0, 42) * 5).toInt
       else if savanna then 5 + (hash(x, z, 0, 45) * 4).toInt
       else if birch then 6 + (hash(x, z, 0, 46) * 3).toInt
       else if hash(x, z, 0, 43) > 0.78f then 7 + (hash(x, z, 0, 44) * 4).toInt
@@ -463,15 +742,62 @@ final class TerrainGenerator(val seed: Long):
       if rockyPatch && cellOk && chance > 0.991f then Some((x, h + 1, z, if hash(x, z, 0, 5053) > 0.78f then 2 else 1))
       else None
 
+  /** Sparse, deterministic fallen trunks make forest floors feel lived-in without
+    * turning decoration into per-block random clutter. Anchors are chosen per large
+    * cell so the exact same feature is reconstructed by every neighboring chunk.
+    */
+  def fallenLogAt(x: Int, z: Int, h: Int, surface: Block): Option[(Int, Int, Int, Int, Boolean)] =
+    val spruce = spruceAt(x,z,h)
+    val forested = forestRegionAt(x, z) > 0.02f || birchGroveAt(x, z, h) || spruce
+    if !forested || h <= Terrain.seaLevel + 2 || (surface != Block.Grass && surface != Block.Snow) || cliffAt(x, z, h) || caveMouthDepthAt(x, z, h) > 0 then None
+    else
+      val cell = 22
+      val cellX = Math.floorDiv(x, cell)
+      val cellZ = Math.floorDiv(z, cell)
+      val ax = cellX * cell + 3 + (hash(cellX, 0, cellZ, 7201) * (cell - 6)).toInt.min(cell - 7)
+      val az = cellZ * cell + 3 + (hash(cellX, 0, cellZ, 7202) * (cell - 6)).toInt.min(cell - 7)
+      if x != ax || z != az || hash(cellX, 0, cellZ, 7203) < 0.70f then None
+      else
+        val length = 3 + (hash(cellX, 0, cellZ, 7204) * 3f).toInt
+        val alongX = hash(cellX, 0, cellZ, 7205) > 0.5f
+        val ex = if alongX then x + length - 1 else x
+        val ez = if alongX then z else z + length - 1
+        if abs(heightAt(ex, ez) - h) > 1 then None else Some((x, h + 1, z, length, alongX))
+
+  /** Tiny broken structures serve as navigation landmarks. They deliberately use
+    * existing Stone/Brick ids so adding them cannot invalidate older save formats.
+    */
+  def ruinAt(x: Int, z: Int, h: Int, surface: Block): Option[(Int, Int, Int)] =
+    if h <= Terrain.seaLevel + 5 || surface == Block.Sand || surface == Block.Snow || cliffAt(x, z, h) || caveMouthDepthAt(x, z, h) > 0 then None
+    else
+      val biome = biomeAt(x, z, h)
+      if biome == TerrainBiome.Ocean || biome == TerrainBiome.Beach || biome == TerrainBiome.Wetlands || (biome == TerrainBiome.Desert || biome == TerrainBiome.DuneDesert) then None
+      else
+        val cell = 58
+        val cellX = Math.floorDiv(x, cell)
+        val cellZ = Math.floorDiv(z, cell)
+        val ax = cellX * cell + 7 + (hash(cellX, 0, cellZ, 7301) * (cell - 14)).toInt.min(cell - 15)
+        val az = cellZ * cell + 7 + (hash(cellX, 0, cellZ, 7302) * (cell - 14)).toInt.min(cell - 15)
+        if x != ax || z != az || hash(cellX, 0, cellZ, 7303) < 0.84f then None
+        else
+          val h1 = heightAt(x + 3, z); val h2 = heightAt(x - 3, z)
+          val h3 = heightAt(x, z + 3); val h4 = heightAt(x, z - 3)
+          if Seq(h1, h2, h3, h4).exists(v => abs(v - h) > 1) then None else Some((x, h + 1, z))
+
   private def smooth01(v: Float): Float =
     val t = v.max(0f).min(1f); t * t * (3f - 2f * t)
 
-  def fillChunkBlocks(cx: Int, cz: Int): Array[Byte] =
+  /** Generate a chunk's block data and its sparse log-orientation map (non-Y axes
+    * only). Keeping both results together avoids computing the same chunk twice.
+    */
+  def generateChunk(cx: Int, cz: Int): (Array[Byte], scala.collection.immutable.Map[Int, LogAxis]) =
     val baseX = cx * Terrain.chunkSize
     val baseZ = cz * Terrain.chunkSize
     val endX = baseX + Terrain.chunkSize - 1
     val endZ = baseZ + Terrain.chunkSize - 1
     val blocks = new Array[Byte](Terrain.chunkSize * Terrain.worldHeight * Terrain.chunkSize)
+    java.util.Arrays.fill(blocks,0,Terrain.chunkSize*Terrain.chunkSize,Block.Bedrock.id)
+    val logAxes = scala.collection.mutable.HashMap.empty[Int, LogAxis]
     def idx(lx: Int, y: Int, lz: Int): Int = (y * Terrain.chunkSize + lz) * Terrain.chunkSize + lx
 
     // Cache a slightly expanded height field so cliff/surface decoration does not call
@@ -479,6 +805,7 @@ final class TerrainGenerator(val seed: Long):
     val columnCount = Terrain.chunkSize * Terrain.chunkSize
     val heights = new Array[Int](columnCount)
     val surfaces = new Array[Block](columnCount)
+    val biomes = new Array[TerrainBiome](columnCount)
     val desertFlags = new Array[Boolean](columnCount)
     val beachFlags = new Array[Boolean](columnCount)
     val shoreFlags = new Array[Boolean](columnCount)
@@ -520,18 +847,24 @@ final class TerrainGenerator(val seed: Long):
         val waterLine = waterSurfaceAt(wx, wz, h)
         val beach = beachAt(h)
         val shore = freshwaterShoreAt(wx, wz, h)
-        val desert = desertAt(wx, wz, h)
-        val cold = coldAt(wx, wz, h)
+        val biome = biomeAt(wx, wz, h)
+        val desert = (biome == TerrainBiome.Desert || biome == TerrainBiome.DuneDesert)
         val rocky = rockyAt(wx, wz, h)
         val cliff = cachedCliff(lx, lz, h)
         val surface =
-          if beach || shore || desert then Block.Sand
-          else if cold then Block.Snow
-          else if cliff then Block.Stone
-          else if rocky && hash(wx, h, wz, 733) > 0.82f then Block.Stone
-          else Block.Grass
+          if shore && h <= Terrain.seaLevel + 8 then Block.Sand
+          else biome match
+            case TerrainBiome.Ocean | TerrainBiome.Beach | TerrainBiome.Desert | TerrainBiome.DuneDesert => Block.Sand
+            case TerrainBiome.Badlands => Block.Clay
+            case TerrainBiome.SnowyTundra | TerrainBiome.SnowyTaiga => Block.Snow
+            case TerrainBiome.RockyCoast => Block.Stone
+            case TerrainBiome.JaggedPeaks => if h > Terrain.seaLevel + 88 || hash(wx, h, wz, 735) > 0.46f then Block.Snow else Block.Stone
+            case TerrainBiome.StonyHighlands => if cliff || hash(wx, h, wz, 739) > 0.28f then Block.Stone else Block.Grass
+            case TerrainBiome.Alpine => if coldAt(wx, wz, h) then Block.Snow else if cliff || rocky then Block.Stone else Block.Grass
+            case _ => if cliff then Block.Stone else if rocky && hash(wx, h, wz, 733) > 0.82f then Block.Stone else Block.Grass
         heights(ci) = h
         surfaces(ci) = surface
+        biomes(ci) = biome
         desertFlags(ci) = desert
         beachFlags(ci) = beach
         shoreFlags(ci) = shore
@@ -550,7 +883,9 @@ final class TerrainGenerator(val seed: Long):
         val ci = cidx(lx, lz)
         val h = heights(ci)
         val surface = surfaces(ci)
+        val biome = biomes(ci)
         val desert = desertFlags(ci)
+        val badlands = biome == TerrainBiome.Badlands
         val beach = beachFlags(ci)
         val shore = shoreFlags(ci)
         val cliff = cliffFlags(ci)
@@ -564,6 +899,9 @@ final class TerrainGenerator(val seed: Long):
           if y <= h then
             val block =
               if y == h then surface
+              else if badlands && y > h - 13 then
+                val band = Math.floorMod(y + (valueNoise2D(wx * 0.018, wz * 0.018, 1820) * 4f).toInt, 11)
+                if band <= 1 then Block.Sand else Block.Clay
               else if y > h - (if desert then 2 else 3) && (beach || shore || desert) then Block.Sand
               else if surface == Block.Stone && y > h - (if cliff then 7 else 4) then Block.Stone
               else if y > h - 6 && cliff && hash(wx, y, wz, 734) > 0.20f then Block.Stone
@@ -576,6 +914,7 @@ final class TerrainGenerator(val seed: Long):
               else if y < h - 28 && y < 30 && hash(wx, y, wz, 91) > 0.97f then Block.GoldOre
               else if y < h - 28 && y < 16 && hash(wx, y, wz, 101) > 0.985f then Block.Diamond
               else if y <= 4 then Block.Bedrock
+              else if y < h - 16 then caveWallBlock(wx, y, wz, h)
               else Block.Stone
             val canCave = y > 4 && (y < h - 12 || (mouthDepth > 0 && y >= h - mouthDepth))
             val cave = canCave && caveNoise(wx, y, wz, h, mouthDepth)
@@ -585,6 +924,8 @@ final class TerrainGenerator(val seed: Long):
           y += 1
         lz += 1
       lx += 1
+
+    carveEntrances(blocks,baseX,baseZ)
 
     // Fill vertical air pockets that are directly connected to natural surface water.
     // This fixes lakes/oceans looking like they have missing chunks or hollow blue panes
@@ -657,7 +998,7 @@ final class TerrainGenerator(val seed: Long):
       val surface = cachedChunkSurface(wx, wz, h)
       if columnIsDecoratable(wx, wz, h) then
         treeAt(wx, wz, h, surface).foreach { case (tx, ty, tz, th) =>
-          placeTreeWorld(blocks, baseX, baseZ, tx, ty, tz, th, spruceAt(wx, wz, h))
+          placeTreeWorld(blocks, baseX, baseZ, tx, ty, tz, th, spruceAt(wx, wz, h) || biomeAt(wx,wz,h)==TerrainBiome.SnowyTaiga || biomeAt(wx,wz,h)==TerrainBiome.RedwoodForest)
         }
         cactusAt(wx, wz, h, surface).foreach { case (cx0, cy0, cz0, ch) =>
           placeCactusWorld(blocks, baseX, baseZ, cx0, cy0, cz0, ch)
@@ -668,9 +1009,30 @@ final class TerrainGenerator(val seed: Long):
         boulderAt(wx, wz, h, surface).foreach { case (bx0, by0, bz0, br) =>
           placeBoulderWorld(blocks, baseX, baseZ, bx0, by0, bz0, br)
         }
-    blocks
+        fallenLogAt(wx, wz, h, surface).foreach { case (lx0, ly0, lz0, length, alongX) =>
+          placeFallenLogWorld(blocks, baseX, baseZ, lx0, ly0, lz0, length, alongX, logAxes)
+        }
+        ruinAt(wx, wz, h, surface).foreach { case (rx0, ry0, rz0) =>
+          placeRuinWorld(blocks, baseX, baseZ, rx0, ry0, rz0)
+        }
+    // Redwood skirts reach further than any other decoration, so look a little wider
+    // for them only; otherwise canopies would be sliced flat at chunk borders.
+    for wx <- baseX - 8 to endX + 8; wz <- baseZ - 8 to endZ + 8 do
+      if wx < baseX - 4 || wx > endX + 4 || wz < baseZ - 4 || wz > endZ + 4 then
+        val h = cachedChunkHeight(wx, wz)
+        if biomeAt(wx, wz, h) == TerrainBiome.RedwoodForest && columnIsDecoratable(wx, wz, h) then
+          treeAt(wx, wz, h, cachedChunkSurface(wx, wz, h)).foreach { case (tx, ty, tz, th) =>
+            placeTreeWorld(blocks, baseX, baseZ, tx, ty, tz, th, spruce = true)
+          }
+    decorate(cx,cz,blocks)
+    (blocks, logAxes.toMap)
+
+  def fillChunkBlocks(cx: Int, cz: Int): Array[Byte] = generateChunk(cx, cz)._1
+
+  def fillChunkLogAxes(cx: Int, cz: Int): scala.collection.immutable.Map[Int, LogAxis] = generateChunk(cx, cz)._2
 
   private def placeTreeWorld(blocks: Array[Byte], baseX: Int, baseZ: Int, x: Int, y: Int, z: Int, height: Int, spruce: Boolean): Unit =
+    val redwood=biomeAt(x,z,y-1)==TerrainBiome.RedwoodForest
     val dry = savannaAt(x, z, y - 1)
     val birch = !spruce && !dry && birchGroveAt(x, z, y - 1)
     val wood = if spruce then Block.PineWood else if dry then Block.AcaciaWood else if birch then Block.BirchWood else Block.Wood
@@ -686,17 +1048,46 @@ final class TerrainGenerator(val seed: Long):
       val sx = x + (if dy > height / 2 then leanX else 0)
       val sz = z + (if dy > height / 2 then leanZ else 0)
       set(sx, y + dy, sz, wood)
+      if redwood && dy<height-4 then
+        set(sx+1,y+dy,sz,wood); set(sx,y+dy,sz+1,wood); set(sx+1,y+dy,sz+1,wood)
     val topX = x + leanX
     val topZ = z + leanZ
-    if spruce then
-      for dy <- 2 to height + 4 do
-        val layer = dy - 2
-        val radius = (4 - layer / 2).max(1)
+    if redwood then
+      // Giant redwood: a long bare 2x2 trunk, then round tiers that widen downward like
+      // stacked skirts, centred on the trunk and with ragged edges.
+      val start = (height * 0.42f).toInt
+      val top = height + 3
+      val span = (top - start).max(1).toFloat
+      for dy <- start to top do
+        val t = (top - dy) / span
+        val tier = (top - dy) % 3
+        val radius = (1.1f + t * 4.4f - tier * 0.95f).max(0.75f)
+        val reach = ceil(radius).toInt + 1
+        for bx <- topX - reach to topX + 1 + reach; bz <- topZ - reach to topZ + 1 + reach do
+          val ddx = bx - topX - 0.5f; val ddz = bz - topZ - 0.5f
+          if ddx * ddx + ddz * ddz <= radius * radius + hash(bx, y + dy, bz, 7401) * 1.4f then
+            set(bx, y + dy, bz, leaves)
+      set(topX, y + top + 1, topZ, leaves)
+    else if spruce then
+      // Minecraft's spruce silhouette: from the tip down, each tier widens one block per
+      // layer and then restarts narrow, so the tree reads as stacked, drooping skirts.
+      val top = height + 3
+      val widest = if height >= 11 then 4 else 3
+      val bottom = (height / 4).max(2)
+      var radius = 0; var tierMax = 1
+      var dy = top
+      while dy >= bottom do
         for dx <- -radius to radius; dz <- -radius to radius do
-          val dist = abs(dx) + abs(dz)
-          if dist <= radius + 1 && !(dx == 0 && dz == 0 && dy < height) then
-            set(topX + dx, y + dy, topZ + dz, leaves)
-      set(topX, y + height + 4, topZ, leaves)
+          val corner = radius > 1 && abs(dx) == radius && abs(dz) == radius
+          val rim = abs(dx) + abs(dz) >= 2 * radius - (if radius > 1 then 1 else 0)
+          val trimmed = radius > 0 && rim && hash(topX + dx, y + dy, topZ + dz, 7311) > 0.60f
+          if !corner && !trimmed && !(dx == 0 && dz == 0 && dy < height) then set(topX + dx, y + dy, topZ + dz, leaves)
+        if radius >= tierMax then
+          radius = if tierMax >= 2 then 1 else 0
+          tierMax = (tierMax + 1).min(widest)
+        else radius += 1
+        dy -= 1
+      set(topX, y + top + 1, topZ, leaves)
     else if dry then
       // Sparse acacia-ish flat canopy.
       for dx <- -3 to 3; dz <- -3 to 3; dy <- height - 1 to height + 1 do
@@ -742,6 +1133,71 @@ final class TerrainGenerator(val seed: Long):
       val ell = dx * dx + dz * dz + dy * dy
       if ell <= radius * radius + 1 && hash(x + dx, y + dy, z + dz, 5054) > 0.16f then
         set(x + dx, y + dy, z + dz, if hash(x + dx, y + dy, z + dz, 5055) > 0.74f then Block.Clay else Block.Stone)
+
+  private def placeFallenLogWorld(blocks: Array[Byte], baseX: Int, baseZ: Int, x: Int, y: Int, z: Int, length: Int, alongX: Boolean, logAxes: scala.collection.mutable.HashMap[Int, LogAxis]): Unit =
+    val spruce = spruceAt(x, z, y - 1)
+    val dry = savannaAt(x, z, y - 1)
+    val birch = !spruce && !dry && birchGroveAt(x, z, y - 1)
+    val wood = if spruce then Block.PineWood else if dry then Block.AcaciaWood else if birch then Block.BirchWood else Block.Wood
+    val leaves = if spruce then Block.PineLeaves else if dry then Block.AcaciaLeaves else if birch then Block.BirchLeaves else Block.Leaves
+    val axis = if alongX then LogAxis.X else LogAxis.Z
+    def setIfOpen(wx: Int, wy: Int, wz: Int, block: Block): Unit =
+      val lx = wx - baseX; val lz = wz - baseZ
+      if lx >= 0 && lx < Terrain.chunkSize && lz >= 0 && lz < Terrain.chunkSize && wy >= 0 && wy < Terrain.worldHeight then
+        val i = idx(lx, wy, lz)
+        val existing = Block.fromId(blocks(i))
+        if existing == Block.Air || existing.cutout then blocks(i) = block.id
+    // Record the log's orientation only where the wood cell is actually placed,
+    // so overlapping standing-tree trunks stay vertical.
+    def setWoodIfOpen(wx: Int, wy: Int, wz: Int): Unit =
+      val lx = wx - baseX; val lz = wz - baseZ
+      if lx >= 0 && lx < Terrain.chunkSize && lz >= 0 && lz < Terrain.chunkSize && wy >= 0 && wy < Terrain.worldHeight then
+        val i = idx(lx, wy, lz)
+        val existing = Block.fromId(blocks(i))
+        if existing == Block.Air || existing.cutout then
+          blocks(i) = wood.id
+          logAxes(i) = axis
+    var i = 0
+    while i < length do
+      val wx = x + (if alongX then i else 0)
+      val wz = z + (if alongX then 0 else i)
+      setWoodIfOpen(wx, y, wz)
+      if i > 0 && i < length - 1 && hash(wx, y, wz, 7211) > 0.78f then setIfOpen(wx, y + 1, wz, leaves)
+      i += 1
+    // A couple of low leaf remnants at an end keep these from reading as player-placed beams.
+    if hash(x, y, z, 7212) > 0.46f then
+      val ex = x + (if alongX then length - 1 else 0)
+      val ez = z + (if alongX then 0 else length - 1)
+      setIfOpen(ex + (if alongX then 0 else 1), y, ez + (if alongX then 1 else 0), leaves)
+
+  private def placeRuinWorld(blocks: Array[Byte], baseX: Int, baseZ: Int, x: Int, y: Int, z: Int): Unit =
+    def setIfOpen(wx: Int, wy: Int, wz: Int, block: Block): Unit =
+      val lx = wx - baseX; val lz = wz - baseZ
+      if lx >= 0 && lx < Terrain.chunkSize && lz >= 0 && lz < Terrain.chunkSize && wy >= 0 && wy < Terrain.worldHeight then
+        val i = idx(lx, wy, lz)
+        val existing = Block.fromId(blocks(i))
+        if existing == Block.Air || existing.cutout then blocks(i) = block.id
+    def masonry(wx: Int, wy: Int, wz: Int): Block =
+      if hash(wx, wy, wz, 7310) > 0.30f then Block.Brick else Block.Stone
+
+    // Broken 5x5 perimeter with deterministic gaps and a doorway. Uneven column
+    // heights make silhouettes readable from a distance without spawning a full house.
+    for dx <- -2 to 2; dz <- -2 to 2 do
+      val edge = abs(dx) == 2 || abs(dz) == 2
+      val doorway = dz == 2 && dx == 0
+      if edge && !doorway && hash(x + dx, y, z + dz, 7311) > 0.20f then
+        val height = 1 + (hash(x + dx, y, z + dz, 7312) * 3f).toInt
+        var dy = 0
+        while dy < height do
+          if hash(x + dx, y + dy, z + dz, 7313) > 0.12f then setIfOpen(x + dx, y + dy, z + dz, masonry(x + dx, y + dy, z + dz))
+          dy += 1
+    // Foundation/rubble details, intentionally incomplete.
+    for dx <- -1 to 1; dz <- -1 to 1 do
+      if hash(x + dx, y, z + dz, 7314) > 0.62f then setIfOpen(x + dx, y, z + dz, Block.Stone)
+    val rubble = Array((-3, 0), (3, 1), (-2, 3), (2, -3), (0, -3), (3, -2))
+    rubble.foreach { case (dx, dz) =>
+      if hash(x + dx, y, z + dz, 7315) > 0.52f then setIfOpen(x + dx, y, z + dz, masonry(x + dx, y, z + dz))
+    }
 
   private def placeTree(blocks: Array[Byte], lx: Int, y: Int, lz: Int, height: Int): Unit =
     val baseX = 0; val baseZ = 0

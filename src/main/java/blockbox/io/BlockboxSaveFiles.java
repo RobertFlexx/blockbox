@@ -135,6 +135,25 @@ public final class BlockboxSaveFiles {
     writeDataAtomic(chunkFile(dir, chunkX, chunkZ), writer);
   }
 
+  /** Write a pre-serialized world snapshot. Intended for the asynchronous save queue. */
+  public static void writeWorldBytesAtomic(Path worldDirectory, byte[] data, boolean syncParent) throws IOException {
+    PreparedWorld prepared = prepareWorldForSave(worldDirectory);
+    BlockboxFiles.writeBytesAtomic(prepared.worldDataFile(), data, syncParent);
+  }
+
+  /** Write a pre-serialized chunk snapshot without touching live game state. */
+  public static void writeChunkBytesAtomic(Path chunksDirectory, int chunkX, int chunkZ, byte[] data, boolean syncParent) throws IOException {
+    Path dir = BlockboxFiles.ensureDirectory(chunksDirectory);
+    BlockboxFiles.writeBytesAtomic(chunkFile(dir, chunkX, chunkZ), data, syncParent);
+  }
+
+  /** One durability barrier for a complete batch, instead of one per chunk. */
+  public static void syncPreparedWorld(PreparedWorld prepared) {
+    if (prepared == null) return;
+    BlockboxFiles.syncDirectory(prepared.chunksDirectory());
+    BlockboxFiles.syncDirectory(prepared.worldDirectory());
+  }
+
   public static boolean readChunkDataIfPresent(Path chunksDirectory, int chunkX, int chunkZ, DataReader reader) throws IOException {
     Objects.requireNonNull(reader, "reader");
     Path file = chunkFile(chunksDirectory.toAbsolutePath().normalize(), chunkX, chunkZ);

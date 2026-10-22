@@ -10,12 +10,20 @@
 set -Eeuo pipefail
 
 LWJGL_VERSION="${LWJGL_VERSION:-3.4.1}"
-LWJGL_CACHE="${HOME}/.cache/coursier/v1/https/repo1.maven.org/maven2/org/lwjgl"
+LWJGL_MAVEN_BASE="${LWJGL_MAVEN_BASE:-https://repo.maven.apache.org/maven2/org/lwjgl}"
+LWJGL_NATIVE_ROOT="${XDG_CACHE_HOME:-${HOME}/.cache}/blockbox/lwjgl-natives"
 JAVA_CLASSES=".blockbox-java-classes"
+JAVA_HELPERS_JAR=".blockbox-java-helpers.jar"
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 export BLOCKBOX_PROJECT_ROOT="${PROJECT_ROOT}"
+# Always build/run relative to Blockbox itself. Invoking scripts/run.sh from another
+# directory must not scatter helper JARs there or change where runtime resources land.
+cd -- "${PROJECT_ROOT}"
+# The source archive already ships the Linux x86_64 LWJGL native .so files.
+# Prefer those so launching does not need to resolve classifier artifacts at all.
+LWJGL_BUNDLED_NATIVE_DIR="${PROJECT_ROOT}/.lwjgl/3.4.1+2/x64"
 SCALA_SOURCE="${PROJECT_ROOT}/src/main/scala"
 JAVA_SOURCE="${PROJECT_ROOT}/src/main/java"
 
@@ -270,7 +278,13 @@ clean_graphics_env() {
 }
 
 setup_nvidia_glx() {
-  export __GLX_VENDOR_LIBRARY_NAME="${__GLX_VENDOR_LIBRARY_NAME:-nvidia}"
+  # GLVND already selects NVIDIA correctly on a normal single-GPU desktop.
+  # Forcing __GLX_VENDOR_LIBRARY_NAME can make XWayland/GLFW choose a different
+  # path than ordinary GLX programs (glxinfo/glxgears). Preserve a user-provided
+  # value, but do not manufacture one unless explicitly requested.
+  if [[ "${BLOCKBOX_FORCE_NVIDIA_GLX:-0}" == "1" ]]; then
+    export __GLX_VENDOR_LIBRARY_NAME="nvidia"
+  fi
   export __GL_SYNC_TO_VBLANK="${__GL_SYNC_TO_VBLANK:-1}"
 }
 
@@ -393,25 +407,120 @@ log "backend=${BLOCKBOX_DISPLAY_BACKEND} DISPLAY=${DISPLAY:-} WAYLAND_DISPLAY=${
 log "java=${JAVA_CMD} (${JAVA_VERSION_TEXT}) javac=${JAVAC_CMD} (${JAVAC_VERSION_TEXT}) JAVA_HOME=${JAVA_HOME:-}"
 log "graphics env GLFW_WAYLAND_LIBDECOR=${GLFW_WAYLAND_LIBDECOR:-} __GLX_VENDOR_LIBRARY_NAME=${__GLX_VENDOR_LIBRARY_NAME:-} __NV_PRIME_RENDER_OFFLOAD=${__NV_PRIME_RENDER_OFFLOAD:-}"
 log "EGL overrides __EGL_VENDOR_LIBRARY_FILENAMES=${__EGL_VENDOR_LIBRARY_FILENAMES:-} __EGL_EXTERNAL_PLATFORM_CONFIG_DIRS=${__EGL_EXTERNAL_PLATFORM_CONFIG_DIRS:-}"
+log "context override BLOCKBOX_GL_CONTEXT_API=${BLOCKBOX_GL_CONTEXT_API:-auto} BLOCKBOX_FORCE_NVIDIA_GLX=${BLOCKBOX_FORCE_NVIDIA_GLX:-0}"
 if [[ -n "${LIBGL_ALWAYS_SOFTWARE:-}" || -n "${MESA_LOADER_DRIVER_OVERRIDE:-}" || -n "${GALLIUM_DRIVER:-}" ]]; then
   log "software GL env LIBGL_ALWAYS_SOFTWARE=${LIBGL_ALWAYS_SOFTWARE:-} MESA_LOADER_DRIVER_OVERRIDE=${MESA_LOADER_DRIVER_OVERRIDE:-} GALLIUM_DRIVER=${GALLIUM_DRIVER:-}"
 fi
 
-native_jars=(
-  "${LWJGL_CACHE}/lwjgl/${LWJGL_VERSION}/lwjgl-${LWJGL_VERSION}-natives-linux.jar"
-  "${LWJGL_CACHE}/lwjgl-glfw/${LWJGL_VERSION}/lwjgl-glfw-${LWJGL_VERSION}-natives-linux.jar"
-  "${LWJGL_CACHE}/lwjgl-opengl/${LWJGL_VERSION}/lwjgl-opengl-${LWJGL_VERSION}-natives-linux.jar"
-  "${LWJGL_CACHE}/lwjgl-stb/${LWJGL_VERSION}/lwjgl-stb-${LWJGL_VERSION}-natives-linux.jar"
-)
+scala_native_java_args=()
+scala_native_jar_args=()
 
-missing_native=false
-for jar in "${native_jars[@]}"; do
-  if [[ ! -f "${jar}" ]]; then
-    missing_native=true
-  fi
-done
+# GLFW and LWJGL must agree on the OpenGL context-management API.
+# LWJGL otherwise prefers EGL when the desktop session is Wayland, even if
+# GLFW itself has been explicitly forced to X11 and created a GLX context.
+# That mismatch makes GL.createCapabilities() report that no context is current.
+LWJGL_OPENGL_CONTEXT_API=""
+case "${BLOCKBOX_GL_CONTEXT_API:-auto}" in
+  egl|EGL)
+    LWJGL_OPENGL_CONTEXT_API="EGL"
+    ;;
+  glx|GLX|native|NATIVE)
+    LWJGL_OPENGL_CONTEXT_API="native"
+    ;;
+  *)
+    if [[ "${GLFW_PLATFORM:-}" == "x11" ]]; then
+      LWJGL_OPENGL_CONTEXT_API="native"
+    elif [[ "${GLFW_PLATFORM:-}" == "wayland" ]]; then
+      LWJGL_OPENGL_CONTEXT_API="EGL"
+    fi
+    ;;
+esac
 
+if [[ -n "${LWJGL_OPENGL_CONTEXT_API}" ]]; then
+  log "LWJGL OpenGL context API=${LWJGL_OPENGL_CONTEXT_API}"
+  scala_native_java_args+=(--java-opt "-Dorg.lwjgl.opengl.contextAPI=${LWJGL_OPENGL_CONTEXT_API}")
+fi
+
+bundled_linux_x64=false
+if [[ "$(uname -m)" == "x86_64" || "$(uname -m)" == "amd64" ]]; then
+  required_bundled_natives=(liblwjgl.so libglfw.so liblwjgl_opengl.so liblwjgl_stb.so)
+  bundled_linux_x64=true
+  for so in "${required_bundled_natives[@]}"; do
+    if [[ ! -s "${LWJGL_BUNDLED_NATIVE_DIR}/${so}" ]]; then
+      bundled_linux_x64=false
+      break
+    fi
+  done
+fi
+
+if [[ "${bundled_linux_x64}" == "true" ]]; then
+  log "using bundled LWJGL native libraries"
+  scala_native_java_args+=(--java-opt "-Dorg.lwjgl.librarypath=${LWJGL_BUNDLED_NATIVE_DIR}")
+else
+  case "$(uname -m)" in
+    x86_64|amd64) LWJGL_NATIVE_CLASSIFIER="natives-linux" ;;
+    aarch64|arm64) LWJGL_NATIVE_CLASSIFIER="natives-linux-arm64" ;;
+    armv7l|armv7*) LWJGL_NATIVE_CLASSIFIER="natives-linux-arm32" ;;
+    ppc64le) LWJGL_NATIVE_CLASSIFIER="natives-linux-ppc64le" ;;
+    riscv64) LWJGL_NATIVE_CLASSIFIER="natives-linux-riscv64" ;;
+    *) die "unsupported CPU architecture for LWJGL natives: $(uname -m)" ;;
+  esac
+
+  LWJGL_NATIVE_DIR="${LWJGL_NATIVE_ROOT}/${LWJGL_VERSION}/${LWJGL_NATIVE_CLASSIFIER}"
+  mkdir -p "${LWJGL_NATIVE_DIR}"
+
+  native_jars=(
+    "${LWJGL_NATIVE_DIR}/lwjgl-${LWJGL_VERSION}-${LWJGL_NATIVE_CLASSIFIER}.jar"
+    "${LWJGL_NATIVE_DIR}/lwjgl-glfw-${LWJGL_VERSION}-${LWJGL_NATIVE_CLASSIFIER}.jar"
+    "${LWJGL_NATIVE_DIR}/lwjgl-opengl-${LWJGL_VERSION}-${LWJGL_NATIVE_CLASSIFIER}.jar"
+    "${LWJGL_NATIVE_DIR}/lwjgl-stb-${LWJGL_VERSION}-${LWJGL_NATIVE_CLASSIFIER}.jar"
+  )
+  native_modules=(lwjgl lwjgl-glfw lwjgl-opengl lwjgl-stb)
+
+  download_native_jar() {
+    local module="$1"
+    local destination="$2"
+    local url="${LWJGL_MAVEN_BASE}/${module}/${LWJGL_VERSION}/${module}-${LWJGL_VERSION}-${LWJGL_NATIVE_CLASSIFIER}.jar"
+    local tmp="${destination}.part.$$"
+
+    rm -f "${tmp}"
+    log "Downloading ${module} ${LWJGL_VERSION} ${LWJGL_NATIVE_CLASSIFIER}"
+
+    if command -v curl >/dev/null 2>&1; then
+      curl -fL --retry 3 --retry-delay 1 --connect-timeout 15 -o "${tmp}" "${url}" || {
+        rm -f "${tmp}"
+        die "failed to download ${url}"
+      }
+    elif command -v wget >/dev/null 2>&1; then
+      wget -O "${tmp}" "${url}" || {
+        rm -f "${tmp}"
+        die "failed to download ${url}"
+      }
+    elif command -v python3 >/dev/null 2>&1; then
+      python3 - "${url}" "${tmp}" <<'PY_DOWNLOAD'
+import sys
+import urllib.request
+urllib.request.urlretrieve(sys.argv[1], sys.argv[2])
+PY_DOWNLOAD
+    else
+      die "curl, wget, or python3 is required to download LWJGL native jars"
+    fi
+
+    [[ -s "${tmp}" ]] || die "downloaded an empty LWJGL native jar: ${url}"
+    mv -f "${tmp}" "${destination}"
+  }
+
+  for i in "${!native_jars[@]}"; do
+    if [[ ! -s "${native_jars[$i]}" ]]; then
+      download_native_jar "${native_modules[$i]}" "${native_jars[$i]}"
+    fi
+    scala_native_jar_args+=(--extra-jar "${native_jars[$i]}")
+  done
+fi
+
+rm -rf "${JAVA_CLASSES}"
 mkdir -p "${JAVA_CLASSES}"
+rm -f "${JAVA_HELPERS_JAR}"
 
 if [[ -d "${JAVA_SOURCE}" ]]; then
   mapfile -t java_sources < <(find "${JAVA_SOURCE}" -name '*.java' -type f | sort)
@@ -420,25 +529,18 @@ if [[ -d "${JAVA_SOURCE}" ]]; then
   fi
 fi
 
-if [[ "${missing_native}" == "true" ]]; then
-  log "Downloading LWJGL native dependencies"
-  scala-cli compile "${SCALA_SOURCE}" \
-    --server=false \
-    --extra-jar "${JAVA_CLASSES}" \
-    --dependency "org.lwjgl:lwjgl:${LWJGL_VERSION},classifier=natives-linux" \
-    --dependency "org.lwjgl:lwjgl-glfw:${LWJGL_VERSION},classifier=natives-linux" \
-    --dependency "org.lwjgl:lwjgl-opengl:${LWJGL_VERSION},classifier=natives-linux" \
-    --dependency "org.lwjgl:lwjgl-stb:${LWJGL_VERSION},classifier=natives-linux"
-fi
+JAR_CMD="${JAVA_HOME_RESOLVED}/bin/jar"
+if [[ ! -x "${JAR_CMD}" ]]; then JAR_CMD="$(command -v jar || true)"; fi
+[[ -n "${JAR_CMD}" && -x "${JAR_CMD}" ]] || die "JDK jar tool was not found"
+"${JAR_CMD}" --create --file "${JAVA_HELPERS_JAR}" -C "${JAVA_CLASSES}" .
+[[ -s "${JAVA_HELPERS_JAR}" ]] || die "failed to build Java helper jar"
 
 scala-cli run "${SCALA_SOURCE}" \
   --server=false \
   --java-home "${JAVA_HOME_RESOLVED}" \
   "${BLOCKBOX_JVM_ARGS_ARRAY[@]/#/--java-opt=}" \
   --java-opt "--enable-native-access=ALL-UNNAMED" \
-  --extra-jar "${JAVA_CLASSES}" \
-  --extra-jar "${native_jars[0]}" \
-  --extra-jar "${native_jars[1]}" \
-  --extra-jar "${native_jars[2]}" \
-  --extra-jar "${native_jars[3]}" \
+  "${scala_native_java_args[@]}" \
+  --extra-jar "${JAVA_HELPERS_JAR}" \
+  "${scala_native_jar_args[@]}" \
   -- "${BLOCKBOX_GAME_ARGS_ARRAY[@]}"

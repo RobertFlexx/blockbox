@@ -3,7 +3,8 @@ package blockbox
 import org.lwjgl.BufferUtils
 import org.lwjgl.opengl.GL
 import org.lwjgl.opengl.GL11.*
-import org.lwjgl.opengl.GL12.GL_CLAMP_TO_EDGE
+import org.lwjgl.opengl.GL12.*
+import org.lwjgl.opengl.GL30.glGenerateMipmap
 import org.lwjgl.opengl.EXTTextureFilterAnisotropic.{GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT, GL_TEXTURE_MAX_ANISOTROPY_EXT}
 import java.awt.image.BufferedImage
 import java.io.File
@@ -11,13 +12,20 @@ import javax.imageio.ImageIO
 import scala.math.*
 
 final class TextureAtlas(texturePack: TexturePack, anisotropicFiltering: Boolean = true):
-  val tileSize = 16
-  private val tileBorder = 2
+  // Preserve higher-resolution resource-pack art instead of crushing every block to
+  // 16x16 before shaders ever see it. 64x is a deliberate cap: it keeps a full atlas
+  // comfortably sized while giving shader packs four times the linear source detail.
+  val tileSize = detectPackTileSize()
+  // A half-tile replicated gutter makes every tile occupy exactly 2*tileSize. That
+  // keeps tile boundaries aligned through mip levels and prevents atlas bleeding.
+  private val tileBorder = tileSize / 2
   private val tileStep = tileSize + tileBorder * 2
   private val faceCount = FaceKind.values.length
   private val columns = 16
-  private val tileCount = Block.values.length * faceCount
-  private val rows = (tileCount + columns - 1) / columns
+  private val tileCount = (Block.all.iterator.map(_.ordinal).max+1) * faceCount
+  // One extra tile after the block faces holds the grass side overlay.
+  private val grassOverlayTile = tileCount
+  private val rows = (tileCount + 1 + columns - 1) / columns
   private val usedTextureWidth = columns * tileStep
   private val usedTextureHeight = rows * tileStep
   private val textureWidth = nextPowerOfTwo(usedTextureWidth)
@@ -34,7 +42,15 @@ final class TextureAtlas(texturePack: TexturePack, anisotropicFiltering: Boolean
     textureId = 0
 
   def uv(block: Block, face: FaceKind, u: Float, v: Float): (Float, Float) =
-    val tile = block.ordinal * faceCount + face.ordinal
+    tileUv(block.ordinal * faceCount + face.ordinal, u, v)
+
+  /** The biome-tinted grass fringe, drawn as a cutout over the untouched grass side. */
+  def grassOverlayUv(u: Float, v: Float): (Float, Float) = tileUv(grassOverlayTile, u, v)
+
+  @volatile private var grassOverlayPresent = false
+  def hasGrassOverlay: Boolean = grassOverlayPresent
+
+  private def tileUv(tile: Int, u: Float, v: Float): (Float, Float) =
     val tx = tile % columns
     val ty = tile / columns
     val x0 = tx * tileStep + tileBorder
@@ -45,24 +61,122 @@ final class TextureAtlas(texturePack: TexturePack, anisotropicFiltering: Boolean
     val v1 = (y0 + tileSize).toFloat / textureHeight.toFloat
     (u0 + (u1 - u0) * u, v0 + (v1 - v0) * v)
 
+  private def detectPackTileSize(): Int =
+    def candidateDirs(root: File): List[File] = List(
+      root,
+      File(root, "textures"),
+      File(root, "textures/block"),
+      File(root, "assets/minecraft/textures/block")
+    )
+    def textureSide(file: File): Option[Int] =
+      try
+        val img = ImageIO.read(file)
+        if img == null then None
+        else
+          val w = img.getWidth; val h = img.getHeight
+          val side =
+            if w == h then w
+            else if h > w && h % w == 0 then w // animated vertical strip: first frame is square
+            else if w > h && w % h == 0 then h
+            else math.min(w, h)
+          if side >= 16 && side <= 64 && (side & (side - 1)) == 0 then Some(side) else None
+      catch case _: Throwable => None
+    texturePack.dir.toSeq.flatMap(candidateDirs).filter(_.isDirectory).flatMap { dir =>
+      Option(dir.listFiles()).toSeq.flatten.iterator
+        .filter(f => f.isFile && f.getName.toLowerCase.endsWith(".png"))
+        .flatMap(textureSide)
+    }.foldLeft(16)((best, side) => math.max(best, side)).max(16).min(64)
+
   private def nextPowerOfTwo(value: Int): Int =
     var n = 1
     while n < value do n <<= 1
     n
 
+  private type Pixel = (Int, Int, Int, Int)
+
+  private def tileArt(block: Block, face: FaceKind): Array[Array[Pixel]] =
+    val source = imageFor(block, face)
+    val art = Array.tabulate[Pixel](tileSize, tileSize) { (py, px) =>
+      source match
+        case Some(img) => imagePixel(img, px, py)
+        case None => proceduralPixel(block, face, px, py)
+    }
+    if (block == Block.Grass && face == FaceKind.Top) || BlockTints.isFoliage(block) then maskTinted(art, BlockTints.reference(block))
+    else
+      // Custom blocks that borrow grass or leaf art are not tinted by the mesher.
+      val backing = CustomBlocks.definition(block).map(_.backing).getOrElse(block)
+      if backing != block && source.isEmpty then
+        val (tr, tg, tb) = BlockTints.item(backing, face)
+        if tr < 1f || tg < 1f || tb < 1f then
+          for row <- art; i <- row.indices do
+            val (r, g, b, a) = row(i)
+            row(i) = ((r * tr).round, (g * tg).round, (b * tb).round, a)
+    art
+
+  private def proceduralPixel(block: Block, face: FaceKind, px: Int, py: Int): Pixel =
+    // Procedural built-ins are authored on the classic 16px grid. Scale that grid
+    // cleanly when a high-res pack raises the atlas tile size.
+    val sx = (px * 16 / tileSize).max(0).min(15)
+    val sy = (py * 16 / tileSize).max(0).min(15)
+    val backing = CustomBlocks.definition(block).map(_.backing).getOrElse(block)
+    if texturePack.legacy then pixel(block, face, sx, sy)
+    else if BlockboxTextures.isOre(backing) then
+      // Ores are drawn over the pack's own stone so they always match the rock around them.
+      BlockboxTextures.oreOverlay(backing, sx, sy).getOrElse {
+        imageFor(Block.Stone, face).map(imagePixel(_, px, py)).getOrElse(BlockboxTextures.stone(sx, sy))
+      }
+    else BlockboxTextures.pixel(backing, face, sx, sy).getOrElse(pixel(block, face, sx, sy))
+
+  private def luminance(r: Float, g: Float, b: Float): Float = 0.2126f * r + 0.7152f * g + 0.0722f * b
+  private def saturation(p: Pixel): Int = math.max(p._1, math.max(p._2, p._3)) - math.min(p._1, math.min(p._2, p._3))
+
+  /** Turns coloured grass or leaf art into the grey mask the mesher tints. Packs that
+    * already ship grey masks (as Minecraft packs do) pass through untouched.
+    */
+  private def maskTinted(art: Array[Array[Pixel]], reference: (Float, Float, Float)): Unit =
+    val visible = art.iterator.flatten.filter(_._4 > 0).toVector
+    if visible.nonEmpty && visible.map(saturation).sum / visible.length > 24 then
+      val scale = 0.92f / luminance(reference._1, reference._2, reference._3)
+      for row <- art; i <- row.indices do
+        val (r, g, b, a) = row(i)
+        val v = (luminance(r.toFloat, g.toFloat, b.toFloat) * scale).round.max(0).min(255)
+        row(i) = (v, v, v, a)
+
+  /** Minecraft-style grass side overlay: the pack's fringe as a grey cutout that the
+    * mesher tints per biome and draws over the untouched side art, so the dirt below
+    * keeps its own colour everywhere. Packs may ship the overlay directly.
+    */
+  private def grassOverlayArt(): Array[Array[Pixel]] =
+    val shipped =
+      if texturePack.legacy then None
+      else List("grass_side_overlay.png", "grass_block_side_overlay.png").view.flatMap(loadTexture).headOption
+    val art = shipped match
+      case Some(img) => Array.tabulate[Pixel](tileSize, tileSize)((py, px) => imagePixel(img, px, py))
+      case None =>
+        val side = tileArt(Block.Grass, FaceKind.North)
+        val (gr, gg, gb) = BlockTints.plainsGrass
+        val scale = 0.92f / luminance(gr, gg, gb)
+        def fringe(p: Pixel): Boolean =
+          val (r, g, b, a) = p
+          a > 0 && ((g > r + 10 && g > b + 10) || (saturation(p) < 18 && luminance(r.toFloat, g.toFloat, b.toFloat) > 107f))
+        Array.tabulate[Pixel](tileSize, tileSize) { (py, px) =>
+          val p = side(py)(px)
+          if py < tileSize / 2 && fringe(p) then
+            val v = (luminance(p._1.toFloat, p._2.toFloat, p._3.toFloat) * scale).round.max(0).min(255)
+            (v, v, v, 255)
+          else (0, 0, 0, 0)
+        }
+    grassOverlayPresent = art.exists(_.exists(_._4 > 127))
+    art
+
   private def build(): Unit =
     val pixels = BufferUtils.createByteBuffer(textureWidth * textureHeight * 4)
-    for tile <- 0 until tileCount do
-      val block = Block.values(tile / faceCount)
-      val face = FaceKind.values(tile % faceCount)
+    for tile <- 0 to grassOverlayTile do
       val ox = (tile % columns) * tileStep
       val oy = (tile / columns) * tileStep
-      val source = imageFor(block, face)
-      val tilePixels = Array.ofDim[(Int, Int, Int, Int)](tileSize, tileSize)
-      for py <- 0 until tileSize; px <- 0 until tileSize do
-        tilePixels(py)(px) = source match
-          case Some(img) => imagePixel(img, px, py)
-          case None => pixel(block, face, px, py)
+      val tilePixels =
+        if tile == grassOverlayTile then grassOverlayArt()
+        else tileArt(Block.values(tile / faceCount), FaceKind.values(tile % faceCount))
       for ay <- 0 until tileStep; ax <- 0 until tileStep do
         val sx = (ax - tileBorder).max(0).min(tileSize - 1)
         val sy = (ay - tileBorder).max(0).min(tileSize - 1)
@@ -76,11 +190,20 @@ final class TextureAtlas(texturePack: TexturePack, anisotropicFiltering: Boolean
 
     textureId = glGenTextures()
     glBindTexture(GL_TEXTURE_2D, textureId)
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST)
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST)
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE)
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, textureWidth, textureHeight, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels)
+    if GL.getCapabilities.OpenGL30 then
+      // Keep at least a 2x2 source footprint at the smallest generated level; the
+      // replicated half-tile gutter remains >=1 texel wide all the way down.
+      val maxMip = (math.log(tileSize.toDouble) / math.log(2.0)).toInt.max(1) - 1
+      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, maxMip.max(0))
+      glGenerateMipmap(GL_TEXTURE_2D)
+      // Nearest within each mip preserves Blockbox's pixel-art identity; linear
+      // blending between mip levels removes distant crawling/shimmering.
+      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST_MIPMAP_LINEAR)
+    else glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST)
     configureFiltering()
     glBindTexture(GL_TEXTURE_2D, 0)
 
@@ -91,24 +214,73 @@ final class TextureAtlas(texturePack: TexturePack, anisotropicFiltering: Boolean
       glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAX_ANISOTROPY_EXT, maxAniso)
 
   private def imageFor(block: Block, face: FaceKind): Option[BufferedImage] =
-    if texturePack.legacy then None else textureNames(block, face).view.flatMap(loadTexture).headOption
+    val custom=CustomBlocks.definition(block)
+    custom.flatMap(_.texture).flatMap { path =>
+      try
+        val safe=blockbox.io.BlockboxFiles.safeChild(java.nio.file.Path.of("mods"),path)
+        Option(ImageIO.read(safe.toFile)).filter(img => img.getWidth<=256 && img.getHeight<=256)
+      catch case _: Exception => None
+    }.orElse {
+      if texturePack.legacy then None else textureNames(custom.map(_.backing).getOrElse(block),face).view.flatMap(loadTexture).headOption
+    }
 
   private def textureNames(block: Block, face: FaceKind): List[String] = block match
     case Block.Grass =>
       face match
-        case FaceKind.Top => List("grass.png")
+        case FaceKind.Top => List("grass.png", "grass_block_top.png")
         case FaceKind.Bottom => List("dirt.png")
-        case _ => List("grass_side.png")
+        case _ => List("grass_side.png", "grass_block_side.png")
     case Block.Dirt => List("dirt.png")
     case Block.Stone => List("stone.png")
     case Block.Sand => List("sand.png")
-    case Block.Snow => List("snow.png")
-    case Block.Water => List("water.png")
+    case Block.Snow => List("snow.png", "snow_block.png")
+    case Block.Water => List("water.png", "water_still.png")
     case Block.Torch => List("torch.png")
     case Block.Wood =>
       face match
-        case FaceKind.Top | FaceKind.Bottom => List("log_top_bottom.png")
-        case _ => List("log_side.png")
+        case FaceKind.Top | FaceKind.Bottom => List("log_top_bottom.png", "oak_log_top.png")
+        case _ => List("log_side.png", "oak_log.png")
+    case Block.BirchWood =>
+      face match
+        case FaceKind.Top | FaceKind.Bottom => List("birch_log_top.png")
+        case _ => List("birch_log.png")
+    case Block.PineWood =>
+      face match
+        case FaceKind.Top | FaceKind.Bottom => List("pine_log_top.png", "spruce_log_top.png")
+        case _ => List("pine_log.png", "spruce_log.png")
+    case Block.AcaciaWood =>
+      face match
+        case FaceKind.Top | FaceKind.Bottom => List("acacia_log_top.png")
+        case _ => List("acacia_log.png")
+    case Block.Planks => List("planks.png", "oak_planks.png")
+    case Block.BirchPlanks => List("birch_planks.png")
+    case Block.PinePlanks => List("pine_planks.png", "spruce_planks.png")
+    case Block.AcaciaPlanks => List("acacia_planks.png")
+    case Block.Leaves => List("leaves.png", "oak_leaves.png")
+    case Block.BirchLeaves => List("birch_leaves.png")
+    case Block.PineLeaves => List("pine_leaves.png", "spruce_leaves.png")
+    case Block.AcaciaLeaves => List("acacia_leaves.png")
+    case Block.Brick => List("brick.png", "bricks.png")
+    case Block.Clay => List("clay.png")
+    case Block.Coal => List("coal.png", "coal_ore.png", "coal_block.png")
+    case Block.Copper => List("copper.png", "copper_ore.png")
+    case Block.Glass => List("glass.png")
+    case Block.IronOre => List("iron_ore.png")
+    case Block.GoldOre => List("gold_ore.png")
+    case Block.Diamond => List("diamond.png", "diamond_ore.png", "diamond_block.png")
+    case Block.Bedrock => List("bedrock.png")
+    case Block.Cactus =>
+      face match
+        case FaceKind.Top => List("cactus_top.png")
+        case FaceKind.Bottom => List("cactus_bottom.png")
+        case _ => List("cactus_side.png")
+    case Block.Furnace | Block.FurnaceLit =>
+      face match
+        case FaceKind.Top | FaceKind.Bottom => List("furnace_top.png")
+        case FaceKind.North | FaceKind.South =>
+          if block == Block.FurnaceLit then List("furnace_front_on.png", "furnace_front.png") else List("furnace_front.png")
+        case _ => List("furnace_side.png")
+    case Block.RainbowBlock => List("rainbow_block.png")
     case _ => Nil
 
   private def loadTexture(name: String): Option[BufferedImage] =
@@ -122,17 +294,27 @@ final class TextureAtlas(texturePack: TexturePack, anisotropicFiltering: Boolean
 
   private def loadTextureFile(name: String): Option[BufferedImage] =
     val files = texturePack.dir.toList.flatMap { dir =>
-      List(File(dir, name), File(File(dir, "textures"), name))
+      List(
+        File(dir, name),
+        File(File(dir, "textures"), name),
+        File(File(dir, "textures/block"), name),
+        File(File(dir, "assets/minecraft/textures/block"), name)
+      )
     }
     files.collectFirst { case file if file.exists() => ImageIO.read(file) }
 
   private def imagePixel(img: BufferedImage, x: Int, y: Int): (Int, Int, Int, Int) =
-    val sx = (x * img.getWidth / tileSize).max(0).min(img.getWidth - 1)
-    val sy = (y * img.getHeight / tileSize).max(0).min(img.getHeight - 1)
+    // Minecraft animated block textures are often vertical strips. Use the first
+    // square frame instead of squashing the complete animation into one block face.
+    val frameW = if img.getHeight > img.getWidth && img.getHeight % img.getWidth == 0 then img.getWidth else img.getWidth
+    val frameH = if img.getHeight > img.getWidth && img.getHeight % img.getWidth == 0 then img.getWidth else img.getHeight
+    val sx = (x * frameW / tileSize).max(0).min(frameW - 1)
+    val sy = (y * frameH / tileSize).max(0).min(frameH - 1)
     val argb = img.getRGB(sx, sy)
     ((argb >>> 16) & 0xFF, (argb >>> 8) & 0xFF, argb & 0xFF, (argb >>> 24) & 0xFF)
 
   private def pixel(block: Block, face: FaceKind, x: Int, y: Int): (Int, Int, Int, Int) = block match
+    case b if CustomBlocks.definition(b).nonEmpty => pixel(CustomBlocks.definition(b).get.backing,face,x,y)
     case Block.Air => (0, 0, 0, 0)
     case Block.Grass =>
       face match
@@ -340,14 +522,20 @@ final class TextureAtlas(texturePack: TexturePack, anisotropicFiltering: Boolean
         case _ => (sbr, sbg, sbb, 255)
     case Block.Torch =>
       val stick = x >= 6 && x <= 9 && y >= 5
-      val flame = y < 5 && x >= 5 && x <= 10
-      val core = flame && x >= 6 && x <= 9 && y >= 1 && y <= 3
-      val glow = y >= 0 && y <= 5 && x >= 4 && x <= 11
-      if core then (255, 252, 220, 255)
+      val flameLeft = if y==0 then 8 else if y==1 then 7 else if y==2 then 6 else if y==3 then 5 else 6
+      val flameRight = if y==0 then 8 else if y==1 then 9 else if y==2 then 9 else if y==3 then 10 else 9
+      val flame = y < 5 && x >= flameLeft && x <= flameRight
+      val core = flame && x >= 7 && x <= 8 && y >= 2
+      val glow = y < 5 && x >= flameLeft-1 && x <= flameRight+1
+      if core then (255, 249, 195, 255)
       else if flame then
         val flicker = (noise(x, y, 2301) / 5).toInt
-        (255 - flicker / 2, 172 - flicker / 3, 32 + flicker / 4, 245)
-      else if glow then (255, 180, 50, 70)
+        (255 - flicker / 3, 158 + y*9 - flicker / 3, 26 + flicker / 4, 255)
+      else if glow then (255, 166, 35, 55)
+      else if stick && y==5 then
+        if x>=7 && x<=8 then (255, 216, 124, 255) else (244, 132, 42, 255)
+      else if stick && y==6 then
+        if x>=7 && x<=8 then (218, 98, 30, 255) else (106, 52, 24, 255)
       else if stick then
         val grain = if noise(x, y, 2302) > 204 then -10 else 0
         val shade = (noise(x, y, 2303) / 5).toInt
@@ -400,6 +588,7 @@ final class TextureAtlas(texturePack: TexturePack, anisotropicFiltering: Boolean
       val crack = if noise(x, y, 1013) > 210 then 10 else 0
       val base = if noise(x, y, 1014) > 190 then (60 - crack, 52 - crack, 48 - crack) else (45 - crack, 38 - crack, 35 - crack)
       (base._1.max(20).min(90), base._2.max(16).min(80), base._3.max(14).min(75), 255)
+    case _ => (0,0,0,0)
 
   private def dirtPixel(x: Int, y: Int, seed: Int): (Int, Int, Int, Int) =
     val pebble = noise(x, y, seed + 1) > 220

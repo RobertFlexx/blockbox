@@ -2,9 +2,7 @@
 
 blockbox is a free and open source voxel sandbox made in scala 3 with lwjgl.
 
-
 > blockbox *launcher* is **[here](https://github.com/RobertFlexx/blockbox-launcher)**
-
 
 this is not some giant studio project. it is made by one guy, robertflexx. i work very hard on it and i am building it piece by piece because i like blocky games, weird game engines, linux, jvm stuff, and making things from scratch.
 
@@ -31,6 +29,8 @@ right now it has:
 * block placing
 * hotbar
 * inventory work
+* crafting and a furnace
+* a field journal (press j)
 * world saving and loading
 * procedural terrain
 * chunks
@@ -52,10 +52,15 @@ right now it has:
 * crosshair based block picking
 * generated pixel style block textures
 * transparent glass, water, and leaves
+* torches you can stick on the floor or a wall
+* other players actually have a body, and the shirts are different colors
+* you can see your own hand
 * render distance settings
+* shader packs, a few of them come with the game (see SHADERPACKS.md)
 * basic multiplayer experiments
 * chat
 * commands
+* mods, groovy scripts or jars (see MODDING.md)
 * no proprietary assets
 
 it is not finished, but it is real and it runs.
@@ -119,6 +124,8 @@ if your gpu driver is broken and you just need it to open, use software renderin
 BLOCKBOX_DISPLAY_BACKEND=software ./scripts/run.sh
 ```
 
+if the renderer prints `llvmpipe`, that is the cpu pretending to be a gpu. it will open, and it will be slow.
+
 ## running on windows
 
 newer builds include:
@@ -148,7 +155,9 @@ basic controls:
 * `left control` sprints
 * `left shift` swims down in water or moves down in creative
 * `1` to `9` and `0` select hotbar slots
+* mouse wheel also changes the hotbar slot
 * `e` opens inventory or creative catalog
+* `j` opens the field journal
 * `esc` pauses
 * `t` opens chat
 * `/` opens chat with command mode
@@ -157,6 +166,7 @@ basic controls:
 * `f3` toggles debug info
 * `f4` toggles wireframe
 * `f5` toggles chunk borders
+* `f8` unlocks the mouse if a mod wants you to click its ui
 
 settings controls:
 
@@ -203,13 +213,21 @@ it is still early, but the goal is simple:
 
 when you leave a world and come back, it should look like how you left it.
 
+new tree shapes and cave entrances only show up in chunks that get generated after the update. old chunks stay how they were saved.
+
 ## multiplayer
 
 multiplayer is experimental.
 
-there is lan hosting and joining, player names, chat, player positions, block updates, and some server side checks.
+there is lan hosting and joining, player names, chat, player positions, block updates, and some server side checks. the host owns the clock and the weather. everyone in the session has to be on the same version, right now that is protocol 6.
 
 it is not perfect yet. chunk sync and usernames are still being improved. the goal is to make it feel more like a real little server instead of just a quick hacked together connection.
+
+## shaders and mods
+
+shader packs live in `shaderpacks/`. you can switch them in the resources screen. if one of them fails to compile, the game keeps the last one that worked instead of dying. SHADERPACKS.md is the short version of how to write one.
+
+mods go in `mods/`. a groovy script or a jar. MODDING.md explains it. dont install random mods, they are real code.
 
 ## current problems
 
@@ -234,6 +252,7 @@ things that still need work:
 * better performance
 * better save management
 * better structure generation
+* shader packs are a compatibility subset, not a full iris drop-in
 
 i am not pretending it is done. i am working on it.
 

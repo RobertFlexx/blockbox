@@ -1,0 +1,10 @@
+{
+  "id": "skybound",
+  "name": "Skybound Workshop",
+  "version": "1.0.0",
+  "apiVersion": "52",
+  "side": "both",
+  "serverInteractive": true,
+  "main": "main.groovy",
+  "description": "A playable conversion example: low gravity, moonstone veins, recipes, block interactions and a custom HUD."
+}

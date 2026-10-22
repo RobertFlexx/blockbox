@@ -6,7 +6,7 @@ import java.util.Arrays;
 import java.util.Locale;
 
 public final class BlockboxNet {
-  public static final int PROTOCOL_VERSION = 2;
+  public static final int PROTOCOL_VERSION = 6;
   public static final int MAX_LINE_LENGTH = 8192;
   public static final int MAX_PACKET_PARTS = 64;
   public static final int MAX_FIELD_LENGTH = MAX_LINE_LENGTH;
@@ -29,6 +29,28 @@ public final class BlockboxNet {
   public static final String ENTER = "ENTER";
   public static final String BLOC = "BLOC";
   public static final String POS = "POS";
+  public static final String ENV = "ENV";
+  public static final String SWING = "SWING";
+
+  public record EnvironmentPacket(float time, float timeOverride, float rain, float wetness,
+                                  float cloudCover, float wind, float lightning) {}
+
+  public static EnvironmentPacket parseEnvironment(Packet packet) {
+    requireType(packet, ENV);
+    packet.requireExact(8);
+    return new EnvironmentPacket(
+        boundedFloat(packet.part(1), 0, 1_000_000_000f),
+        boundedFloat(packet.part(2), -1, 1080),
+        boundedFloat(packet.part(3), 0, 1), boundedFloat(packet.part(4), 0, 1),
+        boundedFloat(packet.part(5), 0, 1), boundedFloat(packet.part(6), -1, 1),
+        boundedFloat(packet.part(7), 0, 1));
+  }
+
+  private static float boundedFloat(String value, float min, float max) {
+    float parsed = parseFloat(value);
+    if (parsed < min || parsed > max) throw new IllegalArgumentException("float outside packet bounds");
+    return parsed;
+  }
 
   private BlockboxNet() {}
 
@@ -76,13 +98,17 @@ public final class BlockboxNet {
     public final int z;
     public final int blockId;
     public final int waterLevel;
+    public final int logAxis;
+    public final int torchMount;
 
-    private BlockPacket(int x, int y, int z, int blockId, int waterLevel) {
+    private BlockPacket(int x, int y, int z, int blockId, int waterLevel, int logAxis, int torchMount) {
       this.x = x;
       this.y = y;
       this.z = z;
       this.blockId = blockId;
       this.waterLevel = waterLevel;
+      this.logAxis = logAxis;
+      this.torchMount = torchMount;
     }
   }
 
@@ -124,7 +150,7 @@ public final class BlockboxNet {
 
     public void add(BlockPacket block) {
       if (expected < 0 || complete) return;
-      checksum = blockChecksum(checksum, block.x, block.y, block.z, block.blockId, block.waterLevel);
+      checksum = blockChecksum(checksum, block.x, block.y, block.z, block.blockId, block.waterLevel, block.logAxis, block.torchMount);
       seen++;
     }
 
@@ -164,13 +190,17 @@ public final class BlockboxNet {
   public static String readProtocolLine(BufferedReader in) throws IOException {
     if (in == null) throw new IOException("missing protocol reader");
     StringBuilder line = new StringBuilder(Math.min(256, MAX_LINE_LENGTH));
+    int received = 0;
+    long started = System.nanoTime();
     while (true) {
+      if (System.nanoTime() - started > 15_000_000_000L) throw new IOException("Protocol line deadline exceeded");
       int ch = in.read();
       if (ch < 0) {
         if (line.length() == 0) return null;
         break;
       }
       if (ch == '\n') break;
+      if (++received > MAX_LINE_LENGTH + 1) throw new IOException("Protocol line too long");
       if (ch == '\r') continue;
       if (line.length() >= MAX_LINE_LENGTH) throw new IOException("Protocol line too long");
       line.append((char) ch);
@@ -311,23 +341,26 @@ public final class BlockboxNet {
     requireType(packet, BLOC);
     if (worldHeight <= 0) throw new IllegalArgumentException("worldHeight must be positive");
     packet.require(5);
-    int x = parseInt(packet.part(1), Integer.MIN_VALUE, Integer.MAX_VALUE);
+    if (packet.size() > 8) throw new IllegalArgumentException("too many block fields");
+    int x = parseInt(packet.part(1), -30_000_000, 30_000_000);
     int y = parseInt(packet.part(2), 0, worldHeight - 1);
-    int z = parseInt(packet.part(3), Integer.MIN_VALUE, Integer.MAX_VALUE);
-    int blockId = parseInt(packet.part(4), Byte.MIN_VALUE, 255);
-    int waterLevel = packet.size() >= 6 ? parseInt(packet.part(5), 1, 8) : 0;
-    return new BlockPacket(x, y, z, blockId, waterLevel);
+    int z = parseInt(packet.part(3), -30_000_000, 30_000_000);
+    int blockId = parseInt(packet.part(4), 0, 255);
+    int waterLevel = packet.size() >= 6 ? parseInt(packet.part(5), 0, 8) : 0;
+    int logAxis = packet.size() >= 7 ? parseInt(packet.part(6), 0, 2) : 0;
+    int torchMount = packet.size() >= 8 ? parseInt(packet.part(7), 0, 4) : 0;
+    return new BlockPacket(x, y, z, blockId, waterLevel, logAxis, torchMount);
   }
 
   public static PositionPacket parsePosition(Packet packet, int colorCount) {
     requireType(packet, POS);
     packet.require(7);
     String name = safeName(packet.part(1));
-    float x = parseFloat(packet.part(2));
-    float y = parseFloat(packet.part(3));
-    float z = parseFloat(packet.part(4));
-    float yaw = parseFloat(packet.part(5));
-    float pitch = parseFloat(packet.part(6));
+    float x = boundedFloat(packet.part(2), -30_000_000, 30_000_000);
+    float y = boundedFloat(packet.part(3), -1024, 65536);
+    float z = boundedFloat(packet.part(4), -30_000_000, 30_000_000);
+    float yaw = parseFloat(packet.part(5)) % 360f;
+    float pitch = Math.max(-90f, Math.min(90f, parseFloat(packet.part(6))));
     int colors = Math.max(1, colorCount);
     int color = packet.size() >= 8 ? Math.floorMod(parseInt(packet.part(7), Integer.MIN_VALUE, Integer.MAX_VALUE), colors) : 0;
     return new PositionPacket(name, x, y, z, yaw, pitch, color);
@@ -349,13 +382,28 @@ public final class BlockboxNet {
     return waterLevel > 0 ? line(BLOC, Integer.toString(x), Integer.toString(y), Integer.toString(z), Integer.toString(blockId), Integer.toString(clamp(waterLevel, 1, 8))) : block(x, y, z, blockId);
   }
 
-  public static long blockChecksum(long current, int x, int y, int z, int blockId, int waterLevel) {
+  /** Modern Blockbox block packet: water level (0 = none) plus log axis (0 = Y). */
+  public static String block(int x, int y, int z, int blockId, int waterLevel, int logAxis) {
+    return block(x, y, z, blockId, waterLevel, logAxis, 0);
+  }
+
+  public static String block(int x, int y, int z, int blockId, int waterLevel, int logAxis, int torchMount) {
+    return line(BLOC, Integer.toString(x), Integer.toString(y), Integer.toString(z), Integer.toString(blockId), Integer.toString(clamp(waterLevel, 0, 8)), Integer.toString(clamp(logAxis, 0, 2)), Integer.toString(clamp(torchMount, 0, 4)));
+  }
+
+  public static long blockChecksum(long current, int x, int y, int z, int blockId, int waterLevel, int logAxis) {
+    return blockChecksum(current, x, y, z, blockId, waterLevel, logAxis, 0);
+  }
+
+  public static long blockChecksum(long current, int x, int y, int z, int blockId, int waterLevel, int logAxis, int torchMount) {
     long h = current == 0L ? 0xcbf29ce484222325L : current;
     h = mix(h, x);
     h = mix(h, y);
     h = mix(h, z);
     h = mix(h, blockId);
     h = mix(h, waterLevel);
+    h = mix(h, logAxis);
+    h = mix(h, torchMount);
     return h;
   }
 

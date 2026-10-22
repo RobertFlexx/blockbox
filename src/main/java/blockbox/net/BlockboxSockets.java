@@ -76,13 +76,14 @@ public final class BlockboxSockets {
 
   public static PrintWriter utf8Writer(Socket socket) throws IOException {
     Objects.requireNonNull(socket, "socket");
-    return new PrintWriter(new BufferedWriter(new OutputStreamWriter(socket.getOutputStream(), StandardCharsets.UTF_8)), true);
+    return new PrintWriter(new BufferedWriter(new OutputStreamWriter(socket.getOutputStream(), StandardCharsets.UTF_8)), false);
   }
 
   public static boolean sendLine(PrintWriter writer, String line) {
     if (writer == null || line == null) return false;
     writer.println(line);
-    writer.flush();
+    // PrintWriter.checkError() flushes before checking the underlying stream.
+    // Keeping autoFlush disabled avoids flushing the socket twice per packet.
     return !writer.checkError();
   }
 

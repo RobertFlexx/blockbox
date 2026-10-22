@@ -4,6 +4,9 @@ import blockbox.io.BlockboxFiles;
 import blockbox.io.BlockboxSaveFiles;
 import blockbox.net.BlockboxNet;
 import blockbox.net.BlockboxSockets;
+import blockbox.net.PacketBudget;
+import blockbox.render.ViewFrustum;
+import blockbox.render.ShaderSources;
 
 import java.io.BufferedReader;
 import java.io.IOException;
@@ -20,6 +23,9 @@ public final class BlockboxJavaHelpersTest {
     testSaveFiles();
     testNet();
     testSockets();
+    testFrustum();
+    testPacketBudget();
+    testShaderSources();
     System.out.println("BlockboxJavaHelpersTest: OK");
   }
 
@@ -53,6 +59,8 @@ public final class BlockboxJavaHelpersTest {
   }
 
   private static void testNet() throws Exception {
+    check(BlockboxNet.parseHello(BlockboxNet.packet("HELO|3|Legacy|vanilla")).badProtocol, "old world generation protocol rejected");
+    check(!BlockboxNet.parseHello(BlockboxNet.packet(BlockboxNet.helo("Player","vanilla"))).badProtocol, "current handshake accepted");
     String escaped = BlockboxNet.escape("a|b%c\n");
     check("a|b%c ".equals(BlockboxNet.unescape(escaped)), "escape/unescape round trip for protocol separators");
 
@@ -64,12 +72,86 @@ public final class BlockboxJavaHelpersTest {
 
     BlockboxNet.BlockPacket block = BlockboxNet.parseBlock(BlockboxNet.packet(BlockboxNet.block(1, 2, 3, 4, 8)), 64);
     check(block.x == 1 && block.y == 2 && block.z == 3 && block.blockId == 4 && block.waterLevel == 8, "block parser accepts water level");
+    BlockboxNet.BlockPacket torch = BlockboxNet.parseBlock(BlockboxNet.packet(BlockboxNet.block(1, 2, 3, 34, 0, 0, 4)), 64);
+    check(torch.torchMount == 4, "block parser preserves torch attachment");
+    expectIllegalArgument(() -> BlockboxNet.parseBlock(BlockboxNet.packet("BLOC|1|2|3|34|0|0|5"), 64), "invalid torch attachment rejected");
+    expectIllegalArgument(() -> BlockboxNet.parseBlock(BlockboxNet.packet("BLOC|30000001|2|3|1"), 64), "block coordinates outside world bounds rejected");
+    expectIllegalArgument(() -> BlockboxNet.parseBlock(BlockboxNet.packet("BLOC|1|2|3|-1"), 64), "negative block ID rejected");
+    check(BlockboxNet.blockChecksum(0,1,2,3,34,0,0,1) != BlockboxNet.blockChecksum(0,1,2,3,34,0,0,2), "snapshot checksum includes torch attachment");
     expectIllegalArgument(() -> BlockboxNet.parseBlock(BlockboxNet.packet(BlockboxNet.block(1, 64, 3, 4)), 64), "block parser bounds y");
     expectIllegalArgument(() -> BlockboxNet.packet("bad|packet"), "packet rejects bad type");
 
     String line = BlockboxNet.readProtocolLine(new BufferedReader(new StringReader("PING\r\nNEXT\n")));
     check("PING".equals(line), "bounded protocol reader handles CRLF");
     expectIOException(() -> BlockboxNet.readProtocolLine(new BufferedReader(new StringReader("A".repeat(BlockboxNet.MAX_LINE_LENGTH + 1) + "\n"))), "bounded protocol reader rejects long line");
+    expectIOException(() -> BlockboxNet.readProtocolLine(new BufferedReader(new StringReader("\r".repeat(BlockboxNet.MAX_LINE_LENGTH+2)+"\n"))), "carriage returns cannot bypass line budget");
+    expectIllegalArgument(() -> BlockboxNet.parsePosition(BlockboxNet.packet("POS|Player|1e30|60|0|0|0|0"),10), "position rejects coordinates outside world bounds");
+    var environment = BlockboxNet.parseEnvironment(BlockboxNet.packet("ENV|150|-1|0.5|0.7|0.8|-0.2|1"));
+    check(environment.time() == 150 && environment.rain() == 0.5f && environment.timeOverride() == -1, "environment packet round trip");
+    expectIllegalArgument(() -> BlockboxNet.parseEnvironment(BlockboxNet.packet("ENV|NaN|-1|0|0|0|0|0")), "environment rejects NaN");
+    expectIllegalArgument(() -> BlockboxNet.parseEnvironment(BlockboxNet.packet("ENV|150|-1|2|0|0|0|0")), "environment rejects out of range rain");
+    expectIllegalArgument(() -> BlockboxNet.parseEnvironment(BlockboxNet.packet("ENV|150|-1|0|0|0|0")), "environment rejects truncated state");
+  }
+
+  private static void testPacketBudget() {
+    PacketBudget budget = new PacketBudget(10, 2, 1_000_000_000L);
+    check(budget.allow(1_000_000_000L) && budget.allow(1_000_000_000L), "packet burst allowed");
+    check(!budget.allow(1_000_000_000L), "packet burst bounded");
+    check(!budget.allow(0), "backwards clock cannot refill budget");
+    check(budget.allow(1_100_000_000L), "packet budget recovers over time");
+    check(!budget.allow(1_100_000_000L), "refill does not create excess tokens");
+  }
+
+  private static void testFrustum() {
+    ViewFrustum frustum = new ViewFrustum();
+    float[] identity = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
+    frustum.update(identity, identity);
+    check(frustum.intersects(-1,-1,-1,1,1,1), "frustum includes its boundary");
+    check(!frustum.intersects(2,2,2,3,3,3), "frustum rejects outside bounds");
+    for (float aspect : new float[]{1, 16f/9, 32f/9}) {
+      float f = (float)(1 / Math.tan(Math.toRadians(70) / 2));
+      float near = 0.25f, far = 1200;
+      float[] projection = {f/aspect,0,0,0, 0,f,0,0, 0,0,(far+near)/(near-far),-1, 0,0,2*far*near/(near-far),0};
+      for (int yaw = 0; yaw < 360; yaw += 45) {
+        double angle = Math.toRadians(yaw);
+        float c = (float)Math.cos(angle), s = (float)Math.sin(angle);
+        // R_x(90) R_y(yaw) T_y(-300), matching the game's camera matrix.
+        float[] view = {c,s,0,0, 0,0,1,0, s,-c,0,0, 0,0,-300,1};
+        frustum.update(projection,view);
+        for (int x = -64; x <= 64; x += 16) {
+          for (int z = -64; z <= 64; z += 16) {
+            check(frustum.intersects(x,0,z,x+16,128,z+16), "aerial view retains ground in every yaw/aspect");
+          }
+        }
+      }
+      frustum.update(projection, identity);
+      check(frustum.intersects(-1,-1,-20,1,1,-18), "forward terrain visible");
+      check(!frustum.intersects(-1,-1,18,1,1,20), "terrain behind horizontal camera culled");
+    }
+  }
+
+  private static void testShaderSources() throws Exception {
+    Path root = Files.createTempDirectory("blockbox-shaders-test");
+    try {
+      Path shaders = Files.createDirectories(root.resolve("shaders/lib"));
+      Files.writeString(shaders.resolve("shared.glsl"), "vec3 tint = vec3(1);\n");
+      Path entry = root.resolve("shaders/main.fsh");
+      Files.writeString(entry, "#version 120\n#include \"/lib/shared.glsl\"\nvoid main() {}\n");
+      check(ShaderSources.read(entry, shaders.getParent()).contains("vec3 tint"), "root-relative shader include expands");
+      Files.writeString(root.resolve("outside.glsl"), "private data");
+      Files.writeString(entry, "#include \"../outside.glsl\"\n");
+      expectIOException(() -> ShaderSources.read(entry, shaders.getParent()), "shader traversal rejected");
+      Path link = shaders.resolve("link.glsl");
+      Files.createSymbolicLink(link, root.resolve("outside.glsl"));
+      Files.writeString(entry, "#include \"lib/link.glsl\"\n");
+      expectIOException(() -> ShaderSources.read(entry, shaders.getParent()), "shader symlink escape rejected");
+      Files.writeString(entry, "#include \"main.fsh\"\n");
+      expectIOException(() -> ShaderSources.read(entry, shaders.getParent()), "recursive shader include rejected");
+      Files.writeString(entry, "x".repeat(1024*1024+1));
+      expectIOException(() -> ShaderSources.read(entry, shaders.getParent()), "oversized shader source rejected");
+    } finally {
+      BlockboxFiles.deleteRecursive(root);
+    }
   }
 
   private static void testSaveFiles() throws Exception {
@@ -117,6 +199,10 @@ public final class BlockboxJavaHelpersTest {
     expectIllegalArgument(() -> BlockboxSockets.connectTcp("localhost", 70000, 1), "connect rejects invalid port");
     Thread thread = BlockboxSockets.daemonThread("", () -> {});
     check(thread.isDaemon(), "daemonThread creates daemon thread");
+    if ("1".equals(System.getenv("BLOCKBOX_SKIP_SOCKET_TESTS"))) {
+      System.out.println("Socket bind test skipped: BLOCKBOX_SKIP_SOCKET_TESTS=1");
+      return;
+    }
     try (ServerSocket server = BlockboxSockets.bindIpv4Server(0)) {
       check(server.isBound(), "bindIpv4Server binds an ephemeral server socket");
     }

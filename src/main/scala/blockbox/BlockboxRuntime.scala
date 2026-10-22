@@ -13,9 +13,9 @@ object BlockboxPlatform:
         "/usr/lib/x86_64-linux-gnu/libdecor-0.so", "/usr/local/lib/libdecor-0.so",
         "/usr/lib/aarch64-linux-gnu/libdecor-0.so"
       )
-      paths.exists(p => java.io.File(p).exists) ||
+      paths.exists(p => new java.io.File(p).exists) ||
       sys.env.contains("LD_LIBRARY_PATH") && sys.env("LD_LIBRARY_PATH").split(':').exists { dir =>
-        java.io.File(dir, "libdecor-0.so").exists
+        new java.io.File(dir, "libdecor-0.so").exists
       }
     catch case _: Exception => false
 
@@ -36,45 +36,258 @@ object BlockboxPlatform:
       case None =>
         System.err.println(s"Blockbox: no GLFW_PLATFORM set, GLFW will auto-detect on $xdg session (WAYLAND_DISPLAY=$hasWaylandDisplay DISPLAY=$hasDisplay)")
 
+private object BlockboxProceduralAudioEngine:
+  private final case class Request(samples: () => Array[Float], gain: Float, pitch: Float, pan: Float)
+  private final case class Playback(samples: Array[Float], gain: Float, pitch: Float, pan: Float)
+  private final class Voice(val clip: Playback):
+    var cursor=0f
+    val left=clip.gain*sqrt((1f-clip.pan)*0.5f).toFloat
+    val right=clip.gain*sqrt((1f+clip.pan)*0.5f).toFloat
+  private val rate=BlockboxSounds.sampleRate.toFloat
+  private val requests=new java.util.concurrent.ArrayBlockingQueue[Request](64)
+  private val pending=new java.util.concurrent.ArrayBlockingQueue[Playback](64)
+  private val mixerStarted=java.util.concurrent.atomic.AtomicBoolean(false)
+  private val synthStarted=java.util.concurrent.atomic.AtomicBoolean(false)
+  private val retryAfter=java.util.concurrent.atomic.AtomicLong(0)
+  @volatile private var running=true
+  @volatile private var synthThread: Thread=null
+  @volatile private var mixerThread: Thread=null
+  @volatile private var currentSink: AudioSink=null
+  @volatile private var rainSamples: Array[Float]=Array.emptyFloatArray
+  @volatile private var rainTarget=0f
+  private val rainRequested=java.util.concurrent.atomic.AtomicBoolean(false)
+
+  private trait AudioSink:
+    def backendName: String
+    def write(bytes: Array[Byte], length: Int): Unit
+    def close(): Unit
+
+  private final class JavaSoundSink(line: javax.sound.sampled.SourceDataLine) extends AudioSink:
+    def backendName: String = "Java Sound"
+    def write(bytes: Array[Byte], length: Int): Unit =
+      var offset = 0
+      while offset < length do
+        val written = line.write(bytes, offset, length - offset)
+        if written <= 0 then throw new java.io.IOException("Java Sound stopped accepting audio")
+        offset += written
+    def close(): Unit =
+      try
+        line.stop(); line.flush()
+      catch case _: Throwable => ()
+      try line.close() catch case _: Throwable => ()
+
+  private final class ProcessSink(process: Process, val backendName: String) extends AudioSink:
+    private val out = process.getOutputStream
+    def write(bytes: Array[Byte], length: Int): Unit =
+      if !process.isAlive then throw new java.io.IOException(s"$backendName audio process exited with ${process.exitValue()}")
+      out.write(bytes, 0, length)
+    def close(): Unit =
+      try process.destroy() catch case _: Throwable => ()
+      try out.close() catch case _: Throwable => ()
+
+  private def executableOnPath(name: String): Option[String] =
+    val path = sys.env.getOrElse("PATH", "")
+    path.split(java.util.regex.Pattern.quote(java.io.File.pathSeparator)).iterator
+      .filter(_.nonEmpty)
+      .map(dir => new java.io.File(dir, name))
+      .find(f => f.isFile && f.canExecute)
+      .map(_.getAbsolutePath)
+
+  private def processSink(command: Seq[String], name: String): Option[AudioSink] =
+    try
+      val pb = new ProcessBuilder(command*)
+      pb.redirectError(ProcessBuilder.Redirect.INHERIT)
+      val process = pb.start()
+      // Argument/connection failures usually exit immediately. Probe once when the
+      // backend opens rather than silently dropping the first several footsteps.
+      Thread.sleep(12L)
+      if process.isAlive then Some(new ProcessSink(process, name))
+      else None
+    catch case _: Throwable => None
+
+  private def openAudioSink(format: AudioFormat): AudioSink =
+    var failures = List.empty[String]
+
+    // Prefer PipeWire on modern desktops. Java Sound can hand back a raw ALSA device
+    // (or nothing) while the user's real output route lives in the PipeWire session.
+    // The binaries expect RAW little-endian s16 PCM, so --raw is mandatory: without it
+    // they try to parse media headers from the sample stream and exit immediately.
+    val pipewireBin = executableOnPath("pw-cat").orElse(executableOnPath("pw-play"))
+    if pipewireBin.nonEmpty then
+      val exe = pipewireBin.get
+      val isPwCat = exe.endsWith("pw-cat")
+      val name = if isPwCat then "PipeWire pw-cat" else "PipeWire pw-play"
+      val base = Seq(exe, "--playback", "--raw", "--rate=44100", "--channels=2", "--channel-map=FL,FR", "--latency=32ms", "--format=s16", "-")
+      processSink(base, name) match
+        case Some(sink) => return sink
+        case None => failures ::= name + " failed to start"
+
+    try
+      val line = AudioSystem.getSourceDataLine(format)
+      line.open(format, 8192)
+      line.start()
+      return new JavaSoundSink(line)
+    catch case e: Throwable => failures ::= Option(e.getMessage).getOrElse(e.getClass.getSimpleName)
+
+    val alsa = executableOnPath("aplay").flatMap { exe =>
+      processSink(Seq(exe, "-q", "-t", "raw", "-f", "S16_LE", "-r", "44100", "-c", "2"), "ALSA aplay")
+    }
+    alsa match
+      case Some(sink) => return sink
+      case None => failures ::= "aplay unavailable"
+
+    throw new IllegalStateException(s"no usable audio output backend (${failures.reverse.mkString("; ")})")
+
+  def play(action: BlockboxSounds.Action, material: BlockboxSounds.Material, variant: Int,
+           gain: Float, pitch: Float, pan: Float): Unit =
+    enqueue(Request(() => RecordedAudio.effect(action,material,variant).getOrElse(BlockboxSounds.clip(action,material,variant)),gain.max(0f).min(2f),pitch.max(0.7f).min(1.4f),pan.max(-1f).min(1f)))
+
+  def rain(intensity: Float): Unit =
+    rainTarget=intensity.max(0f).min(1f)*0.72f
+    if rainTarget>0.001f && rainRequested.compareAndSet(false,true) then
+      enqueue(Request(() =>
+        rainSamples=RecordedAudio.load("weather/rain-loop.ogg",loop=true).getOrElse(Array.emptyFloatArray)
+        Array.emptyFloatArray,0f,1f,0f))
+
+  def submit(seconds: Float)(sample: (Int, Float) => Float): Unit =
+    enqueue(Request(() =>
+      val count=(rate*seconds.max(0.005f).min(2f)).toInt
+      val values=new Array[Float](count)
+      var i=0
+      while i<count do
+        val value=sample(i,rate)
+        val fade=(i.toFloat/80).min(1f)*((count-1-i).toFloat/160).min(1f)
+        values(i)=(if value.isFinite then value.max(-1f).min(1f)*fade else 0f)
+        i+=1
+      values,1f,1f,0f))
+
+  private def enqueue(request: Request): Unit =
+    running=true
+    if requests.offer(request) then
+      if synthStarted.compareAndSet(false,true) then
+        synthThread=new Thread(() => synthesisLoop(),"blockbox-audio-synth")
+        synthThread.setDaemon(true); synthThread.start()
+      if System.nanoTime()>=retryAfter.get() && mixerStarted.compareAndSet(false,true) then
+        mixerThread=new Thread(() => audioLoop(),"blockbox-audio-mixer")
+        mixerThread.setDaemon(true); mixerThread.start()
+
+  private def synthesisLoop(): Unit =
+    try
+      while running do
+        val request=requests.take()
+        val samples=request.samples()
+        pending.offer(Playback(samples,request.gain,request.pitch,request.pan))
+    catch
+      case _: InterruptedException => Thread.currentThread().interrupt()
+      case e: Exception => System.err.println("Sound synthesis failed: "+e.getMessage)
+    finally synthStarted.set(false)
+
+  private def audioLoop(): Unit =
+    var sink: AudioSink=null
+    try
+      sink=openAudioSink(new AudioFormat(rate,16,2,true,false))
+      currentSink=sink
+      System.err.println(s"Blockbox audio: ${sink.backendName}, stereo 44.1 kHz")
+      val active=scala.collection.mutable.ArrayBuffer.empty[Voice]
+      val frames=512
+      val bytes=new Array[Byte](frames*4)
+      val frameNanos=(frames*1_000_000_000.0/rate).toLong
+      var deadline=System.nanoTime()
+      var rainCursor=0
+      var rainVolume=0f
+      while running do
+        var collecting=active.length<32
+        while collecting do
+          val next=pending.poll()
+          if next==null then collecting=false
+          else
+            active+=Voice(next)
+            if active.length>=32 then collecting=false
+        var frame=0
+        while frame<frames do
+          var left=0f; var right=0f; var v=0
+          rainVolume+=(rainTarget-rainVolume)*0.00012f
+          val ambience=rainSamples
+          if ambience.nonEmpty then
+            if rainCursor>=ambience.length then rainCursor=0
+            left+=ambience(rainCursor)*rainVolume
+            right+=ambience((rainCursor+397)%ambience.length)*rainVolume
+            rainCursor+=1
+          while v<active.length do
+            val voice=active(v); val clip=voice.clip
+            val index=voice.cursor.toInt
+            if index<clip.samples.length-1 then
+              val fraction=voice.cursor-index
+              val sample=clip.samples(index)+(clip.samples(index+1)-clip.samples(index))*fraction
+              left+=sample*voice.left; right+=sample*voice.right
+              voice.cursor+=clip.pitch
+            else voice.cursor=clip.samples.length
+            v+=1
+          def pcm(value: Float): Int = (tanh(value.toDouble)*0.95*Short.MaxValue).toInt
+          val l=pcm(left); val r=pcm(right); val offset=frame*4
+          bytes(offset)=l.toByte; bytes(offset+1)=(l>>>8).toByte
+          bytes(offset+2)=r.toByte; bytes(offset+3)=(r>>>8).toByte
+          frame+=1
+        var v=active.length-1
+        while v>=0 do
+          if active(v).cursor>=active(v).clip.samples.length-1 then active.remove(v)
+          v-=1
+        // Clock silence too: a running desktop stream avoids device underruns and
+        // the first-impact delay. Pacing prevents filling an OS pipe far in advance.
+        sink.write(bytes,bytes.length)
+        deadline+=frameNanos
+        val now=System.nanoTime()
+        if deadline>now then java.util.concurrent.locks.LockSupport.parkNanos(deadline-now)
+        else if now-deadline>50_000_000L then deadline=now
+    catch
+      case _: InterruptedException => Thread.currentThread().interrupt()
+      case e: Exception =>
+        if running then System.err.println("Audio output failed; will retry: "+e.getMessage)
+        requests.clear(); pending.clear()
+        retryAfter.set(System.nanoTime()+1_000_000_000L)
+    finally
+      if sink!=null then sink.close()
+      currentSink=null; mixerStarted.set(false)
+
+  def shutdown(): Unit =
+    running=false
+    if synthThread!=null then synthThread.interrupt()
+    if mixerThread!=null then mixerThread.interrupt()
+    if currentSink!=null then currentSink.close()
+    requests.clear(); pending.clear()
+    rainTarget=0f; rainRequested.set(false)
+
 trait BlockboxAudio:
   protected def soundEnabled: Boolean
+  private val soundSequence=java.util.concurrent.atomic.AtomicInteger(0)
+  private var leftFoot=false
 
-  protected def playPlaceSound(): Unit = playTone(140f, 0.045f, 0.28f, 0.35f)
-  protected def playBreakSound(): Unit = playNoise(0.075f, 0.26f)
+  private def effect(action: BlockboxSounds.Action, block: Block, gain: Float=1f, speed: Float=1f, pan: Float=0f): Unit =
+    if soundEnabled then
+      val sequence=soundSequence.getAndIncrement()
+      val pitch=speed*(0.97f+Math.floorMod(sequence*13,11)*0.006f)
+      BlockboxProceduralAudioEngine.play(action,BlockboxSounds.material(block),sequence,gain,pitch,pan)
 
-  protected def playTone(freq: Float, seconds: Float, volume: Float, decay: Float): Unit =
-    if soundEnabled then playSound(seconds) { (i, rate) =>
-      val t = i.toFloat / rate
-      val env = pow((1f - t / seconds).max(0f), decay.toDouble).toFloat
-      sin(2.0 * Pi * freq * t).toFloat * volume * env
+  protected def playPlaceSound(): Unit = effect(BlockboxSounds.Action.Ui,Block.Wood,0.75f)
+  protected def playPlaceSound(block: Block): Unit = effect(BlockboxSounds.Action.Place,block,0.92f)
+  protected def playBreakSound(): Unit = playBreakSound(Block.Stone)
+  protected def playBreakSound(block: Block): Unit = effect(BlockboxSounds.Action.Break,block)
+  protected def playFootstepSound(block: Block,sprinting: Boolean): Unit =
+    leftFoot = !leftFoot
+    effect(BlockboxSounds.Action.Step,block,if sprinting then 1f else 0.82f,if sprinting then 1.08f else 1f,if leftFoot then -0.16f else 0.16f)
+  protected def playLandSound(block: Block,intensity: Float): Unit = effect(BlockboxSounds.Action.Land,block,intensity.max(0.3f).min(1.25f),0.96f)
+  protected def playSplashSound(): Unit = effect(BlockboxSounds.Action.Splash,Block.Water)
+  protected def playThunderSound(intensity: Float,pan: Float=0f): Unit = effect(BlockboxSounds.Action.Thunder,Block.Stone,intensity.max(0.02f).min(1.2f),0.92f,pan)
+  protected def updateRainAmbience(intensity: Float): Unit = BlockboxProceduralAudioEngine.rain(if soundEnabled then intensity else 0f)
+  protected def playHurtSound(): Unit = effect(BlockboxSounds.Action.Hurt,Block.Wood,0.90f)
+  protected def shutdownAudio(): Unit = BlockboxProceduralAudioEngine.shutdown()
+
+  protected def playTone(freq: Float,seconds: Float,volume: Float,decay: Float): Unit =
+    if soundEnabled then BlockboxProceduralAudioEngine.submit(seconds) { (i,rate) =>
+      val t=i.toFloat/rate
+      sin(2*Pi*freq*t).toFloat*volume*pow((1f-t/seconds).max(0f),decay.toDouble).toFloat
     }
-
-  protected def playNoise(seconds: Float, volume: Float): Unit =
-    if soundEnabled then playSound(seconds) { (i, _) =>
-      var n = i * 1103515245 + 12345
-      n = (n ^ (n >>> 16)) * 2246822519L.toInt
-      val env = (1f - i.toFloat / (44100f * seconds)).max(0f)
-      (((n & 0xffff).toFloat / 32768f) - 1f) * volume * env
-    }
-
-  private def playSound(seconds: Float)(sample: (Int, Float) => Float): Unit =
-    Thread(() =>
-      try
-        val rate = 44100f
-        val frames = (rate * seconds).toInt.max(1)
-        val bytes = new Array[Byte](frames * 2)
-        var i = 0
-        while i < frames do
-          val s = (sample(i, rate).max(-1f).min(1f) * Short.MaxValue).toInt
-          bytes(i * 2) = (s & 0xff).toByte
-          bytes(i * 2 + 1) = ((s >>> 8) & 0xff).toByte
-          i += 1
-        val format = AudioFormat(rate, 16, 1, true, false)
-        val line = AudioSystem.getSourceDataLine(format)
-        line.open(format, bytes.length)
-        line.start()
-        line.write(bytes, 0, bytes.length)
-        line.drain()
-        line.close()
-      catch case _: Throwable => ()
-    ).start()
+  protected def playNoise(seconds: Float,volume: Float): Unit =
+    if soundEnabled then
+      val noise=new scala.util.Random()
+      BlockboxProceduralAudioEngine.submit(seconds) { (i,rate) => (noise.nextFloat()*2-1)*volume*(1f-i/(rate*seconds)).max(0f) }

@@ -97,6 +97,16 @@ public final class BlockboxFiles {
   }
 
   public static void writeAtomic(Path file, Consumer<java.io.OutputStream> writer) throws IOException {
+    writeAtomic(file, writer, true);
+  }
+
+  /** Atomic replacement with optional parent-directory durability sync.
+   *
+   * Batch save paths can safely defer the expensive directory fsync until every
+   * chunk has been renamed, then sync the directory once. The default overload
+   * keeps the old strongest-durability behavior for small standalone writes.
+   */
+  public static void writeAtomic(Path file, Consumer<java.io.OutputStream> writer, boolean syncParent) throws IOException {
     Objects.requireNonNull(file, "file");
     Objects.requireNonNull(writer, "writer");
     Path target = file.toAbsolutePath().normalize();
@@ -119,9 +129,30 @@ public final class BlockboxFiles {
       }
       moveReplace(tmp, target);
       moved = true;
-      fsyncParent(target);
+      if (syncParent) fsyncParent(target);
     } finally {
       if (!moved) Files.deleteIfExists(tmp);
+    }
+  }
+
+
+  public static void writeBytesAtomic(Path file, byte[] bytes, boolean syncParent) throws IOException {
+    byte[] safe = bytes == null ? new byte[0] : bytes;
+    writeAtomic(file, out -> {
+      try {
+        out.write(safe);
+      } catch (IOException e) {
+        throw new UncheckedIo(e);
+      }
+    }, syncParent);
+  }
+
+  /** Force directory metadata once after a batch of atomic renames. */
+  public static void syncDirectory(Path dir) {
+    if (dir == null) return;
+    try (java.nio.channels.FileChannel channel = java.nio.channels.FileChannel.open(dir.toAbsolutePath().normalize(), StandardOpenOption.READ)) {
+      channel.force(true);
+    } catch (Exception ignored) {
     }
   }
 

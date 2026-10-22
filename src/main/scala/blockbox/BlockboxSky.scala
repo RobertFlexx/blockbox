@@ -23,20 +23,25 @@ object BlockboxSky:
     val eased = smooth01((sun + 0.18f) / 0.58f)
     (0.18f + 0.82f * eased).max(0.18f).min(1f)
 
+  /** World-space celestial directions shared by the sky and terrain shader. */
+  def sunDirection(dayPhase: Float): (Float, Float, Float) =
+    val walk = dayPhase * Pi.toFloat * 2f
+    normalized(cos(walk).toFloat, sin(walk).toFloat, -0.22f)
+
+  def moonDirection(dayPhase: Float): (Float, Float, Float) =
+    val s = sunDirection(dayPhase)
+    (-s._1, -s._2, -s._3)
+
   def smooth01(v: Float): Float =
     val t = v.max(0f).min(1f); t * t * (3f - 2f * t)
 
-  def clearColor(underwater: Boolean, dayPhase: Float, daylightFactor: Float): (Float, Float, Float) =
-    if underwater then (0.02f, 0.14f, 0.30f)
+  def clearColor(underwater: Boolean, dayPhase: Float, daylightFactor: Float, rainStrength: Float, cloudCover: Float, lightningFlash: Float): (Float, Float, Float) =
+    if underwater then
+      val shift = 0.05f + sin(dayPhase * Pi.toFloat * 6f).toFloat * 0.01f
+      (0.015f, 0.12f + shift * 0.18f, 0.22f + shift * 0.42f)
     else
-      val daylight = smooth01(daylightFactor)
-      val sunrise = smooth01(max(0f, 1f - abs(dayPhase - 0.78f) * 12f))
-      val sunset = smooth01(max(0f, 1f - abs(dayPhase - 0.28f) * 12f))
-      val rWarm = if sunrise > 0f || sunset > 0f then 0.25f * (sunrise + sunset) else 0f
-      val r = (0.12f + 0.50f * daylight + rWarm).max(0.04f).min(0.95f)
-      val g = (0.22f + 0.60f * daylight).max(0.04f).min(0.95f)
-      val b = (0.34f + 0.65f * daylight).max(0.06f).min(0.98f)
-      (r, g, b)
+      val color=BlockboxAtmosphere.palette(dayPhase,daylightFactor,rainStrength,cloudCover,lightningFlash).horizon
+      (color.x,color.y,color.z)
 
   def nightDarkness(multiplayerMode: Boolean, daylightFactor: Float): Float =
     val night = (1f - (daylightFactor - 0.18f) / 0.82f) * 0.65f
@@ -44,18 +49,22 @@ object BlockboxSky:
 
   def generateStars(): Array[(Float, Float, Float, Float)] =
     val rng = new scala.util.Random(42L)
-    Array.tabulate(900) { _ =>
+    // More stars do not mean more draw calls: they still render in a couple of point
+    // batches, but the denser field and wider brightness spread make the night sky read
+    // like an actual sky instead of sparse white confetti.
+    Array.tabulate(2400) { _ =>
       val theta = rng.nextFloat() * Pi.toFloat * 2f
-      val phi = acos((rng.nextFloat() * 1.72f - 0.72f).toDouble).toFloat
+      val phi = acos((rng.nextFloat() * 1.82f - 0.82f).toDouble).toFloat
       val radius = 75f
       val x = (radius * sin(phi) * cos(theta)).toFloat
       val y = radius * cos(phi).toFloat
       val z = (radius * sin(phi) * sin(theta)).toFloat
-      val brightness = 0.35f + rng.nextFloat() * 0.65f
+      val r = rng.nextFloat()
+      val brightness = 0.20f + pow(r.toDouble, 2.2).toFloat * 0.80f
       (x, y, z, brightness)
     }
 
-  def renderSky(yaw: Float, pitch: Float, dayPhase: Float, daylightFactor: Float, stars: Array[(Float, Float, Float, Float)], cloudsEnabled: Boolean, camera: Vec3, gameTime: Float, cloudRenderDistanceBlocks: Int): Unit =
+  def renderSky(yaw: Float, pitch: Float, dayPhase: Float, daylightFactor: Float, stars: Array[(Float, Float, Float, Float)], cloudsEnabled: Boolean, camera: Vec3, gameTime: Float, cloudRenderDistanceBlocks: Int, rainStrength: Float, cloudCover: Float, lightningFlash: Float, displayDither: Boolean = true): Unit =
     BlockboxRender2D.resetGlArraysAndBuffers()
     val walk = dayPhase * 2f * Pi.toFloat
     glDisable(GL_FOG)
@@ -66,11 +75,13 @@ object BlockboxSky:
     glEnable(GL_BLEND)
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
     glShadeModel(GL_SMOOTH)
-    val starVis = smooth01((0.88f - daylightFactor) / 0.34f)
-    val daylight = smooth01(daylightFactor)
-    val sunrise = smooth01(max(0f, 1f - abs(dayPhase - 0.78f) * 9f))
-    val sunset = smooth01(max(0f, 1f - abs(dayPhase - 0.28f) * 9f))
-    val warm = (sunrise + sunset).min(1f)
+    val storm = smooth01(rainStrength.max(cloudCover * 0.94f))
+    val lightning = lightningFlash.max(0f).min(1f)
+    val starVis = smooth01((-sin(walk).toFloat-0.035f)/0.28f) * (1f - storm * 0.97f)
+    val daylight = smooth01((daylightFactor + lightning * 0.42f).min(1f))
+    val sunrise = 1f - smooth01(abs(sin(dayPhase * Pi.toFloat * 2f).toFloat) / 0.28f)
+    val sunset = 0f
+    val warm = (sunrise + sunset).min(1f) * (1f - storm * 0.74f)
 
     // Draw sky in camera space. Do not translate by world X/Z, otherwise large
     // coordinates drag the sky into the same precision problem as terrain.
@@ -80,20 +91,20 @@ object BlockboxSky:
     glRotatef(pitch, 1f, 0f, 0f)
     glRotatef(yaw, 0f, 1f, 0f)
 
-    drawSkyDome(daylight, warm)
-    drawHorizonGlow(walk, warm, daylight)
-    drawSunAndMoon(walk, daylight, warm)
+    val palette=BlockboxAtmosphere.palette(dayPhase,daylightFactor,rainStrength,cloudCover,lightningFlash)
+    lastPalette=palette
+    if !BlockboxAtmosphere.render(yaw,pitch,palette,displayDither,starVis) then drawSkyDome(palette)
 
     glPushMatrix()
     glRotatef(walk * -6f, 0f, 0f, 1f)
     glRotatef(35f, 1f, 0f, 0f)
     if starVis > 0.01f then
-      drawStars(stars, starVis)
+      drawStars(stars, starVis, gameTime)
     glPointSize(1f)
     glPopMatrix()
 
-    if cloudsEnabled then
-      drawClouds(camera, gameTime, cloudRenderDistanceBlocks, daylight, warm)
+    if !BlockboxCelestials.render(dayPhase,daylightFactor,storm,gameTime,!displayDither) then
+      drawSunAndMoon(walk, daylight, warm, storm, lightning)
 
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
     glDisable(GL_BLEND)
@@ -109,72 +120,33 @@ object BlockboxSky:
   private def colorMix(a: (Float, Float, Float), b: (Float, Float, Float), t: Float): (Float, Float, Float) =
     (mix(a._1, b._1, t), mix(a._2, b._2, t), mix(a._3, b._3, t))
 
-  private def drawSkyDome(daylight: Float, warm: Float): Unit =
-    val radius = 82f
-    val nightTop = (0.012f, 0.018f, 0.050f)
-    val nightMid = (0.030f, 0.045f, 0.105f)
-    val dayTop = (0.25f, 0.52f, 0.96f)
-    val dayMid = (0.58f, 0.78f, 1.00f)
-    val top = colorMix(nightTop, dayTop, daylight)
-    val midBase = colorMix(nightMid, dayMid, daylight)
-    val mid = colorMix(midBase, (0.98f, 0.50f, 0.25f), warm * 0.45f)
-    val horizonBase = colorMix((0.025f, 0.030f, 0.070f), (0.78f, 0.90f, 1.00f), daylight)
-    val horizon = colorMix(horizonBase, (1.00f, 0.55f, 0.26f), warm * 0.70f)
-    val bottom = colorMix((0.015f, 0.018f, 0.035f), (0.55f, 0.68f, 0.86f), daylight)
-    val rings = Array(
-      (1.00f, top, 1.00f),
-      (0.62f, colorMix(top, mid, 0.55f), 1.00f),
-      (0.24f, mid, 1.00f),
-      (-0.05f, horizon, 1.00f),
-      (-0.28f, bottom, 0.96f)
-    )
-    val segments = 72
-    var ri = 0
-    while ri < rings.length - 1 do
-      val (y0, c0, a0) = rings(ri)
-      val (y1, c1, a1) = rings(ri + 1)
-      val r0 = sqrt((1f - y0 * y0).max(0f)).toFloat * radius
-      val r1 = sqrt((1f - y1 * y1).max(0f)).toFloat * radius
+  private def drawSkyDome(palette: BlockboxAtmosphere.Palette): Unit =
+    // Compatibility fallback uses the same continuous palette as the pixel shader.
+    val radius=82f; val rings=64; val segments=96
+    var ring=0
+    while ring<rings do
+      val a0=(-Pi/2+Pi*ring/rings).toFloat
+      val a1=(-Pi/2+Pi*(ring+1)/rings).toFloat
+      val y0=sin(a0).toFloat; val y1=sin(a1).toFloat
+      val r0=cos(a0).toFloat; val r1=cos(a1).toFloat
       glBegin(GL_QUAD_STRIP)
-      var i = 0
-      while i <= segments do
-        val a = i.toFloat / segments.toFloat * Pi.toFloat * 2f
-        val ca = cos(a).toFloat; val sa = sin(a).toFloat
-        glColor4f(c0._1, c0._2, c0._3, a0); glVertex3f(ca * r0, y0 * radius, sa * r0)
-        glColor4f(c1._1, c1._2, c1._3, a1); glVertex3f(ca * r1, y1 * radius, sa * r1)
-        i += 1
-      glEnd()
-      ri += 1
+      var i=0
+      while i<=segments do
+        val angle=i.toFloat/segments.toFloat*Pi.toFloat*2
+        val x=cos(angle).toFloat; val z=sin(angle).toFloat
+        val d0=Vec3(x*r0,y0,z*r0); val c0=BlockboxAtmosphere.color(d0,palette)
+        glColor4f(c0.x,c0.y,c0.z,1); glVertex3f(d0.x*radius,d0.y*radius,d0.z*radius)
+        val d1=Vec3(x*r1,y1,z*r1); val c1=BlockboxAtmosphere.color(d1,palette)
+        glColor4f(c1.x,c1.y,c1.z,1); glVertex3f(d1.x*radius,d1.y*radius,d1.z*radius)
+        i+=1
+      glEnd(); ring+=1
 
-  private def drawHorizonGlow(walk: Float, warm: Float, daylight: Float): Unit =
-    val alpha = (0.18f + warm * 0.46f + daylight * 0.08f).min(0.62f)
-    if alpha <= 0.01f then return
-    val dirX = cos(walk).toFloat
-    val dirY = sin(walk).toFloat
-    val dirZ = -0.18f
-    val len = sqrt(dirX * dirX + dirY * dirY + dirZ * dirZ).toFloat.max(0.001f)
-    val cx = dirX / len * 78f
-    val cy = dirY / len * 78f
-    val cz = dirZ / len * 78f
-    val sizeX = 36f
-    val sizeY = 12f
-    glBegin(GL_TRIANGLE_FAN)
-    glColor4f(1.0f, 0.52f, 0.24f, alpha * warm.max(0.25f))
-    glVertex3f(cx, cy, cz)
-    val steps = 40
-    var i = 0
-    while i <= steps do
-      val a = i.toFloat / steps.toFloat * Pi.toFloat * 2f
-      glColor4f(1.0f, 0.48f, 0.18f, 0f)
-      glVertex3f(cx + cos(a).toFloat * sizeX, cy + sin(a).toFloat * sizeY, cz)
-      i += 1
-    glEnd()
-
-  private def drawSunAndMoon(walk: Float, daylight: Float, warm: Float): Unit =
-    val sunDir = normalized(cos(walk).toFloat, sin(walk).toFloat, -0.22f)
-    val moonDir = (-sunDir._1, -sunDir._2, -sunDir._3)
-    val sunAlpha = smooth01((sunDir._2 + 0.10f) / 0.32f)
-    val moonAlpha = smooth01((moonDir._2 + 0.06f) / 0.28f) * (1f - daylight * 0.42f)
+  private def drawSunAndMoon(walk: Float, daylight: Float, warm: Float, storm: Float, lightning: Float): Unit =
+    val phase = walk / (Pi.toFloat * 2f)
+    val sunDir = sunDirection(phase)
+    val moonDir = moonDirection(phase)
+    val sunAlpha = smooth01((sunDir._2 + 0.10f) / 0.32f) * (1f - storm * 0.88f)
+    val moonAlpha = smooth01((moonDir._2 + 0.06f) / 0.28f) * (1f - daylight * 0.42f) * (1f - storm * 0.78f + lightning * 0.12f)
     if sunAlpha > 0.01f then
       val basis = billboardBasis(sunDir)
       glBlendFunc(GL_SRC_ALPHA, GL_ONE)
@@ -193,13 +165,16 @@ object BlockboxSky:
       drawSolidDisc(moonDir, basis, 76f, 6.4f, (0.86f, 0.91f, 1.0f), moonAlpha * 0.95f, 48)
       drawMoonMare(moonDir, basis, moonAlpha)
 
-  private def drawStars(stars: Array[(Float, Float, Float, Float)], starVis: Float): Unit =
+  private def drawStars(stars: Array[(Float, Float, Float, Float)], starVis: Float, gameTime: Float): Unit =
     glPointSize(1.7f)
     glBegin(GL_POINTS)
     stars.foreach { (sx, sy, sz, sb) =>
-      val twinkle = 0.82f + 0.18f * sin((sx * 0.17f + sz * 0.11f).toDouble).toFloat
+      val twinklePhase = sx * 0.17f + sz * 0.11f + sy * 0.07f
+      val twinkle = 0.78f + 0.22f * sin((twinklePhase + gameTime * (0.42f + sb * 0.36f)).toDouble).toFloat
       val alpha = (sb * starVis * twinkle).max(0f).min(1f)
-      glColor4f(0.78f + sb * 0.22f, 0.84f + sb * 0.16f, 1f, alpha)
+      val warm = sin(((sx + sz) * 0.015f).toDouble).toFloat * 0.5f + 0.5f
+      val cool = sin(((sy - sx) * 0.011f).toDouble).toFloat * 0.5f + 0.5f
+      glColor4f((0.72f + sb * 0.24f + warm * 0.06f).min(1f), (0.80f + sb * 0.18f + warm * 0.03f).min(1f), (0.92f + sb * 0.08f + cool * 0.08f).min(1f), alpha)
       glVertex3f(sx, sy, sz)
     }
     glEnd()
@@ -213,139 +188,115 @@ object BlockboxSky:
     }
     glEnd()
 
-  private def drawClouds(camera: Vec3, gameTime: Float, cloudRenderDistanceBlocks: Int, daylight: Float, warm: Float): Unit =
-    val cell = 12f
-    val cloudY = 192f
-    val thickness = 3.0f
-    val drift = gameTime * 0.42f
-    val radiusCells = ((cloudRenderDistanceBlocks.toFloat * 1.08f) / cell).toInt.max(32).min(160)
-    val centerGX = floor((camera.x + drift) / cell).toInt
-    val centerGZ = floor((camera.z - drift * 0.28f) / cell).toInt
-    val gridMinX = centerGX - radiusCells - 1
-    val gridMinZ = centerGZ - radiusCells - 1
-    val gridSize = radiusCells * 2 + 3
-    val cloudGrid = new Array[Boolean](gridSize * gridSize)
-    var pgz = 0
-    while pgz < gridSize do
-      var pgx = 0
-      while pgx < gridSize do
-        cloudGrid(pgx * gridSize + pgz) = cloudAt(gridMinX + pgx, gridMinZ + pgz)
-        pgx += 1
-      pgz += 1
-    def gridCloud(gx: Int, gz: Int): Boolean =
-      val ix = gx - gridMinX
-      val iz = gz - gridMinZ
-      ix >= 0 && ix < gridSize && iz >= 0 && iz < gridSize && cloudGrid(ix * gridSize + iz)
-    def gridSoftness(gx: Int, gz: Int): Float =
-      var count = 0
-      var dz = -1
-      while dz <= 1 do
-        var dx = -1
-        while dx <= 1 do
-          if gridCloud(gx + dx, gz + dz) then count += 1
-          dx += 1
-        dz += 1
-      count.toFloat / 9f
-    val baseR = mix(0.66f, 0.98f, daylight)
-    val baseG = mix(0.70f, 0.99f, daylight)
-    val baseB = mix(0.78f, 1.00f, daylight)
-    val warmR = baseR + warm * 0.05f
-    val warmG = baseG - warm * 0.02f
-    val warmB = baseB - warm * 0.06f
-    glDisable(GL_BLEND)
-    glDisable(GL_TEXTURE_2D)
-    glDisable(GL_CULL_FACE)
-    glDisable(GL_FOG)
-    glEnable(GL_DEPTH_TEST)
-    glDepthFunc(GL_LEQUAL)
-    glDepthMask(true)
-    val cameraAboveClouds = camera.y > cloudY + thickness * 0.5f
-    glBegin(GL_QUADS)
-    var gz = centerGZ - radiusCells
-    while gz <= centerGZ + radiusCells do
-      var gx = centerGX - radiusCells
-      while gx <= centerGX + radiusCells do
-        if gridCloud(gx, gz) then
-          val wx0 = gx * cell - drift
-          val wz0 = gz * cell + drift * 0.28f
-          val wx1 = wx0 + cell
-          val wz1 = wz0 + cell
-          val midX = (wx0 + wx1) * 0.5f
-          val midZ = (wz0 + wz1) * 0.5f
-          val dx = midX - camera.x
-          val dz = midZ - camera.z
-          val dist = sqrt(dx * dx + dz * dz).toFloat
-          val fade = (1f - ((dist - cloudRenderDistanceBlocks * 0.88f) / (cloudRenderDistanceBlocks * 0.12f).max(1f))).max(0f).min(1f)
-          if fade > 0.01f then
-            val density = gridSoftness(gx, gz)
-            val edge = (1f - density).max(0f).min(1f)
-            // Keep top/bottom opacity consistent across neighboring cells. Big per-cell
-            // alpha differences make the grid visible and read as cheap individual faces.
-            val haze = 1f - fade
-            val x0 = wx0 - camera.x; val x1 = wx1 - camera.x
-            val y0 = cloudY - camera.y; val y1 = cloudY + thickness - camera.y
-            val z0 = wz0 - camera.z; val z1 = wz1 - camera.z
-            val topLight = (1.00f + edge * 0.025f).min(1.06f)
-            val bottomLight = 0.57f + daylight * 0.17f
-            val topR = mix(warmR * topLight, warmR * 0.82f, haze)
-            val topG = mix(warmG * topLight, warmG * 0.86f, haze)
-            val topB = mix(warmB * topLight, warmB * 0.92f, haze)
-            val bottomR = mix(warmR * bottomLight, warmR * 0.66f, haze)
-            val bottomG = mix(warmG * bottomLight, warmG * 0.70f, haze)
-            val bottomB = mix(warmB * bottomLight, warmB * 0.78f, haze)
-            if cameraAboveClouds then
-              cloudQuad(x0, y1, z0, x1, y1, z0, x1, y1, z1, x0, y1, z1, topR, topG, topB, 1f)
-            else
-              cloudQuad(x0, y0, z1, x1, y0, z1, x1, y0, z0, x0, y0, z0, bottomR, bottomG, bottomB, 1f)
-            if dist < cloudRenderDistanceBlocks * 0.58f then
-              val sideLight = 0.72f + daylight * 0.17f
-              val sideR = mix(warmR * sideLight, warmR * 0.72f, haze)
-              val sideG = mix(warmG * sideLight, warmG * 0.76f, haze)
-              val sideB = mix(warmB * sideLight, warmB * 0.84f, haze)
-              if !gridCloud(gx - 1, gz) then cloudSideQuad(x0, y0, z0, x0, y1, z0, x0, y1, z1, x0, y0, z1, sideR, sideG, sideB, 1.02f, 0.82f)
-              if !gridCloud(gx + 1, gz) then cloudSideQuad(x1, y0, z1, x1, y1, z1, x1, y1, z0, x1, y0, z0, sideR, sideG, sideB, 0.98f, 0.80f)
-              if !gridCloud(gx, gz - 1) then cloudSideQuad(x1, y0, z0, x1, y1, z0, x0, y1, z0, x0, y0, z0, sideR, sideG, sideB, 0.99f, 0.78f)
-              if !gridCloud(gx, gz + 1) then cloudSideQuad(x0, y0, z1, x0, y1, z1, x1, y1, z1, x1, y0, z1, sideR, sideG, sideB, 1.01f, 0.80f)
-        gx += 1
-      gz += 1
+
+  // Prebuilt once instead of allocating nested arrays and sky-point tuples every
+  // frame. Constellations are tiny compared with terrain, but the sky renderer runs
+  // forever, so zero-GC presentation code is worth keeping boring and deterministic.
+  private val constellationPatterns: Array[Array[(Float, Float)]] = Array(
+    Array((-128f,42f),(-114f,47f),(-99f,43f),(-83f,50f),(-67f,46f),(-52f,53f),(-38f,51f)),
+    Array((22f,30f),(33f,20f),(43f,8f),(49f,-4f),(57f,-17f),(45f,-9f),(36f,0f),(33f,20f)),
+    Array((101f,47f),(111f,55f),(122f,48f),(134f,57f),(147f,49f)),
+    Array((-13f,-26f),(-2f,-15f),(10f,-24f),(20f,-12f),(31f,-21f)),
+    Array((165f,17f),(176f,31f),(-172f,25f),(-160f,39f),(-148f,30f))
+  )
+
+  private def precomputeSkyPoint(longitudeDeg: Float, latitudeDeg: Float, radius: Float): (Float, Float, Float) =
+    val lon = toRadians(longitudeDeg.toDouble).toFloat
+    val lat = toRadians(latitudeDeg.toDouble).toFloat
+    val cl = cos(lat).toFloat
+    (cos(lon).toFloat * cl * radius, sin(lat).toFloat * radius, sin(lon).toFloat * cl * radius)
+
+  private val constellationLinePoints: Array[Array[(Float, Float, Float)]] =
+    constellationPatterns.map(_.map { case (lon, lat) => precomputeSkyPoint(lon, lat, 74.7f) })
+  private val constellationAnchorPoints: Array[(Float, Float, Float)] =
+    constellationPatterns.flatten.map { case (lon, lat) => precomputeSkyPoint(lon, lat, 74.9f) }
+
+  private def hash01(i: Int, salt: Int): Float =
+    var n = i * 0x45d9f3b + salt * 0x27d4eb2d
+    n ^= n >>> 16; n *= 0x45d9f3b; n ^= n >>> 16
+    (n & 0xffff).toFloat / 65535f
+
+  private def drawGalaxyBand(starVis: Float, gameTime: Float): Unit =
+    // A broad, tilted Milky-Way-like band: two soft translucent strips plus one
+    // batched dust field. It is entirely procedural and deterministic, so there is
+    // no giant sky texture upload and essentially zero runtime allocation.
+    glPushMatrix()
+    glRotatef(63f, 1f, 0.15f, 0.35f)
+    glRotatef(-18f, 0f, 1f, 0f)
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE)
+    val radius = 73.6f
+    val segments = 128
+    var layer = 0
+    while layer < 3 do
+      val width = 4.8f + layer * 4.5f
+      val alpha = starVis * (0.032f - layer * 0.007f)
+      glBegin(GL_QUAD_STRIP)
+      var i = 0
+      while i <= segments do
+        val a = i.toFloat / segments.toFloat * Pi.toFloat * 2f
+        val wobble = sin((a * 3.0f + layer).toDouble).toFloat * (0.8f + layer * 0.25f)
+        val ca = cos(a).toFloat; val sa = sin(a).toFloat
+        val y0 = -width + wobble; val y1 = width + wobble
+        val edgeAlpha = alpha * (0.76f + 0.24f * sin((a * 2.0f + 0.7f).toDouble).toFloat.abs)
+        glColor4f(0.34f, 0.42f, 0.72f, edgeAlpha * 0.28f); glVertex3f(ca * radius, y0, sa * radius)
+        glColor4f(0.56f, 0.62f, 0.92f, edgeAlpha); glVertex3f(ca * radius, y1, sa * radius)
+        i += 1
+      glEnd()
+      layer += 1
+    glPointSize(1.25f)
+    glBegin(GL_POINTS)
+    var i = 0
+    while i < 520 do
+      val a = hash01(i, 9101) * Pi.toFloat * 2f
+      val spread = (hash01(i, 9102) - 0.5f) * 14f
+      val rr = 74.0f
+      val twinkle = 0.70f + 0.30f * sin((gameTime * 0.18f + hash01(i, 9103) * 13f).toDouble).toFloat
+      val bright = (0.10f + hash01(i, 9104) * 0.32f) * starVis * twinkle
+      glColor4f(0.65f, 0.72f, 1.0f, bright)
+      glVertex3f(cos(a).toFloat * rr, spread, sin(a).toFloat * rr)
+      i += 1
     glEnd()
-    glDepthMask(true)
-    glClear(GL_DEPTH_BUFFER_BIT)
-    glDepthMask(false)
-    glDisable(GL_DEPTH_TEST)
-    glEnable(GL_BLEND)
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+    glPopMatrix()
 
-  private def cloudQuad(x0: Float, y0: Float, z0: Float, x1: Float, y1: Float, z1: Float, x2: Float, y2: Float, z2: Float, x3: Float, y3: Float, z3: Float, r: Float, g: Float, b: Float, a: Float): Unit =
-    glColor4f(r.min(1.15f), g.min(1.15f), b.min(1.15f), a.max(0f).min(1f))
-    glVertex3f(x0, y0, z0); glVertex3f(x1, y1, z1); glVertex3f(x2, y2, z2); glVertex3f(x3, y3, z3)
+  private def drawConstellations(starVis: Float, gameTime: Float): Unit =
+    // Stylized familiar sky patterns. Line/anchor geometry is precomputed once above;
+    // this hot path only submits vertices and computes restrained twinkle brightness.
+    glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+    glLineWidth(1.0f)
+    var patternIndex = 0
+    while patternIndex < constellationLinePoints.length do
+      val pattern = constellationLinePoints(patternIndex)
+      glBegin(GL_LINE_STRIP)
+      var i = 0
+      while i < pattern.length do
+        val p = pattern(i)
+        glColor4f(0.48f,0.62f,0.92f,starVis * 0.16f)
+        glVertex3f(p._1,p._2,p._3)
+        i += 1
+      glEnd()
+      patternIndex += 1
+    glPointSize(3.2f)
+    glBegin(GL_POINTS)
+    var pi = 0
+    while pi < constellationAnchorPoints.length do
+      val p = constellationAnchorPoints(pi)
+      val tw = 0.78f + 0.22f * sin((gameTime * 0.7f + pi * 1.71f).toDouble).toFloat
+      glColor4f(0.88f,0.93f,1f,starVis * 0.74f * tw)
+      glVertex3f(p._1,p._2,p._3)
+      pi += 1
+    glEnd(); glLineWidth(1f); glPointSize(1f)
 
-  private def cloudSideQuad(x0: Float, y0: Float, z0: Float, x1: Float, y1: Float, z1: Float, x2: Float, y2: Float, z2: Float, x3: Float, y3: Float, z3: Float, r: Float, g: Float, b: Float, topMul: Float, bottomMul: Float): Unit =
-    glColor4f((r * bottomMul).min(1.15f), (g * bottomMul).min(1.15f), (b * bottomMul).min(1.15f), 1f)
-    glVertex3f(x0, y0, z0)
-    glColor4f((r * topMul).min(1.15f), (g * topMul).min(1.15f), (b * topMul).min(1.15f), 1f)
-    glVertex3f(x1, y1, z1); glVertex3f(x2, y2, z2)
-    glColor4f((r * bottomMul).min(1.15f), (g * bottomMul).min(1.15f), (b * bottomMul).min(1.15f), 1f)
-    glVertex3f(x3, y3, z3)
+  /** The palette the sky was last drawn with, so clouds dissolve into that exact sky. */
+  private var lastPalette: BlockboxAtmosphere.Palette = null
 
-  private def cloudAt(gx: Int, gz: Int): Boolean =
-    val broad = smoothValueNoise(gx.toFloat * 0.052f, gz.toFloat * 0.052f)
-    val medium = smoothValueNoise(gx.toFloat * 0.118f + 19.3f, gz.toFloat * 0.118f - 11.7f)
-    val detail = smoothValueNoise(gx.toFloat * 0.235f - 6.8f, gz.toFloat * 0.235f + 4.1f)
-    val gap = smoothValueNoise(gx.toFloat * 0.076f + 41.2f, gz.toFloat * 0.076f - 23.4f)
-    val shape = broad * 0.46f + medium * 0.39f + detail * 0.15f
-    shape > 0.615f && gap > 0.34f
+  def renderClouds(camera: Vec3, gameTime: Float, distance: Int, phase: Float, daylight: Float, storm: Float, lightning: Float, seed: Long): Unit =
+    val sunHeight = abs(sin(phase * Pi.toFloat * 2f).toFloat)
+    val warm = (1f - smooth01(sunHeight / 0.28f)) * (1f - storm * 0.74f)
+    val palette = if lastPalette != null then lastPalette else BlockboxAtmosphere.palette(phase, daylight, storm, storm, lightning)
+    BlockboxClouds.render(camera, gameTime, distance, daylight, warm, storm, lightning, seed, palette)
 
-  private def cloudSoftness(gx: Int, gz: Int): Float =
-    var count = 0
-    var dz = -1
-    while dz <= 1 do
-      var dx = -1
-      while dx <= 1 do
-        if cloudAt(gx + dx, gz + dz) then count += 1
-        dx += 1
-      dz += 1
-    (count.toFloat / 9f).max(0f).min(1f)
+  def destroyClouds(): Unit = BlockboxClouds.destroy()
 
   private def valueNoise(x: Int, z: Int): Float =
     val n0 = x * 374761393 + z * 668265263 + 0x27d4eb2d
@@ -422,3 +373,8 @@ object BlockboxSky:
       )
       drawRadialDisc(spotDir, basis, 76.2f, size, (0.46f, 0.54f, 0.72f), alpha * strength, 24)
     }
+
+  def destroy(): Unit =
+    destroyClouds()
+    BlockboxAtmosphere.destroy()
+    BlockboxCelestials.destroy()

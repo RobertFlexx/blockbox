@@ -15,6 +15,7 @@ trait BlockboxMod:
   def onInit(api: ModApi): Unit = ()
   def onWorldLoaded(api: ModApi): Unit = ()
   def onShutdown(api: ModApi): Unit = ()
+  def onWorldUnloaded(api: ModApi): Unit = ()
 
 final case class ModDescriptor(
   id: String,
@@ -88,51 +89,86 @@ final case class ModChatEvent(api: ModApi, playerName: String, var message: Stri
   def setCancelled(value: Boolean): Unit = cancelled = value
 
 final class ModEventBus:
-  private final case class Handler[A](fn: Consumer[A], label: String, var failures: Int = 0, var disabled: Boolean = false)
-  private val blockBreakHandlers = ArrayBuffer.empty[Handler[ModBlockBreakEvent]]
-  private val blockPlaceHandlers = ArrayBuffer.empty[Handler[ModBlockPlaceEvent]]
-  private val worldTickHandlers = ArrayBuffer.empty[Handler[ModWorldTickEvent]]
-  private val hudRenderHandlers = ArrayBuffer.empty[Handler[ModHudRenderEvent]]
-  private val mouseClickHandlers = ArrayBuffer.empty[Handler[ModMouseClickEvent]]
-  private val keyHandlers = ArrayBuffer.empty[Handler[ModKeyEvent]]
-  private val chatHandlers = ArrayBuffer.empty[Handler[ModChatEvent]]
-  private def add[A](handlers: ArrayBuffer[Handler[A]], handler: Consumer[A], label: String): Unit =
-    if handler != null then handlers += Handler(handler, label)
-  def onBlockBreak(handler: Consumer[ModBlockBreakEvent]): Unit = add(blockBreakHandlers, handler, "blockBreak")
-  def onBlockBreak(handler: Closure[?]): Unit = onBlockBreak(ModRuntime.consumer[ModBlockBreakEvent](handler))
-  def onBlockPlace(handler: Consumer[ModBlockPlaceEvent]): Unit = add(blockPlaceHandlers, handler, "blockPlace")
-  def onBlockPlace(handler: Closure[?]): Unit = onBlockPlace(ModRuntime.consumer[ModBlockPlaceEvent](handler))
-  def onWorldTick(handler: Consumer[ModWorldTickEvent]): Unit = add(worldTickHandlers, handler, "worldTick")
-  def onWorldTick(handler: Closure[?]): Unit = onWorldTick(ModRuntime.consumer[ModWorldTickEvent](handler))
-  def onHudRender(handler: Consumer[ModHudRenderEvent]): Unit = add(hudRenderHandlers, handler, "hudRender")
-  def onHudRender(handler: Closure[?]): Unit = onHudRender(ModRuntime.consumer[ModHudRenderEvent](handler))
-  def onMouseClick(handler: Consumer[ModMouseClickEvent]): Unit = add(mouseClickHandlers, handler, "mouseClick")
-  def onMouseClick(handler: Closure[?]): Unit = onMouseClick(ModRuntime.consumer[ModMouseClickEvent](handler))
-  def onKeyPress(handler: Consumer[ModKeyEvent]): Unit = add(keyHandlers, handler, "keyPress")
-  def onKeyPress(handler: Closure[?]): Unit = onKeyPress(ModRuntime.consumer[ModKeyEvent](handler))
-  def onChat(handler: Consumer[ModChatEvent]): Unit = add(chatHandlers, handler, "chat")
-  def onChat(handler: Closure[?]): Unit = onChat(ModRuntime.consumer[ModChatEvent](handler))
-  private def safeRun[A](handlers: ArrayBuffer[Handler[A]], event: A): A =
-    handlers.foreach { h =>
+  private final class Handler(val fn: Consumer[Object],val priority: Int,val serial: Long):
+    var failures=0
+    var disabled=false
+    var calls=0L
+    var maxMicros=0L
+  private val valid=Set("blockBreak","blockPlace","worldTick","hudRender","mouseClick","keyPress","chat","blockInteract","damage","move","death","spawn","worldRender","worldUnload")
+  private var serial=0L
+  private var handlers=Map.empty[String,Vector[Handler]]
+  private[blockbox] def checkpoint(): () => Unit=
+    val saved=handlers; val sequence=serial
+    () => {handlers=saved; serial=sequence}
+  def listen(kind: String,priority: Int,handler: Consumer[Object]): ModSubscription =
+    require(valid.contains(kind),"Unknown event: "+kind)
+    require(handler!=null && handlers.valuesIterator.map(_.size).sum<2048,"Event handler limit is 2048")
+    serial+=1
+    val h=Handler(handler,priority,serial)
+    handlers=handlers.updated(kind,(handlers.getOrElse(kind,Vector.empty):+h).sortBy(h => (-h.priority.toLong,h.serial)))
+    ModSubscription(() => { h.disabled=true; handlers=handlers.updated(kind,handlers.getOrElse(kind,Vector.empty).filterNot(_ eq h)) })
+  def listen(kind: String,priority: Int,handler: Closure[?]): ModSubscription = listen(kind,priority,ModRuntime.consumer[Object](handler))
+  def listen(kind: String,handler: Closure[?]): ModSubscription = listen(kind,0,handler)
+  def hasListeners(kind: String): Boolean=handlers.getOrElse(kind,Vector.empty).exists(!_.disabled)
+  def diagnostics: java.util.Map[String,String]=
+    import scala.jdk.CollectionConverters.*
+    handlers.map((key,value) => key -> value.map(h => s"priority=${h.priority}, calls=${h.calls}, failures=${h.failures}, maxMicros=${h.maxMicros}, disabled=${h.disabled}").mkString("; ")).asJava
+  private[blockbox] def emit[A](kind: String,event: A): A =
+    // Immutable snapshots let listeners subscribe/unsubscribe while a callback runs.
+    handlers.getOrElse(kind,Vector.empty).foreach { h =>
       if !h.disabled then
-        try h.fn.accept(event)
+        val start=System.nanoTime()
+        try h.fn.accept(event.asInstanceOf[Object])
         catch
-          case e: Throwable =>
-            h.failures += 1
-            val msg = Option(e.getMessage).filter(_.nonEmpty).getOrElse(e.getClass.getSimpleName)
-            System.err.println(s"Blockbox mod event '${h.label}' failed (${h.failures}/8): $msg")
-            if h.failures >= 8 then
-              h.disabled = true
-              System.err.println(s"Blockbox disabled failing mod event handler '${h.label}' for this session.")
+          case scala.util.control.NonFatal(e) =>
+            h.failures+=1; h.disabled=h.failures>=8
+            System.err.println(s"Blockbox mod event '$kind' failed (${h.failures}/8): ${e.getMessage}")
+        finally
+          h.calls+=1; h.maxMicros=h.maxMicros.max((System.nanoTime()-start)/1000)
     }
     event
-  def fireBlockBreak(event: ModBlockBreakEvent): ModBlockBreakEvent = safeRun(blockBreakHandlers, event)
-  def fireBlockPlace(event: ModBlockPlaceEvent): ModBlockPlaceEvent = safeRun(blockPlaceHandlers, event)
-  def fireWorldTick(event: ModWorldTickEvent): ModWorldTickEvent = safeRun(worldTickHandlers, event)
-  def fireHudRender(event: ModHudRenderEvent): ModHudRenderEvent = safeRun(hudRenderHandlers, event)
-  def fireMouseClick(event: ModMouseClickEvent): ModMouseClickEvent = safeRun(mouseClickHandlers, event)
-  def fireKeyPress(event: ModKeyEvent): ModKeyEvent = safeRun(keyHandlers, event)
-  def fireChat(event: ModChatEvent): ModChatEvent = safeRun(chatHandlers, event)
+  def onBlockBreak(handler: Consumer[ModBlockBreakEvent]): Unit = { listen("blockBreak",0,handler.asInstanceOf[Consumer[Object]]); () }
+  def onBlockBreak(handler: Closure[?]): Unit = onBlockBreak(ModRuntime.consumer[ModBlockBreakEvent](handler))
+  def fireBlockBreak(event: ModBlockBreakEvent): ModBlockBreakEvent = emit("blockBreak",event)
+  def onBlockPlace(handler: Consumer[ModBlockPlaceEvent]): Unit = { listen("blockPlace",0,handler.asInstanceOf[Consumer[Object]]); () }
+  def onBlockPlace(handler: Closure[?]): Unit = onBlockPlace(ModRuntime.consumer[ModBlockPlaceEvent](handler))
+  def fireBlockPlace(event: ModBlockPlaceEvent): ModBlockPlaceEvent = emit("blockPlace",event)
+  def onWorldTick(handler: Consumer[ModWorldTickEvent]): Unit = { listen("worldTick",0,handler.asInstanceOf[Consumer[Object]]); () }
+  def onWorldTick(handler: Closure[?]): Unit = onWorldTick(ModRuntime.consumer[ModWorldTickEvent](handler))
+  def fireWorldTick(event: ModWorldTickEvent): ModWorldTickEvent = emit("worldTick",event)
+  def onHudRender(handler: Consumer[ModHudRenderEvent]): Unit = { listen("hudRender",0,handler.asInstanceOf[Consumer[Object]]); () }
+  def onHudRender(handler: Closure[?]): Unit = onHudRender(ModRuntime.consumer[ModHudRenderEvent](handler))
+  def fireHudRender(event: ModHudRenderEvent): ModHudRenderEvent = emit("hudRender",event)
+  def onMouseClick(handler: Consumer[ModMouseClickEvent]): Unit = { listen("mouseClick",0,handler.asInstanceOf[Consumer[Object]]); () }
+  def onMouseClick(handler: Closure[?]): Unit = onMouseClick(ModRuntime.consumer[ModMouseClickEvent](handler))
+  def fireMouseClick(event: ModMouseClickEvent): ModMouseClickEvent = emit("mouseClick",event)
+  def onKeyPress(handler: Consumer[ModKeyEvent]): Unit = { listen("keyPress",0,handler.asInstanceOf[Consumer[Object]]); () }
+  def onKeyPress(handler: Closure[?]): Unit = onKeyPress(ModRuntime.consumer[ModKeyEvent](handler))
+  def fireKeyPress(event: ModKeyEvent): ModKeyEvent = emit("keyPress",event)
+  def onChat(handler: Consumer[ModChatEvent]): Unit = { listen("chat",0,handler.asInstanceOf[Consumer[Object]]); () }
+  def onChat(handler: Closure[?]): Unit = onChat(ModRuntime.consumer[ModChatEvent](handler))
+  def fireChat(event: ModChatEvent): ModChatEvent = emit("chat",event)
+  def onBlockInteract(handler: Consumer[ModInteractionEvent]): Unit = { listen("blockInteract",0,handler.asInstanceOf[Consumer[Object]]); () }
+  def onBlockInteract(handler: Closure[?]): Unit = onBlockInteract(ModRuntime.consumer[ModInteractionEvent](handler))
+  def fireBlockInteract(event: ModInteractionEvent): ModInteractionEvent = emit("blockInteract",event)
+  def onDamage(handler: Consumer[ModDamageEvent]): Unit = { listen("damage",0,handler.asInstanceOf[Consumer[Object]]); () }
+  def onDamage(handler: Closure[?]): Unit = onDamage(ModRuntime.consumer[ModDamageEvent](handler))
+  def fireDamage(event: ModDamageEvent): ModDamageEvent = emit("damage",event)
+  def onMove(handler: Consumer[ModMoveEvent]): Unit = { listen("move",0,handler.asInstanceOf[Consumer[Object]]); () }
+  def onMove(handler: Closure[?]): Unit = onMove(ModRuntime.consumer[ModMoveEvent](handler))
+  def fireMove(event: ModMoveEvent): ModMoveEvent = emit("move",event)
+  def onDeath(handler: Consumer[ModPlayerEvent]): Unit = { listen("death",0,handler.asInstanceOf[Consumer[Object]]); () }
+  def onDeath(handler: Closure[?]): Unit = onDeath(ModRuntime.consumer[ModPlayerEvent](handler))
+  def fireDeath(event: ModPlayerEvent): ModPlayerEvent = emit("death",event)
+  def onSpawn(handler: Consumer[ModPlayerEvent]): Unit = { listen("spawn",0,handler.asInstanceOf[Consumer[Object]]); () }
+  def onSpawn(handler: Closure[?]): Unit = onSpawn(ModRuntime.consumer[ModPlayerEvent](handler))
+  def fireSpawn(event: ModPlayerEvent): ModPlayerEvent = emit("spawn",event)
+  def onWorldRender(handler: Consumer[ModWorldRenderEvent]): Unit = { listen("worldRender",0,handler.asInstanceOf[Consumer[Object]]); () }
+  def onWorldRender(handler: Closure[?]): Unit = onWorldRender(ModRuntime.consumer[ModWorldRenderEvent](handler))
+  def fireWorldRender(event: ModWorldRenderEvent): ModWorldRenderEvent = emit("worldRender",event)
+  def onWorldUnload(handler: Consumer[ModPlayerEvent]): Unit = { listen("worldUnload",0,handler.asInstanceOf[Consumer[Object]]); () }
+  def onWorldUnload(handler: Closure[?]): Unit = onWorldUnload(ModRuntime.consumer[ModPlayerEvent](handler))
+  def fireWorldUnload(event: ModPlayerEvent): ModPlayerEvent = emit("worldUnload",event)
 
 final class CommandContext(val api: ModApi, val command: String, val args: Array[String], val playerName: String, val remote: Boolean):
   def getApi: ModApi = api
@@ -147,7 +183,7 @@ final class CommandContext(val api: ModApi, val command: String, val args: Array
   def arg(index: Int, defaultValue: String = ""): String = if index >= 0 && index < args.length then args(index) else defaultValue
   def intArg(index: Int, defaultValue: Int = 0): Int = scala.util.Try(arg(index).toInt).getOrElse(defaultValue)
   def floatArg(index: Int, defaultValue: Float = 0f): Float = scala.util.Try(arg(index).toFloat).getOrElse(defaultValue)
-  def isOp: Boolean = api.game.modIsOpped(playerName) || api.game.modCanUseCheats
+  def isOp: Boolean = api.game.modIsOpped(playerName) || (!remote && playerName.equalsIgnoreCase(api.game.modLocalPlayerName) && api.game.modCanUseCheats)
   def requireOp(): Boolean =
     if isOp then true
     else
@@ -157,6 +193,9 @@ final class CommandContext(val api: ModApi, val command: String, val args: Array
 final class ModCommandRegistry(manager: ModManager):
   private final case class Entry(handler: Consumer[CommandContext], serverInteractive: Boolean, usage: String, description: String, var failures: Int = 0, var disabled: Boolean = false)
   private val commands = scala.collection.mutable.LinkedHashMap.empty[String, Entry]
+  private[blockbox] def checkpoint(): () => Unit=
+    val saved=commands.toVector
+    () => {commands.clear(); commands++=saved}
   def register(name: String, handler: Consumer[CommandContext]): Unit = register(name, true, handler)
   def register(name: String, handler: Closure[?]): Unit = register(name, true, ModRuntime.consumer[CommandContext](handler))
   def registerClient(name: String, handler: Consumer[CommandContext]): Unit = register(name, false, handler)
@@ -193,16 +232,16 @@ final class ModCommandRegistry(manager: ModManager):
 final class PlayerRef(private val api0: ModApi, val name: String):
   def getName: String = name
   def sendMessage(message: String): Unit = api0.say("[mod] " + Option(message).getOrElse(""))
-  def give(block: Block, count: Int): Unit = api0.game.modGiveItem(block, count)
+  def give(block: Block, count: Int): Unit = api0.game.modGivePlayer(name,block,count)
   def give(blockName: String, count: Int): Unit = give(api0.block(blockName), count)
   def give(block: Object, count: Int): Unit =
     block match
       case b: Block => give(b, count)
       case s: String => give(s, count)
       case _ => sendMessage("cannot give unknown block value: " + Option(block).fold("null")(_.toString))
-  def x: Float = api0.game.modCamera.x
-  def y: Float = api0.game.modCamera.y
-  def z: Float = api0.game.modCamera.z
+  def x: Float = api0.game.modPlayerPosition(name).x
+  def y: Float = api0.game.modPlayerPosition(name).y
+  def z: Float = api0.game.modPlayerPosition(name).z
   def blockX: Int = floor(x).toInt
   def blockY: Int = floor(y).toInt
   def blockZ: Int = floor(z).toInt
@@ -214,7 +253,7 @@ final class PlayerRef(private val api0: ModApi, val name: String):
   def getBlockZ: Int = blockZ
   def position: Vec3 = Vec3(x, y, z)
   def getPosition: Vec3 = position
-  def teleport(x: Float, y: Float, z: Float): Unit = api0.game.modTeleportSelf(Vec3(x, y, z))
+  def teleport(x: Float, y: Float, z: Float): Unit = api0.game.modTeleportPlayer(name,Vec3(x,y,z))
   def teleport(x: Number, y: Number, z: Number): Unit = teleport(x.floatValue(), y.floatValue(), z.floatValue())
   def health: Float = api0.game.modHealth
   def getHealth: Float = health
@@ -313,20 +352,32 @@ final class ModContentRegistry(private val manager: ModManager):
     manager.registerBlockDefinition(defn)
     defn
   def registerBlock(id: String, name: String, description: String, backingName: String): ModBlockDef = registerBlock(id, name, description, manager.resolveBlockName(backingName))
+  def registerCube(id: String,name: String,options: java.util.Map[String,?]): Block =
+    CustomBlocks.register(id,name,options).block
+  def registerRecipe(id: String,rows: java.util.List[?],output: String,count: Int): Unit =
+    import scala.jdk.CollectionConverters.*
+    val parsed=rows.asScala.toVector.map {
+      case row: java.util.List[?] => row.asScala.toVector.map(v => manager.resolveBlockName(v.toString))
+      case _ => throw IllegalArgumentException("Recipe rows must be lists of block IDs")
+    }
+    manager.recipes.register(id,parsed,manager.resolveBlockName(output),count)
+  def removeRecipe(id: String): Unit=manager.recipes.remove(id)
+  def setDrop(block: String,item: String,count: Int): Unit=manager.drops.update(manager.resolveBlockName(block),(manager.resolveBlockName(item),count.max(0).min(64)))
   def blocks: Seq[ModBlockDef] = manager.registeredBlocks
   def getBlocks: Seq[ModBlockDef] = blocks
   def blockIds: Seq[String] = blocks.map(_.id)
   def getBlockIds: Seq[String] = blockIds
 
-final class ModFilesApi:
+final class ModFilesApi(private val game: Blockbox):
   private def safeId(id: String): String = ModRuntime.normalizeId(id)
   def modsDir: File = File("mods")
   def getModsDir: File = modsDir
   def configDir(modId: String): File =
-    val d = BlockboxFiles.safeChild(File("config/blockbox-mods").toPath, safeId(modId)).toFile
+    val d = BlockboxFiles.safeChild(game.modConfigDirectory, safeId(modId)).toFile
     BlockboxFiles.ensureDirectory(d.toPath); d
   def dataDir(modId: String): File =
-    val d = BlockboxFiles.safeChild(File("worlds/moddata").toPath, safeId(modId)).toFile
+    require(game.modWorldActive,"World data is available after onWorldLoaded")
+    val d = BlockboxFiles.safeChild(game.modWorldDirectory.resolve("moddata"), safeId(modId)).toFile
     BlockboxFiles.ensureDirectory(d.toPath); d
   def readText(file: File, defaultValue: String = ""): String =
     try if file != null && file.isFile then BlockboxFiles.readText(file.toPath, defaultValue) else defaultValue
@@ -338,27 +389,40 @@ final class ModTask(private val cancelImpl: () => Unit):
   def cancel(): Unit = cancelImpl()
 
 final class ModScheduler:
-  private final case class Task(var remaining: Float, interval: Float, repeats: Boolean, action: Runnable, var cancelled: Boolean = false)
+  private final case class Task(var remaining: Float, interval: Float, repeats: Boolean, action: Runnable, var cancelled: Boolean = false,var failures: Int=0)
   private val tasks = ArrayBuffer.empty[Task]
-  private def f(n: Number): Float = if n == null then 0f else n.floatValue().max(0f)
+  private[blockbox] def checkpoint(): () => Unit=
+    val saved=tasks.toVector
+    () => {tasks.clear(); tasks++=saved}
+  private def f(n: Number): Float =
+    val v=if n==null then 0f else n.floatValue()
+    require(v.isFinite && v>=0f,"Schedule delay must be finite and nonnegative")
+    v
+  def clear(): Unit=tasks.clear()
   def runLater(seconds: Number, action: Runnable): ModTask =
     val t = Task(f(seconds), 0f, false, action)
+    require(tasks.length<1024,"Scheduled task limit is 1024")
     if action != null then tasks += t
     ModTask(() => t.cancelled = true)
   def runLater(seconds: Number, action: Closure[?]): ModTask = runLater(seconds, ModRuntime.runnable(action))
   def every(seconds: Number, action: Runnable): ModTask =
     val interval = f(seconds).max(0.01f)
     val t = Task(interval, interval, true, action)
+    require(tasks.length<1024,"Scheduled task limit is 1024")
     if action != null then tasks += t
     ModTask(() => t.cancelled = true)
   def every(seconds: Number, action: Closure[?]): ModTask = every(seconds, ModRuntime.runnable(action))
   private[blockbox] def tick(dt: Float): Unit =
-    tasks.foreach { t =>
+    tasks.toVector.foreach { t =>
       if !t.cancelled then
         t.remaining -= dt
         if t.remaining <= 0f then
-          try t.action.run() catch case e: Throwable => System.err.println("Blockbox scheduled mod task failed: " + Option(e.getMessage).getOrElse(e.getClass.getSimpleName))
-          if t.repeats then t.remaining += t.interval else t.cancelled = true
+          try t.action.run()
+          catch
+            case scala.util.control.NonFatal(e) =>
+              t.failures+=1; if t.failures>=3 then t.cancelled=true
+              System.err.println("Blockbox scheduled mod task failed: "+e.getMessage)
+          if t.repeats then t.remaining = t.interval else t.cancelled = true
     }
     tasks.filterInPlace(!_.cancelled)
 
@@ -397,7 +461,17 @@ final class ModApi(private[blockbox] val game: Blockbox, private val manager: Mo
   def getLoadedMods: Seq[ModDescriptor] = loadedMods
   def serverModpackHash: String = manager.serverModpackHash
   def getServerModpackHash: String = serverModpackHash
-  def apiVersion: String = "v51"
+  def rules: ModRulesApi = manager.rules
+  def getRules: ModRulesApi = rules
+  def worldgen: ModWorldgenApi = manager.worldgen
+  def getWorldgen: ModWorldgenApi = worldgen
+  def render: ModRenderApi = manager.render
+  def getRender: ModRenderApi = render
+  def graphics: ModGraphicsApi = manager.graphics
+  def getGraphics: ModGraphicsApi = graphics
+  def isHost: Boolean = game.modHasAuthority
+  def getHost: Boolean = isHost
+  def apiVersion: String = "v52"
   def getApiVersion: String = apiVersion
 
 object ModJson:
@@ -428,17 +502,24 @@ object ModRuntime:
   def runnable(closure: Closure[?]): Runnable = new Runnable:
     override def run(): Unit = if closure != null then closure.call()
 
-final class ModManager(private val game: Blockbox):
+final class ModManager(private val game: Blockbox,private val modsRoot: File=File("mods")):
   val events = ModEventBus()
+  val rules = ModRulesApi(() => game.modHasAuthority,() => game.modRulesChanged())
+  val worldgen = ModWorldgenApi()
+  val render = ModRenderApi(() => game.modCamera)
+  val graphics=ModGraphicsApi(game)
   val commands = ModCommandRegistry(this)
   val gui = ModGuiApi(game)
-  val files = ModFilesApi()
+  val files = ModFilesApi(game)
   val scheduler = ModScheduler()
   val content = ModContentRegistry(this)
   val log = ModLogger("mods")
   val api = ModApi(game, this)
+  val recipes=ModRecipes()
+  val drops=scala.collection.mutable.HashMap.empty[Block,(Block,Int)]
   private val descriptors = ArrayBuffer.empty[ModDescriptor]
   private val liveMods = ArrayBuffer.empty[BlockboxMod]
+  private val classLoaders=ArrayBuffer.empty[AutoCloseable]
   private val blockDefinitions = scala.collection.mutable.LinkedHashMap.empty[String, ModBlockDef]
   private var loaded = false
   private var serverHashCached = ModRuntime.VanillaHash
@@ -453,11 +534,11 @@ final class ModManager(private val game: Blockbox):
   def resolveBlockName(name: String): Block =
     val raw = Option(name).getOrElse("")
     val key = ModRuntime.normalizeId(raw.stripPrefix("blockbox:"))
-    blockDefinitions.get(key).map(_.backing).orElse(Block.find(raw)).getOrElse(Block.Air)
+    CustomBlocks.find(raw).orElse(blockDefinitions.get(key).map(_.backing)).orElse(Block.find(raw)).getOrElse(Block.Air)
   def loadAll(): Unit =
     if loaded then return
     loaded = true
-    val root = File("mods")
+    val root = modsRoot
     BlockboxFiles.ensureDirectory(root.toPath)
     writeTemplate(root)
     val entries = Option(root.listFiles()).getOrElse(Array.empty[File]).sortBy(_.getName.toLowerCase)
@@ -473,8 +554,17 @@ final class ModManager(private val game: Blockbox):
     }
     recomputeServerHash()
     System.out.println(s"Blockbox: loaded ${descriptors.count(_.loaded)} mods, server modpack ${serverHashCached}")
-  def shutdown(): Unit = liveMods.foreach { m => try m.onShutdown(api) catch case e: Throwable => System.err.println("Mod shutdown failed: " + e.getMessage) }
-  def fireWorldLoaded(): Unit = liveMods.foreach { m => try m.onWorldLoaded(api) catch case e: Throwable => System.err.println("Mod world-load failed: " + e.getMessage) }
+  def shutdown(): Unit =
+    scheduler.clear()
+    liveMods.foreach { m => try m.onShutdown(api) catch case e: Throwable => System.err.println("Mod shutdown failed: " + e.getMessage) }
+    classLoaders.foreach(loader => try loader.close() catch case _: Exception => ())
+    classLoaders.clear()
+  def fireWorldLoaded(): Unit =
+    liveMods.foreach { m => try m.onWorldLoaded(api) catch case e: Throwable => System.err.println("Mod world-load failed: " + e.getMessage) }
+    events.fireSpawn(ModPlayerEvent(api,game.modLocalPlayerName,"worldLoaded"))
+  def fireWorldUnloaded(): Unit =
+    events.fireWorldUnload(ModPlayerEvent(api,game.modLocalPlayerName,"worldUnloaded"))
+    liveMods.foreach { m => try m.onWorldUnloaded(api) catch case e: Exception => System.err.println("Mod world-unload failed: "+e.getMessage) }
   def fireWorldTick(dt: Float): Unit =
     scheduler.tick(dt)
     events.fireWorldTick(ModWorldTickEvent(api, dt))
@@ -491,7 +581,11 @@ final class ModManager(private val game: Blockbox):
   private def hashPath(f: File): String =
     BlockboxFiles.sha256Tree(f.toPath)
   private def readAll(in: InputStream): String =
-    try String(in.readAllBytes(), StandardCharsets.UTF_8) finally in.close()
+    try
+      val bytes=in.readNBytes(2*1024*1024+1)
+      require(bytes.length<=2*1024*1024,"Mod metadata/script exceeds 2 MiB")
+      String(bytes,StandardCharsets.UTF_8)
+    finally in.close()
   private def descriptorFromJson(json: String, source: String, fallbackId: String, fallbackHash: String): ModDescriptor =
     val id = ModRuntime.normalizeId(ModJson.string(json, "id").getOrElse(fallbackId))
     val name = ModJson.string(json, "name").getOrElse(id)
@@ -519,6 +613,7 @@ final class ModManager(private val game: Blockbox):
       descriptors += desc
     else
       val loader = URLClassLoader(Array(jarFile.toURI.toURL), getClass.getClassLoader)
+      classLoaders+=loader
       instantiateMod(desc, Class.forName(main, true, loader))
       descriptors += desc
 
@@ -532,6 +627,7 @@ final class ModManager(private val game: Blockbox):
         case Some(e) =>
           val source = readAll(jf.getInputStream(e))
           val loader = GroovyClassLoader(getClass.getClassLoader)
+          classLoaders+=loader
           instantiateMod(desc, loader.parseClass(source, e.getName))
         case None =>
           desc.loaded = false
@@ -541,7 +637,7 @@ final class ModManager(private val game: Blockbox):
         desc.loaded = false
         val root = Option(e.getCause).getOrElse(e)
         val msg = Option(root.getMessage).filter(_.nonEmpty).getOrElse(root.getClass.getSimpleName)
-        val hint = if msg.contains("Unsupported class file major version") then " (Groovy/JVM classfile mismatch; Blockbox requires Groovy 5+ on Java 25)" else ""
+        val hint = if msg.contains("Unsupported class file major version") then " (Groovy/JVM classfile mismatch; Blockbox requires its bundled Groovy 5 runtime on Java 21+)" else ""
         desc.status = "jar groovy load failed: " + msg + hint
     finally jf.close()
   private def loadFolder(dir: File): Unit =
@@ -563,24 +659,36 @@ final class ModManager(private val game: Blockbox):
     }
     try
       val loader = GroovyClassLoader(getClass.getClassLoader)
+      classLoaders+=loader
       instantiateMod(desc, loader.parseClass(file))
     catch
       case e: Throwable =>
         desc.loaded = false
         val root = Option(e.getCause).getOrElse(e)
         val msg = Option(root.getMessage).filter(_.nonEmpty).getOrElse(root.getClass.getSimpleName)
-        val hint = if msg.contains("Unsupported class file major version") then " (Groovy/JVM classfile mismatch; Blockbox requires Groovy 5+ on Java 25)" else ""
+        val hint = if msg.contains("Unsupported class file major version") then " (Groovy/JVM classfile mismatch; Blockbox requires its bundled Groovy 5 runtime on Java 21+)" else ""
         desc.status = "loose groovy load failed: " + msg + hint
     descriptors += desc
   private def instantiateMod(desc: ModDescriptor, cls: Class[?]): Unit =
-    val obj = cls.getDeclaredConstructor().newInstance()
-    obj match
-      case mod: BlockboxMod =>
-        mod.onInit(api); liveMods += mod; desc.loaded = true; desc.status = "loaded"
-      case other =>
-        cls.getMethods.filter(_.getName == "init").find(_.getParameterCount == 1) match
-          case Some(m) => m.invoke(other, api); desc.loaded = true; desc.status = "loaded script init(api)"
-          case None => desc.loaded = false; desc.status = "no BlockboxMod implementation or init(api) method"
+    val undo=Vector(events.checkpoint(),commands.checkpoint(),scheduler.checkpoint(),worldgen.checkpoint(),recipes.checkpoint(),CustomBlocks.checkpoint())
+    val savedRules=rules.snapshot; val savedBlocks=blockDefinitions.toVector; val savedDrops=drops.toVector
+    try
+      require(!descriptors.exists(d => d.loaded && d.id==desc.id),"Duplicate mod ID: "+desc.id)
+      val obj=cls.getDeclaredConstructor().newInstance()
+      obj match
+        case mod: BlockboxMod =>
+          mod.onInit(api); liveMods+=mod; desc.loaded=true; desc.status="loaded"
+        case other =>
+          cls.getMethods.filter(_.getName=="init").find(_.getParameterCount==1) match
+            case Some(m) => m.invoke(other,api); desc.loaded=true; desc.status="loaded script init(api)"
+            case None => throw IllegalArgumentException("No BlockboxMod implementation or init(api) method")
+    catch
+      case scala.util.control.NonFatal(e) =>
+        undo.reverse.foreach(_())
+        rules.receive(savedRules)
+        blockDefinitions.clear(); blockDefinitions++=savedBlocks
+        drops.clear(); drops++=savedDrops
+        throw e
   private def recomputeServerHash(): Unit =
     val required = descriptors.filter(d => d.loaded && d.serverInteractive).sortBy(d => (d.id, d.version))
     serverListCached = required.map(d => s"${d.id}@${d.version}:${d.sha256.take(12)}").mkString(",")

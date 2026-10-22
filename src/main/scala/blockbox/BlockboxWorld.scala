@@ -8,6 +8,39 @@ object BlockboxWorld:
   private val NonZeroRandomFallback = 0x6a09e667f3bcc909L
   private val NonZeroTextFallback = 0x510e527fade682d1L
 
+  /** Prefer a dry clearing with body/head room over spawning inside tree trunks,
+    * foliage, surface water or a cave mouth. Loaded edits participate when present.
+    */
+  def findSafeSpawn(gen: TerrainGenerator, loaded: (Int,Int,Int) => Option[Block]): Vec3 =
+    val generated = scala.collection.mutable.Map.empty[(Int,Int),Array[Byte]]
+    def block(x: Int,y: Int,z: Int): Block =
+      loaded(x,y,z).getOrElse {
+        val cx = Math.floorDiv(x,16); val cz = Math.floorDiv(z,16)
+        val data = generated.getOrElseUpdate((cx,cz),gen.generateChunk(cx,cz)._1)
+        Block.fromId(data((y*16+Math.floorMod(z,16))*16+Math.floorMod(x,16)))
+      }
+    def candidate(x: Int,z: Int): Option[Vec3] =
+      var y = Terrain.worldHeight-3
+      while y > Terrain.seaLevel && !block(x,y,z).solid do y -= 1
+      val floor = block(x,y,z)
+      if y>Terrain.seaLevel && !floor.cutout && !Block.isLog(floor) && floor!=Block.Cactus &&
+          block(x,y+1,z)==Block.Air && block(x,y+2,z)==Block.Air then Some(Vec3(x+0.5f,y+2.7f,z+0.5f))
+      else None
+    candidate(0,0) match
+      case Some(position) => return position
+      case None => ()
+    var radius = 2
+    while radius <= 32 do
+      val offsets = Array((radius,0),(-radius,0),(0,radius),(0,-radius),(radius,radius),(-radius,radius),(radius,-radius),(-radius,-radius))
+      var i = 0
+      while i < offsets.length do
+        candidate(offsets(i)._1,offsets(i)._2) match
+          case Some(position) => return position
+          case None => ()
+        i += 1
+      radius += 2
+    Vec3(0.5f,(gen.heightAt(0,0)+3).max(Terrain.seaLevel+3),0.5f)
+
   def mix64(input: Long): Long =
     var z = input
     z = (z ^ (z >>> 30)) * -4658895280553007687L
