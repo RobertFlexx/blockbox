@@ -105,8 +105,13 @@ public final class HardwareRayLoop implements AutoCloseable {
         .pCommandBuffers(stack.pointers(commands.address())).pSignalSemaphores(stack.longs(toGl));
       check(vkQueueSubmit(queue,submit,fence),"submit hardware ray frame"); pending=true;
     }
+    // Complete and validate this submission before publishing a usable frame.
+    // Checking the fence here also catches DEVICE_LOST before GL reads the
+    // results. The external GL wait still transfers image ownership/visibility.
+    awaitFrame();
     outputs.put(0,gbuffer).put(1,water).put(2,lighting).put(3,reflection).put(4,volume);
     EXTSemaphore.glWaitSemaphoreEXT(glSemaphore,noBuffers,outputs,layouts);
+    org.lwjgl.opengl.GL42.glMemoryBarrier(org.lwjgl.opengl.GL42.GL_ALL_BARRIER_BITS);
     frames++;
   }
   public long submittedFrames() { return frames; }

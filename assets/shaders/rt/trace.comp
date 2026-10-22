@@ -120,10 +120,16 @@ bool closestHit(vec3 origin, vec3 dir, float dist, out vec3 albedo, out vec3 nor
     if (rayQueryGetIntersectionTypeEXT(q, true) != gl_RayQueryCommittedIntersectionTriangleEXT) return false;
     uint id = uint(rayQueryGetIntersectionInstanceCustomIndexEXT(q, true));
     uint prim = uint(rayQueryGetIntersectionPrimitiveIndexEXT(q, true));
+    // Treat malformed/stale geometry records as misses rather than dereference
+    // a device address outside its face buffer and abort a GPU invocation.
+    if (id >= uint(frame.params.z)) return false;
     uvec4 rec = data[id];
+    if (prim >= rec.z || (rec.x == 0u && rec.y == 0u)) return false;
     uint64_t addr = uint64_t(rec.x) | (uint64_t(rec.y) << 32);
+    if ((addr & uint64_t(15)) != uint64_t(0)) return false;
     Face face = FaceBuf(addr).faces[prim];
     normal = face.normalEmissive.xyz;
+    if (any(isnan(normal)) || any(isinf(normal)) || dot(normal,normal)<0.01) normal=vec3(0.0,1.0,0.0);
     if (dot(normal, dir) > 0.0) normal = -normal;
     albedo = pow(max(face.albedo.rgb,vec3(0.0)),vec3(2.2));
     emissive = face.normalEmissive.w;

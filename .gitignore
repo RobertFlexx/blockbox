@@ -24,3 +24,4 @@ launcher/exports/
 launcher/*.log
 *.bbpack
 blockbox-settings.properties
+artifacts/

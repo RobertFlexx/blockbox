@@ -228,8 +228,10 @@ object BlockboxRayTrace:
       glFinish()
       destroyTargets()
       halfW = w; halfH = h; haveHistory = false; historyRead = 0
-      gbuffer = createShared(w, h, false)
-      water = createShared(w, h, false)
+      // Raw projected depth must survive the GL/Vulkan copy without FP16
+      // rounding. Lighting/history radiance can remain half precision.
+      gbuffer = createShared(w, h, false, rgba32=true)
+      water = createShared(w, h, false, rgba32=true)
       lighting = createShared(w, h, true)
       reflection = createShared(w, h, true)
       volume = createShared(w, h, true)
@@ -301,7 +303,7 @@ object BlockboxRayTrace:
         near: Float, far: Float,
         invProj: Array[Float], invView: Array[Float], prevProj: Array[Float], prevView: Array[Float]
     ): Unit =
-      writeFrame(camera, previousCamera, sun, daylight, rain, time, near, far, invProj, invView, prevProj, prevView)
+      writeFrame(camera, previousCamera, sun, daylight, rain, time, near, far, invProj, invView, prevProj, prevView, instances.length)
       writeInstances(instances)
       rayLoop.begin(gbuffer.image,water.image,lighting.image,reflection.image,volume.image)
       val stack=MemoryStack.stackPush()
@@ -317,7 +319,7 @@ object BlockboxRayTrace:
         camera: (Float, Float, Float), previousCamera: (Float, Float, Float),
         sun: (Float, Float, Float), daylight: Float, rain: Float, time: Float,
         near: Float, far: Float,
-        invProj: Array[Float], invView: Array[Float], prevProj: Array[Float], prevView: Array[Float]
+        invProj: Array[Float], invView: Array[Float], prevProj: Array[Float], prevView: Array[Float],instanceCount: Int
     ): Unit =
       val data = MemoryUtil.memByteBuffer(uboMapped, 512)
       data.clear()
@@ -325,7 +327,7 @@ object BlockboxRayTrace:
       put4(data, camera._1, camera._2, camera._3, daylight)
       put4(data, previousCamera._1, previousCamera._2, previousCamera._3, rain)
       put4(data, sun._1, sun._2, sun._3, time)
-      put4(data, near, far, halfW.toFloat * 2f, halfH.toFloat * 2f)
+      put4(data, near, far, instanceCount.toFloat, 0f)
       put4(data, halfW.toFloat, halfH.toFloat, frameIndex.toFloat, if haveHistory then 1f else 0f)
 
     private def putMat(data: ByteBuffer,m: Array[Float]): Unit = RayFrameLayout.matrix(data,m)
@@ -781,11 +783,11 @@ object BlockboxRayTrace:
         (buffer, mem.get(0), mapped)
       finally stack.close()
 
-    private def createShared(width: Int, height: Int, linear: Boolean, r32: Boolean = false, interop: Boolean = true): SharedImage =
+    private def createShared(width: Int, height: Int, linear: Boolean, r32: Boolean = false, interop: Boolean = true, rgba32: Boolean = false): SharedImage =
       val stack = MemoryStack.stackPush()
       try
         val external = VkExternalMemoryImageCreateInfo.calloc(stack).sType(VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO).handleTypes(VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT)
-        val format = if r32 then VK_FORMAT_R32_SFLOAT else VK_FORMAT_R16G16B16A16_SFLOAT
+        val format = if r32 then VK_FORMAT_R32_SFLOAT else if rgba32 then VK_FORMAT_R32G32B32A32_SFLOAT else VK_FORMAT_R16G16B16A16_SFLOAT
         val info = VkImageCreateInfo.calloc(stack).sType(VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO).pNext(external.address()).imageType(VK_IMAGE_TYPE_2D).format(format).mipLevels(1).arrayLayers(1).samples(VK_SAMPLE_COUNT_1_BIT).tiling(VK_IMAGE_TILING_OPTIMAL).usage(VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT).sharingMode(VK_SHARING_MODE_EXCLUSIVE).initialLayout(VK_IMAGE_LAYOUT_UNDEFINED)
         if !interop then info.pNext(0L)
         info.extent().width(width).height(height).depth(1)
@@ -814,7 +816,7 @@ object BlockboxRayTrace:
           tex = glGenTextures()
           glBindTexture(GL_TEXTURE_2D, tex)
           glTexParameteri(GL_TEXTURE_2D, GLMem.GL_TEXTURE_TILING_EXT, GLMem.GL_OPTIMAL_TILING_EXT)
-          val glFormat = if r32 then GL_R32F else GL_RGBA16F
+          val glFormat = if r32 then GL_R32F else if rgba32 then GL_RGBA32F else GL_RGBA16F
           GLMem.glTexStorageMem2DEXT(GL_TEXTURE_2D, 1, glFormat, width, height, glMemory, 0L)
           val filter = if linear then GL_LINEAR else GL_NEAREST
           glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, filter)
