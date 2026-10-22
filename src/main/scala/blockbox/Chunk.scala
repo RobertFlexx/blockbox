@@ -543,6 +543,7 @@ final class Chunk(val cx: Int, val cz: Int, initialAtlas: TextureAtlas, gen: Ter
         // default full level without entering the simulation queue.
         val topY = if block == Block.Water then rawWaterTopY(lx, y, lz, fy) else fy + 1f
         val foliage = BlockTints.isFoliage(block)
+        val leafRotation=if foliage then Math.floorMod((baseX+lx)*73428767 ^ y*912931 ^ (baseZ+lz)*19349663,4) else 0
         def grassCornerTint(cfx: Float, cfz: Float): (Float, Float, Float) =
           val sx = floor(baseX.toFloat + cfx).toInt
           val sz = floor(baseZ.toFloat + cfz).toInt
@@ -580,7 +581,14 @@ final class Chunk(val cx: Int, val cz: Int, initialAtlas: TextureAtlas, gen: Ter
           val frost = tintMode == 2 && kind == FaceKind.Top && frostedColumn(lx, lz, y)
           def emit(target: FloatMeshBuilder, i: Int, overlay: Boolean): Unit =
             val (cfx, cfy, cfz, tu, tv) = corners(i)
-            val (tu2, tv2) = if isLogBlock && LogAxis.swapsUv(kind, logAxis) then (tv, tu) else (tu, tv)
+            // Rotate each leaf block's alpha mask in world coordinates. Geometry,
+            // the mirror and shadow map all consume these same immutable UVs.
+            val (tu2,tv2)=if foliage then leafRotation match
+              case 1 => (tv,1f-tu)
+              case 2 => (1f-tu,1f-tv)
+              case 3 => (1f-tv,tu)
+              case _ => (tu,tv)
+            else if isLogBlock && LogAxis.swapsUv(kind,logAxis) then (tv,tu) else (tu,tv)
             val (u, v) = if overlay then atlasRef.grassOverlayUv(tu2, tv2) else atlasRef.uv(block, textureFace, tu2, tv2)
             val (tintR, tintG, tintB) = if overlay then grassCornerTint(cfx, cfz) else tintMode match
               case 1 => grassCornerTint(cfx, cfz)

@@ -18,14 +18,58 @@ uniform vec2 rtSize;
 uniform int rtActive;
 uniform vec2 viewSize;
 uniform float near;
+uniform float uTime;
+uniform float rainStrength;
 uniform float far;
 uniform vec3 cameraPosition;
 uniform vec3 sunPosition;
 uniform mat4 gbufferProjectionInverse;
+uniform mat4 gbufferProjection;
 uniform mat4 gbufferModelViewInverse;
 uniform mat4 shadowProjection;
 uniform mat4 shadowModelView;
 varying vec2 vUv;
+
+// Short-range visibility supplements the world shadow map at feet, voxel edges
+// and overhangs. All comparisons are in view-space metres, never raw depth.
+float contactShadow(vec3 view,vec3 n,vec3 light) {
+    if(dot(n,light)<0.02 || -view.z>85.0) return 1.0;
+    vec3 start=view+n*0.045;
+    for(int i=0;i<12;i++) {
+        float t=0.08+float(i)*0.16;
+        vec3 p=start+light*t;
+        vec4 clip=gbufferProjection*vec4(p,1.0);
+        vec2 uv=clip.xy/max(clip.w,0.0001)*0.5+0.5;
+        if(clip.w<0.05 || min(uv.x,uv.y)<=0.0 || max(uv.x,uv.y)>=1.0) break;
+        float d=texture2D(depthtex0,uv).r;
+        float dz=-p.z-linearDepth(d,near,far);
+        if(d<0.99995 && dz>0.025 && dz<0.12+t*0.025) return 0.0;
+    }
+    return 1.0;
+}
+
+float ambientVisibility(vec3 view,vec3 n) {
+    if(-view.z>100.0) return 1.0;
+    float radius=1.15,occlusion=0.0;
+    vec2 scale=vec2(gbufferProjection[0][0],gbufferProjection[1][1])*radius/max(-view.z,0.1)*0.5;
+    for(int i=0;i<8;i++) {
+        float angle=float(i)*0.785398;
+        vec2 direction=vec2(cos(angle),sin(angle));
+        float horizon=0.0;
+        for(int j=0;j<3;j++) {
+            vec2 uv=vUv+direction*scale*(0.22+float(j)*0.34);
+            if(min(uv.x,uv.y)<=0.0 || max(uv.x,uv.y)>=1.0) continue;
+            float d=texture2D(depthtex0,uv).r;
+            if(d>0.99995) continue;
+            vec3 delta=reconstructView(uv,d,gbufferProjectionInverse)-view;
+            float distance=length(delta);
+            float facing=max(dot(n,delta/max(distance,0.001))-0.10,0.0);
+            horizon=max(horizon,facing*(1.0-smoothstep(radius*0.2,radius,distance)));
+        }
+        occlusion+=horizon;
+    }
+    return 1.0-occlusion*0.12*(1.0-smoothstep(60.0,100.0,-view.z));
+}
 
 void main() {
     vec3 color = texture2D(colortex0, vUv).rgb;
@@ -46,8 +90,14 @@ void main() {
     // View normal was stored; shadow wants a world normal. The 3x3 of the inverse
     // modelview rotates view space back to world for this camera-relative matrix.
     vec3 worldN = normalize(mat3(gbufferModelViewInverse) * n);
-    float dither = hash12(gl_FragCoord.xy + cameraPosition.xz);
+    float dither = hash12(floor(world.xz*32.0));
     float sh = pcssShadow(shadowtex0,world,worldN,sunPosition.y> -0.02 ? sunPosition : -sunPosition, cameraPosition, shadowModelView, shadowProjection, dither);
+    vec3 lightWorld=normalize(sunPosition.y> -0.02 ? sunPosition : -sunPosition);
+    // Rotation inverse is its transpose; GLSL 1.20 has no inverse().
+    vec3 lightView=vec3(dot(gbufferModelViewInverse[0].xyz,lightWorld),dot(gbufferModelViewInverse[1].xyz,lightWorld),dot(gbufferModelViewInverse[2].xyz,lightWorld));
+    sh=min(sh,contactShadow(view,n,lightView));
+    sh*=cloudTransmittance(world,normalize(sunPosition),uTime,sat(rainStrength));
+    float ao=ambientVisibility(view,n);
     vec3 gi = vec3(0.0);
     if (rtActive == 1) {
         vec4 rt = upsampleRT(rtLighting, vUv, rtSize, depthtex0, depth);
@@ -56,7 +106,7 @@ void main() {
         sh=min(sh,sat(rt.a));
         gi = rt.rgb;
     }
-    vec3 shadowed = (color - direct) * mix(0.82, 1.0, sh) + direct * sh;
+    vec3 shadowed = max(color-direct,vec3(0.0))*mix(ao,1.0,sat(material.a)) + direct*sh;
     shadowed += albedo * gi * 0.22 * sky;
     color = mix(color, max(shadowed, vec3(0.0)), keepLit * mix(1.0, sky, 0.35));
     gl_FragColor = vec4(max(color, vec3(0.0)), 1.0);

@@ -136,6 +136,13 @@ object ShaderPipelineTest:
         capture(output.resolve("saved-world-"+pack+".png"),width,height)
         noError("saved world full gameplay frame "+pack)
         println(s"[saved-review] $pack reflection=${pipeline.hasWaterReflection} hardware=${BlockboxRayTrace.frameReady}")
+        val savedTime=get[Option[Float]](game,"timeOverride")
+        for (label,clock) <- Seq(("day",150f),("sunset",575f)) do
+          set(game,"timeOverride",Some(clock))
+          for _ <- 0 until 3 do game.renderFrame(width,height)
+          capture(output.resolve(s"saved-world-$label-$pack.png"),width,height)
+          noError(s"saved world $label $pack")
+        set(game,"timeOverride",savedTime)
     finally
       chunks.values.foreach(_.dispose()); chunks.clear(); pipeline.destroy(); atlas.destroy(); fovea.release()
       get[FirstPersonPass](game,"firstPersonPass").destroy(); BlockboxSky.destroy(); TorchEffects.destroy(); BlockboxSkin.dispose()
@@ -728,6 +735,23 @@ object ShaderPipelineTest:
     val wet=RemotePlayer("Swimming",Vec3(8,40.4f,-2),Vec3(8,40.4f,-2),150,150,0,0,0,1,Block.DiamondSword)
     remotes(wet.name)=wet
     frame("survival-clear",Vec3(0,43,14),0,13,0)
+    // A walking pose may move the held tool, but cannot rotate the atmosphere,
+    // terrain, water reflection or clouds. Compare the actual rendered pixels.
+    def pixels(): Array[Int] =
+      val b=BufferUtils.createByteBuffer(width*height*4)
+      glReadPixels(0,0,width,height,GL_RGBA,GL_UNSIGNED_BYTE,b)
+      Array.tabulate(width*height*4)(i => b.get(i)&255)
+    val resting=pixels()
+    set(game,"cameraBobPhase",1.2f); set(game,"cameraBobAmount",1f); set(game,"cameraRoll",0.3f)
+    frame("survival-walking-bob",Vec3(0,43,14),0,13,0)
+    val walking=pixels()
+    val skyChanges=(height*3/4 until height).flatMap(y => (0 until width).map(x => (y*width+x)*4))
+      .count(i => (0 until 3).exists(c => math.abs(resting(i+c)-walking(i+c))>1))
+    val handChanges=(height/8 until height/2).flatMap(y => (width*3/4 until width).map(x => (y*width+x)*4))
+      .count(i => (0 until 3).exists(c => math.abs(resting(i+c)-walking(i+c))>4))
+    assert(skyChanges==0,s"walking bob leaves the sky/cloud camera stable: $skyChanges changed pixels")
+    assert(handChanges>20,s"the held tool still bobs when walking: $handChanges changed pixels")
+    set(game,"cameraBobPhase",0f); set(game,"cameraBobAmount",0f); set(game,"cameraRoll",0f)
     val originalPosition=dry.pos
     dry.pos=Vec3(-4,41.62f,8)
     frame("survival-shadow-with-avatar",Vec3(0,43,14),0,13,0)
@@ -789,6 +813,10 @@ object ShaderPipelineTest:
     zombie.hurt=0f; dry.hurt=0f
     set(game,"worldClock",150.0); zombie.burning=4f
     frame("survival-zombie-burning",Vec3(0,41.8f,6),0,1,0)
+    zombie.burning=0f; zombie.pos=Vec3(8,38.75f,-2); zombie.swimming=1f; zombie.bodyYaw=zombie.yaw
+    for i <- 0 until 4 do
+      zombie.gait=i*math.Pi.toFloat*0.5f; zombie.stride=0.7f
+      frame(s"survival-zombie-swimming-$i",Vec3(8,41.2f,5),0,8,0)
     remotes.clear(); mobs.clear()
     // Review the same extruded silhouettes in the UI at native pixel scale.
     glBindFramebuffer(GL_FRAMEBUFFER,0); glClearColor(0.08f,0.11f,0.13f,1); glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT)

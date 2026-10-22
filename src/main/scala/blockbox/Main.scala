@@ -2114,7 +2114,7 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
               furnaceRequested=meta.readInt().max(0).min(64)
               fieldJournal.readProgress(meta)
               ZombieSystem.parseSnapshot(meta.readUTF()).foreach { (id,pos,angle,hp,burn,hurt,gear) =>
-                val z=ZombieSystem.Zombie(id,pos); z.yaw=angle; z.targetYaw=angle; z.health=hp; z.burning=burn; z.heldItem=gear
+                val z=ZombieSystem.Zombie(id,pos); z.yaw=angle; z.bodyYaw=angle; z.targetYaw=angle; z.health=hp; z.burning=burn; z.heldItem=gear
                 zombies+=z; zombieSerial=zombieSerial.max(id+1)
               }
         storedChunks.foreach((cx,cz) => loadChunkIfSaved(cx,cz))
@@ -2436,7 +2436,7 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
     cameraBobAmount = approachExp(cameraBobAmount, bobTarget, if groundedMotion then 14f else 9f, dt)
     // Drive bob by distance, not frame rate. One gentle cycle per footfall keeps
     // motion readable without the old rapid seasick oscillation.
-    if groundedMotion then cameraBobPhase += horizontalDistance * (if sprinting then 3.25f else 2.85f)
+    if groundedMotion then cameraBobPhase += horizontalDistance * (Pi.toFloat * 0.6f)
     val fovTarget = if submerged then 1.5f else if sprinting && moving && !crouching then 7.5f else 0f
     viewFovOffset = approachExp(viewFovOffset, fovTarget, 8.5f, dt)
     val strafe = (if down(GLFW_KEY_D) then 1f else 0f) - (if down(GLFW_KEY_A) then 1f else 0f)
@@ -3118,7 +3118,7 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
           val alive=snapshot.map(_._1).toSet
           zombies.filterInPlace(z => alive(z.id))
           snapshot.foreach { (id,pos,angle,hp,burn,hurt,gear) =>
-            val z=zombies.find(_.id==id).getOrElse { val created=ZombieSystem.Zombie(id,pos); zombies+=created; created }
+            val z=zombies.find(_.id==id).getOrElse { val created=ZombieSystem.Zombie(id,pos); created.yaw=angle; created.bodyYaw=angle; zombies+=created; created }
             z.target=pos; z.targetYaw=angle; z.health=hp; z.burning=burn; z.hurt=hurt; z.heldItem=gear
           }
         else if line.startsWith("ZHIT|") && gameServer!=null then
@@ -3547,11 +3547,8 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
     val top = tan(toRadians((fov + dynamicFov).max(45f).min(110f)) / 2.0) * near
     glFrustum(-top * aspect, top * aspect, -top, top, near, far)
     glMatrixMode(GL_MODELVIEW); glLoadIdentity()
-    val bobX = sin(cameraBobPhase).toFloat * 0.012f * cameraBobAmount
-    val bobY = (0.5f - 0.5f * cos(cameraBobPhase * 2f).toFloat) * 0.018f * cameraBobAmount
-    val bobRoll = sin(cameraBobPhase).toFloat * 0.12f * cameraBobAmount
-    glTranslatef(bobX, -bobY, 0f)
-    glRotatef(cameraRoll + bobRoll, 0f, 0f, 1f)
+    // Walking sway belongs to the viewmodel. Keep this camera identical for
+    // terrain, atmosphere, clouds, reflections and ray-history reprojection.
     glRotatef(pitch, 1f, 0f, 0f)
     glRotatef(yaw, 0f, 1f, 0f)
     // X/Z camera-relative rendering: chunk VBOs are local and translated by
@@ -3873,7 +3870,9 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
         z.pos+=(z.target-z.pos)*(1f-exp(-dt*14f).toFloat)
         z.yaw+=(((z.targetYaw-z.yaw+540f)%360f)-180f)*(1f-exp(-dt*12f).toFloat)
         val distance=sqrt(pow(z.pos.x-before.x,2)+pow(z.pos.z-before.z,2)).toFloat
-        z.gait+=distance*4.2f
+        z.bodyYaw+=(((z.yaw-z.bodyYaw+540f)%360f)-180f)*(1f-exp(-dt*10f).toFloat)
+        ZombieSystem.updateSwimming(z,dt,activeBlockAt,waterLevelAt)
+        z.gait+=distance*(if z.swimming>0.5f then 3.2f else 3.6f)
         z.stride=approachExp(z.stride,(distance/dt.max(0.001f)/1.65f).min(1f),10f,dt)
       }
       return
@@ -3913,14 +3912,14 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
       z.voiceTimer-=dt
       if z.voiceTimer<=0f then
         emitZombieVoice(z,0); z.voiceTimer=6f+zombieRng.nextFloat()*8f
-      ZombieSystem.update(z,dt,targets,exposed,rain,activeBlockAt).foreach { attack =>
+      ZombieSystem.update(z,dt,targets,exposed,rain,activeBlockAt,waterLevelAt).foreach { attack =>
         emitZombieVoice(z,2)
         if attack.name==playerName then damagePlayer(attack.damage,"zombie")
         else if gameServer!=null then gameServer.sendTo(attack.name,s"ZDAMAGE|${attack.damage}")
       }
       if z.health<beforeHealth then emitZombieVoice(z,if z.health<=0 then 3 else 1)
     }
-    ZombieSystem.separate(zombies.toVector,activeBlockAt)
+    ZombieSystem.separate(zombies.toVector,activeBlockAt,dt)
     zombies.filterInPlace(z => z.health>0 && z.pos.y>1 && targets.exists(p => (p.eye-z.pos).lengthSquared<112*112))
     zombieSyncTimer-=dt
     if gameServer!=null && zombieSyncTimer<=0 then
@@ -4029,10 +4028,9 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
       BlockboxPlayerModel.render(p,camera,colorForId(p.colorId),(1,1,1),gameTime,held)
     }
     zombies.foreach { z =>
-      val p=z.avatar
-      p.pos=z.pos+Vec3(0,1.62f,0); p.yaw=z.yaw; p.bodyYaw=z.yaw; p.gait=z.gait; p.stride=z.stride
+      val p=ZombieSystem.prepareAvatar(z)
       val held=if z.heldItem==Block.Air then None else Some(() => drawHeldItemAtGrip(z.heldItem,(1,1,1)))
-      BlockboxPlayerModel.render(p,camera,(0.17f,0.4f,0.39f),(1,1,1),gameTime,held,zombie=true)
+      BlockboxPlayerModel.render(p,camera,(0.17f,0.4f,0.39f),(1,1,1),gameTime,held,zombie=true,swimming=z.swimming)
     }
     BlockboxPlayerModel.endLighting()
 
@@ -4048,13 +4046,11 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
     val sceneShaded=shadersEnabled && shaderPipeline!=null && shaderPipeline.beginEntityLighting()
     BlockboxPlayerModel.beginLighting(viewSpace=false,shaderColor=sceneShaded)
     zombies.foreach { z =>
-      val avatar=z.avatar
-      avatar.pos=z.pos+Vec3(0,1.62f,0); avatar.yaw=z.yaw; avatar.bodyYaw=z.yaw
-      avatar.gait=z.gait; avatar.stride=z.stride
+      val avatar=ZombieSystem.prepareAvatar(z)
       if sceneShaded then entityLightLevels(avatar.pos)
       renderImmersedEntity(avatar.pos,sceneShaded) { light =>
         val held=if z.heldItem==Block.Air then None else Some(() => drawHeldItemAtGrip(z.heldItem,light))
-        BlockboxPlayerModel.render(avatar,camera,(0.17f,0.40f,0.39f),light,gameTime,held,zombie=true,hurt=damageFlash(z.hurt))
+        BlockboxPlayerModel.render(avatar,camera,(0.17f,0.40f,0.39f),light,gameTime,held,zombie=true,hurt=damageFlash(z.hurt),swimming=z.swimming)
       }
     }
     BlockboxPlayerModel.endLighting()
@@ -4189,6 +4185,9 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
     val near=0.05; val top=tan(toRadians(70.0)*0.5)*near
     glFrustum(if resolved then firstPersonPass.leftEdge*top*aspect else -top*aspect,top*aspect,-top,top,near,8)
     glMatrixMode(GL_MODELVIEW); glLoadIdentity()
+    val walk=FirstPersonPose.walkPose(cameraBobPhase,cameraBobAmount)
+    glTranslatef(walk.position.x,walk.position.y,walk.position.z)
+    glRotatef(walk.roll+cameraRoll*0.5f,0,0,1); glRotatef(walk.pitch,1,0,0)
     BlockboxPlayerModel.beginLighting(viewSpace = true)
     val lagYaw=((((yaw-viewmodelYaw)%360f)+540f)%360f-180f).max(-40f).min(40f)
     val lagPitch=(pitch-viewmodelPitch).max(-40f).min(40f)
@@ -4196,7 +4195,7 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
     val light=viewmodelLight(block)
     val narrow=(aspect.toFloat/1.2f).min(1f)
     if block==Block.Air then
-      val hand=FirstPersonPose.handPose(viewmodelKick,cameraBobPhase,cameraBobAmount,viewmodelObstruction,equipProgress)
+      val hand=FirstPersonPose.handPose(viewmodelKick,viewmodelObstruction,equipProgress)
       glTranslatef(hand.position.x*narrow,hand.position.y,hand.position.z)
       glRotatef(hand.yaw,0,1,0); glRotatef(hand.roll,0,0,1)
       glTranslatef(-1f,3.6f,3.5f); glRotatef(120f,0,0,1); glRotatef(200f,1,0,0); glRotatef(-135f,0,1,0)
@@ -4205,7 +4204,7 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
       glRotatef(180f,0,0,1)
       BlockboxPlayerModel.firstPersonArm(colorForId(localColorId),light)
     else
-      val held=FirstPersonPose.itemPose(block,viewmodelKick,cameraBobPhase,cameraBobAmount,viewmodelObstruction,equipProgress)
+      val held=FirstPersonPose.itemPose(block,viewmodelKick,viewmodelObstruction,equipProgress)
       glTranslatef(held.position.x*narrow,held.position.y,held.position.z)
       glRotatef(held.attack.y,0,1,0); glRotatef(held.attack.z,0,0,1); glRotatef(held.attack.x,1,0,0)
       glRotatef(-45f,0,1,0)

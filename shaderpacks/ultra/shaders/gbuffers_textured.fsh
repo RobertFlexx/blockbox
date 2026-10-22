@@ -37,7 +37,7 @@ void main() {
     vec3 color=ambient+direct;
     color=mix(color,pow(texel.rgb,vec3(2.2))*vec3(4.0,2.2,0.75),vEmission);
     direct*=1.0-vEmission;
-    if(bbPlanarPass!=0) color=mix(reflectedSurface(ambient,direct,vWorldPos,n,sun),color,vEmission);
+    if(bbPlanarPass!=0) color=mix(reflectedSurface(ambient,direct,vWorldPos,n,sun,uTime,rainStrength),color,vEmission);
     gl_FragData[0] = vec4(color, 1.0);
     gl_FragData[1] = vec4(normalize(vNormalView) * 0.5 + 0.5, 1.0);
     gl_FragData[2] = vec4(float(renderStage) / 255.0, sky, 0.0, max(block, vEmission));

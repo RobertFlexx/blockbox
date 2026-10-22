@@ -2,6 +2,8 @@
 // GLSL 1.20: no textureSize, no bitwise ops, no inverse().
 
 uniform float bbLightning;
+uniform int shadowMapResolution;
+uniform float shadowDistance;
 
 float sat(float x) { return clamp(x, 0.0, 1.0); }
 vec2 sat2(vec2 x) { return clamp(x, vec2(0.0), vec2(1.0)); }
@@ -103,52 +105,47 @@ float shadowCompare(sampler2D shadowMap, vec3 world, vec3 camera, mat4 shadowMod
     return z - bias <= occluder ? 1.0 : 0.0;
 }
 
-float pcssShadow(sampler2D shadowMap, vec3 world, vec3 normal, vec3 sun, vec3 camera, mat4 shadowModel, mat4 shadowProj, float dither) {
-    float ndotl = sat(dot(normal, normalize(sun)));
-    float bias=0.00012+(1.0-ndotl)*0.0004;
-    vec2 rot = vec2(cos(dither * 6.28318), sin(dither * 6.28318));
-    vec2 perp = vec2(-rot.y, rot.x);
-    // A short blocker search, then a wider penumbra. Reads as a large soft sun.
-    float blocker = 0.0;
-    float blockers = 0.0;
-    vec2 texel = vec2(1.0 / 2048.0);
-    for (int i = 0; i < 8; i++) {
-        float a = float(i) * 2.39996 + dither * 6.28318;
-        vec2 o = vec2(cos(a), sin(a)) * (1.5 + float(i) * 0.55) * texel;
-        vec3 rel = vec3(world.x - camera.x, world.y, world.z - camera.z);
-        vec4 sc = shadowProj * shadowModel * vec4(rel, 1.0);
-        vec3 ndc = sc.xyz / max(abs(sc.w), 0.00001);
-        vec2 uv = ndc.xy * 0.5 + 0.5 + o;
-        float z = ndc.z * 0.5 + 0.5;
-        if (uv.x > 0.0 && uv.y > 0.0 && uv.x < 1.0 && uv.y < 1.0) {
-            float d = texture2D(shadowMap, uv).r;
-            if (d < z - bias) { blocker += d; blockers += 1.0; }
-        }
+// Four comparisons before interpolation retain thin cutout casters. Filtering
+// stored depths first would invent blockers between leaves and empty sky.
+float filteredShadow(sampler2D map,vec2 uv,float receiver,float texel) {
+    vec2 pixel=uv/texel-0.5,base=(floor(pixel)+0.5)*texel,f=fract(pixel);
+    float a=step(receiver,texture2D(map,base).r);
+    float b=step(receiver,texture2D(map,base+vec2(texel,0.0)).r);
+    float c=step(receiver,texture2D(map,base+vec2(0.0,texel)).r);
+    float d=step(receiver,texture2D(map,base+vec2(texel)).r);
+    return mix(mix(a,b,f.x),mix(c,d,f.x),f.y);
+}
+
+float pcssShadow(sampler2D shadowMap,vec3 world,vec3 normal,vec3 sun,vec3 camera,mat4 shadowModel,mat4 shadowProj,float dither) {
+    float range=max(shadowDistance,32.0),texel=1.0/max(float(shadowMapResolution),1.0);
+    float ndotl=sat(dot(normal,normalize(sun)));
+    vec3 rel=vec3(world.x-camera.x,world.y,world.z-camera.z)+normal*0.012;
+    vec4 sc=shadowProj*shadowModel*vec4(rel,1.0);
+    vec3 ndc=sc.xyz/max(abs(sc.w),0.00001);
+    vec2 uv=ndc.xy*0.5+0.5;
+    float receiver=ndc.z*0.5+0.5;
+    if(min(uv.x,uv.y)<texel*8.0 || max(uv.x,uv.y)>1.0-texel*8.0 || receiver<=0.0 || receiver>=1.0) return 1.0;
+    // The engine's orthographic depth span is 7*range, its width is 2*range.
+    // Express bias and penumbra in metres so changing distance/resolution never
+    // changes the apparent size of the sun or detaches a foot from its shadow.
+    float bias=(0.018+0.045*(1.0-ndotl))/(7.0*range);
+    float blocker=0.0,count=0.0;
+    for(int i=0;i<8;i++) {
+        float a=float(i)*2.399963+dither*6.283185;
+        vec2 o=vec2(cos(a),sin(a))*sqrt((float(i)+0.5)/8.0)*texel*3.0;
+        float z=texture2D(shadowMap,uv+o).r;
+        if(z<receiver-bias) {blocker+=z;count+=1.0;}
     }
-    float spread = 2.2;
-    if (blockers > 0.0) {
-        float avg = blocker / blockers;
-        vec3 rel = vec3(world.x - camera.x, world.y, world.z - camera.z);
-        vec4 sc = shadowProj * shadowModel * vec4(rel, 1.0);
-        float receiver = (sc.z / max(abs(sc.w), 0.00001)) * 0.5 + 0.5;
-        spread = clamp((receiver - avg) / max(avg, 0.05) * 18.0, 1.4, 7.5);
+    float separation=count>0.0 ? max(receiver-blocker/count,0.0)*7.0*range : 0.0;
+    // Solar angular radius ~0.267 degrees: contact hardening, not a fixed blur.
+    float radius=clamp(separation*0.00465/(2.0*range),texel*0.55,texel*6.0);
+    float sum=0.0;
+    for(int i=0;i<12;i++) {
+        float a=float(i)*2.399963+dither*6.283185;
+        vec2 o=vec2(cos(a),sin(a))*sqrt((float(i)+0.5)/12.0)*radius;
+        sum+=filteredShadow(shadowMap,uv+o,receiver-bias,texel);
     }
-    float sum = 0.0;
-    for (int i = 0; i < 12; i++) {
-        float a = float(i) * 2.39996 + dither * 6.28318;
-        float r = sqrt((float(i) + 0.5) / 12.0) * spread;
-        vec2 o = vec2(cos(a), sin(a)) * r * texel * 3.2;
-        vec3 rel = vec3(world.x - camera.x, world.y, world.z - camera.z);
-        vec4 sc = shadowProj * shadowModel * vec4(rel, 1.0);
-        vec3 ndc = sc.xyz / max(abs(sc.w), 0.00001);
-        vec2 uv = ndc.xy * 0.5 + 0.5 + vec2(dot(o, rot), dot(o, perp));
-        float z = ndc.z * 0.5 + 0.5;
-        float lit = 1.0;
-        if (uv.x > 0.0 && uv.y > 0.0 && uv.x < 1.0 && uv.y < 1.0 && z > 0.0 && z < 1.0)
-            lit = z - bias <= texture2D(shadowMap, uv).r ? 1.0 : 0.0;
-        sum += lit;
-    }
-    return sum / 12.0;
+    return sum/12.0;
 }
 
 vec4 rtTap(sampler2D tex, vec2 uv) { return texture2D(tex, uv); }
@@ -177,7 +174,7 @@ float daylightAmount(vec3 sun) { return smoothstep(-0.15, 0.12, sun.y); }
 float nightAmount(vec3 sun) { return 1.0-smoothstep(-0.16, 0.01, sun.y); }
 float goldenHour(vec3 sun) { return exp(-pow((sun.y-0.035)*4.4,2.0)); }
 vec3 sunlightColor(vec3 sun) {
-    return mix(vec3(1.65,1.68,1.72),vec3(1.65,0.59,0.18),goldenHour(sun));
+    return mix(vec3(1.90,1.82,1.65),vec3(1.82,0.65,0.22),goldenHour(sun));
 }
 vec3 linearAlbedo(vec3 texel,vec3 tint) {
     return pow(max(texel*min(tint,vec3(1.0)),vec3(0.0)),vec3(2.2));
@@ -236,27 +233,43 @@ vec3 atmosphere(vec3 rd,vec3 sun,float daylight,float storm,float time) {
 
 // Cumulus billows with a soft eroded edge. Only occupied cells sample 3D detail.
 float cloudDensity(vec3 p,float time,float cover) {
-    vec2 flow=(p.xz+vec2(time*0.65,-time*0.22))/156.0;
+    vec2 flow=(p.xz+vec2(time*0.65,-time*0.22))/192.0;
     vec2 grid=floor(flow-0.5);
     float field=-1.0;
-    for (int x=0;x<2;x++) for (int z=0;z<2;z++) {
+    for(int x=0;x<2;x++) for(int z=0;z<2;z++) {
         vec2 cell=grid+vec2(float(x),float(z));
         float seed=hash12(cell+vec2(13.7,29.1));
-        if (seed>mix(0.69,1.0,sat((cover-0.55)/0.4))) continue;
-        float r=45.0+seed*25.0+sat(cover-0.55)*35.0;
-        vec2 center=cell+0.5+vec2(fract(seed*7.37)-0.5,fract(seed*13.13)-0.5)*0.16;
-        vec3 q=vec3((flow.x-center.x)*156.0,p.y-171.0-seed*8.0,(flow.y-center.y)*156.0);
-        vec3 main=q/vec3(r,r*0.45,r*0.8);
-        vec3 a=(q-vec3(-r*0.46,r*0.24,r*0.12))/vec3(r*0.64,r*0.52,r*0.62);
-        vec3 b=(q-vec3(r*0.37,r*0.28,-r*0.10))/vec3(r*0.65,r*0.57,r*0.61);
-        float d=max(1.0-dot(main,main),max(1.0-dot(a,a),1.0-dot(b,b)));
+        // Broad weather regions make connected banks and open blue patches,
+        // rather than an evenly spaced sky full of identical cotton balls.
+        float weather=valueNoise(cell*0.31+vec2(17.3,8.1));
+        float coverage=mix(0.42,0.86,weather)+sat(cover-0.55)*0.6;
+        if(seed>coverage) continue;
+        float r=48.0+seed*47.0+sat(cover-0.55)*40.0;
+        vec2 center=cell+0.5+vec2(fract(seed*7.37)-0.5,fract(seed*13.13)-0.5)*0.28;
+        vec3 q=vec3((flow.x-center.x)*192.0,p.y-172.0-seed*12.0,(flow.y-center.y)*192.0);
+        vec3 main=q/vec3(r,r*0.26,r*(0.65+weather*0.35));
+        vec3 a=(q-vec3(-r*0.43,r*0.15,r*0.12))/vec3(r*0.61,r*0.38,r*0.55);
+        vec3 b=(q-vec3(r*0.31,r*0.19,-r*0.16))/vec3(r*0.53,r*0.42,r*0.56);
+        vec3 c=(q-vec3(r*0.08,r*0.31,r*0.19))/vec3(r*0.45,r*0.33,r*0.43);
+        float d=max(max(1.0-dot(main,main),1.0-dot(a,a)),max(1.0-dot(b,b),1.0-dot(c,c)));
         field=max(field,d);
     }
-    if (field< -0.22) return 0.0;
+    if(field< -0.25) return 0.0;
     vec3 detail=p+vec3(time*0.65,0.0,-time*0.22);
-    field+=(valueNoise3(detail*0.11)-0.5)*0.38;
-    field+=(valueNoise3(detail*0.27)-0.5)*0.13;
-    return smoothstep(-0.035,0.58,field)*smoothstep(144.0,154.0,p.y);
+    field+=(valueNoise3(detail*0.075)-0.5)*0.60;
+    field+=(valueNoise3(detail*0.23)-0.5)*0.18;
+    return smoothstep(-0.04,0.60,field)*smoothstep(151.0,160.0,p.y);
+}
+
+float cloudTransmittance(vec3 world,vec3 sun,float time,float storm) {
+    if(sun.y<0.06 || world.y>210.0) return 1.0;
+    float density=0.0;
+    for(int i=0;i<3;i++) {
+        float height=163.0+float(i)*14.0;
+        vec3 p=world+sun*max((height-world.y)/sun.y,0.0);
+        density+=cloudDensity(p,time,0.55+storm*0.4);
+    }
+    return exp(-density*0.8);
 }
 
 vec3 marchClouds(vec3 color,vec3 ro,vec3 rd,float tmax,vec3 sun,float daylight,float storm,float time) {

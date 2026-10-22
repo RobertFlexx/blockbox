@@ -1,4 +1,5 @@
 #version 120
+#include "lib/waves.glsl"
 uniform float uTime;
 uniform mat4 gbufferModelViewInverse;
 uniform vec3 cameraPosition;
@@ -12,15 +13,12 @@ varying vec3 vNormalWorld;
 varying vec3 vNormalView;
 varying vec3 vWorldPos;
 varying float vWaveWeight;
-varying float vWaveX;
-varying float vWaveZ;
 void main() {
     vec4 vertex = gl_Vertex;
-    // Chunk-periodic waves so neighbouring chunks meet at the same height.
-    const float K = 0.3926990817; // 2*pi / 16
-    float wx = sin(vertex.x * K * 2.0 + uTime * 1.35) * 0.028 + sin(vertex.z * K + uTime * 0.72) * 0.025;
-    float wz = cos(vertex.z * K * 2.0 - uTime * 1.05) * 0.028 + cos(vertex.x * K - uTime * 0.64) * 0.020;
-    vertex.y += (wx+wz)*clamp(gl_MultiTexCoord1.z,0.0,1.0);
+    vec4 baseEye=gl_ModelViewMatrix*vertex;
+    vec3 baseWorld=(gbufferModelViewInverse*baseEye).xyz+vec3(cameraPosition.x,0.0,cameraPosition.z);
+    vec3 wave=waterWaves(baseWorld.xz,uTime);
+    vertex.y+=wave.x*clamp(gl_MultiTexCoord1.z,0.0,1.0);
     vec4 eye = gl_ModelViewMatrix * vertex;
     gl_Position = gl_ProjectionMatrix * eye;
     vColor = gl_Color;
@@ -33,6 +31,4 @@ void main() {
     vNormalView = normalize(gl_NormalMatrix * gl_Normal);
     vWorldPos = (gbufferModelViewInverse * eye).xyz + vec3(cameraPosition.x,0.0,cameraPosition.z);
     vWaveWeight=clamp(gl_MultiTexCoord1.z,0.0,1.0);
-    vWaveX = wx;
-    vWaveZ = wz;
 }

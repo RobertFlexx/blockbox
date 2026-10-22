@@ -41,7 +41,7 @@ vec3 rayDir(float depth) {
 }
 
 float sceneShadow(vec3 world) {
-    return shadowCompare(shadowtex0, world, cameraPosition, shadowModelView, shadowProjection, 0.0016);
+    return shadowCompare(shadowtex0, world, cameraPosition, shadowModelView, shadowProjection, 0.025/(7.0*max(shadowDistance,32.0)));
 }
 
 // rgb is the reflection, a is how much of it came from an actual on-screen hit.
@@ -107,12 +107,13 @@ vec4 planarReflect(vec3 world,vec3 worldN,vec3 reflectedDir) {
     vec2 edge=smoothstep(vec2(0.0),vec2(0.018),min(uv,1.0-uv));
     float confidence=edge.x*edge.y;
     // Mipmapped, premultiplied coverage keeps cutout canopies stable in the mirror.
-    vec2 px=1.0/planarSize;
-    vec4 p=texture2D(planarReflection,sat2(uv),0.65)*0.4;
-    p+=texture2D(planarReflection,sat2(uv+vec2(px.x,0.0)),0.65)*0.15;
-    p+=texture2D(planarReflection,sat2(uv-vec2(px.x,0.0)),0.65)*0.15;
-    p+=texture2D(planarReflection,sat2(uv+vec2(0.0,px.y)),0.65)*0.15;
-    p+=texture2D(planarReflection,sat2(uv-vec2(0.0,px.y)),0.65)*0.15;
+    vec2 px=0.65/planarSize;
+    float mip=mix(0.0,0.7,smoothstep(15.0,100.0,length(world-cameraPosition)));
+    vec4 p=texture2D(planarReflection,sat2(uv),mip)*0.56;
+    p+=texture2D(planarReflection,sat2(uv+vec2(px.x,0.0)),mip)*0.11;
+    p+=texture2D(planarReflection,sat2(uv-vec2(px.x,0.0)),mip)*0.11;
+    p+=texture2D(planarReflection,sat2(uv+vec2(0.0,px.y)),mip)*0.11;
+    p+=texture2D(planarReflection,sat2(uv-vec2(0.0,px.y)),mip)*0.11;
     vec3 skyCol=vec3(0.0);
     if(p.a<0.999) {
         skyCol=atmosphere(reflectedDir,sunPosition,sunBrightness,rainStrength,uTime);
@@ -202,9 +203,16 @@ void main() {
                 vec2 fallbackUv=sat2(vUv+viewN.xy*min(thickness,6.0)*0.0025);
                 if (texture2D(depthtex0,fallbackUv).r<waterDepth) fallbackUv=vUv;
                 vec2 sampleUv=hit.x>=0.0 ? sat2(hit) : fallbackUv;
+                if(hit.x>=0.0) {
+                    float hitZ=linearDepth(texture2D(depthtex0,sampleUv).r,near,far);
+                    // A coarse screen-space ray can step past a thin swimmer and
+                    // hit the bottom. Preserve the nearest opaque silhouette at
+                    // such depth discontinuities instead of erasing its body.
+                    if(abs(hitZ-opaqueZ)>max(0.4,thickness*0.15)) sampleUv=fallbackUv;
+                }
                 transmitted=texture2D(colortex0,sampleUv).rgb;
-                vec3 absorb=exp(-vec3(0.38,0.085,0.035)*thickness);
-                transmitted=transmitted*absorb+vec3(0.003,0.075,0.095)*(0.035+0.965*daylightAmount(sun))*(1.0-absorb);
+                vec3 absorb=exp(-vec3(0.20,0.055,0.026)*thickness);
+                transmitted=transmitted*absorb+vec3(0.002,0.026,0.038)*(0.035+0.965*daylightAmount(sun))*(1.0-absorb);
                 float ripple=sin(waterWorld.x*1.7+uTime*1.4)*sin(waterWorld.z*1.35-uTime*0.9);
                 float sh=sceneShadow(waterWorld);
                 if (rtActive==1) sh=sat(texture2D(rtVolume,vUv).a);
@@ -218,20 +226,31 @@ void main() {
             float sunUp=smoothstep(-0.04,0.08,sun.y);
             float sh=sceneShadow(waterWorld);
             if (rtActive==1) sh=sat(texture2D(rtVolume,vUv).a);
+            // GGX with derivative-based slope variance prevents subpixel glints
+            // from turning into fireflies as the camera moves across the lake.
+            sh*=cloudTransmittance(waterWorld,sun,uTime,storm);
             vec3 H=normalize(sunView+toEye+vec3(0.0,0.00001,0.0));
-            float spec=pow(sat(dot(viewN,H)),220.0)*sunUp*sh*(1.0-storm*0.88);
-            color+=sunlightColor(sun)*spec*4.0;
-            float path=pow(sat(dot(normalize(reflDir),sun)),80.0);
-            color+=sunlightColor(sun)*path*sunUp*sh*fres*0.55;
+            float nv=max(dot(viewN,toEye),0.001),nl=max(dot(viewN,sunView),0.0);
+            float nh=sat(dot(viewN,H)),vh=sat(dot(toEye,H));
+            float slope=length(fwidth(viewN));
+            float alpha=clamp(sqrt(0.000064+slope*slope*0.25),0.008,0.18);
+            float a2=alpha*alpha,denom=nh*nh*(a2-1.0)+1.0;
+            float D=a2/(3.14159265*denom*denom);
+            float gv=2.0*nv/(nv+sqrt(a2+(1.0-a2)*nv*nv));
+            float gl=2.0*nl/max(nl+sqrt(a2+(1.0-a2)*nl*nl),0.00001);
+            float F=0.02037+0.97963*pow(1.0-vh,5.0);
+            float spec=min(D*gv*gl*F/(4.0*nv),32.0)*sunUp*sh*(1.0-storm*0.88);
+            color+=sunlightColor(sun)*spec;
             vec3 moonH=normalize(-sunView+toEye+vec3(0.0,0.00001,0.0));
-            color+=vec3(0.16,0.34,0.5)*pow(sat(dot(viewN,moonH)),280.0)*nightAmount(sun)*(1.0-storm);
+            color+=vec3(0.10,0.23,0.36)*pow(sat(dot(viewN,moonH)),600.0)*nightAmount(sun)*(1.0-storm);
+
         }
     }
 
     if (isEyeInWater==0 && (!sky || water)) {
         float dist=min(surfaceDist,600.0);
         float low=goldenHour(sun);
-        float density=mix(0.0015,0.0042,low)+storm*0.005;
+        float density=mix(0.00075,0.0032,low)+storm*0.005;
         float heightFog=exp(-max(cameraPosition.y-45.0,0.0)*0.012);
         float haze=1.0-exp(-dist*density*heightFog);
         vec3 aerial=skyScattering(rd,sun,storm);

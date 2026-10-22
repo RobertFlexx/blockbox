@@ -60,12 +60,12 @@ object PresentationTest:
       assert(shaft.y<0 && shaft.y> -0.45f,"tools angle down ahead of the grip instead of lying flat across it")
       val normal=rotate(rotate(Vec3(0,0,1),attachment.rotation),Vec3(36,0,0))
       assert(abs(normal.y)<0.01f,"the tool's broad face stays vertical in the resting hand")
-    val pickPose=FirstPersonPose.itemPose(Block.DiamondPickaxe,0,0,0,0,1)
-    val swordPose=FirstPersonPose.itemPose(Block.DiamondSword,0,0,0,0,1)
+    val pickPose=FirstPersonPose.itemPose(Block.DiamondPickaxe,0,0,1)
+    val swordPose=FirstPersonPose.itemPose(Block.DiamondSword,0,0,1)
     assert(swordPose==pickPose,"all tools share the same hand/display basis")
     assert(pickPose.position==Vec3(0.56f,-0.52f,-0.72f) && pickPose.attack==Vec3(0,45,0),"vanilla item arm at rest")
-    assert(FirstPersonPose.itemPose(Block.Torch,0,0,0,0,1).display==FirstPersonPose.generatedDisplay)
-    assert(FirstPersonPose.itemPose(Block.Stone,0,0,0,0,1).display==FirstPersonPose.blockDisplay)
+    assert(FirstPersonPose.itemPose(Block.Torch,0,0,1).display==FirstPersonPose.generatedDisplay)
+    assert(FirstPersonPose.itemPose(Block.Stone,0,0,1).display==FirstPersonPose.blockDisplay)
     // At rest the attack transform cancels, so the sprite sits at position + display.
     def onSprite(x: Float,y: Float): Vec3 =
       val d=pickPose.display
@@ -73,20 +73,20 @@ object PresentationTest:
     val handleEnd=onSprite(0.1f,0.1f); val head=onSprite(0.9f,0.9f)
     assert(head.y>handleEnd.y+0.5f,"the tool rises from the bottom of the screen")
     assert(head.x/ -head.z > handleEnd.x/ -handleEnd.z,"it leans outward as it rises, as in Minecraft")
-    val hand=FirstPersonPose.handPose(0,0,0,0,1)
+    val hand=FirstPersonPose.handPose(0,0,1)
     assert(hand.position==Vec3(0.64f,-0.6f,-0.72f) && hand.yaw==45f && hand.roll==0f,"vanilla bare arm at rest")
-    val lowered=FirstPersonPose.itemPose(Block.IronPickaxe,0,0,0,0,0)
+    val lowered=FirstPersonPose.itemPose(Block.IronPickaxe,0,0,0)
     assert(lowered.position.y<pickPose.position.y-0.5f,"equip animation lowers the whole item out of view")
-    assert(FirstPersonPose.handPose(0,0,0,0,0).position.y<hand.position.y-0.5f,"and the bare arm")
+    assert(FirstPersonPose.handPose(0,0,0).position.y<hand.position.y-0.5f,"and the bare arm")
     for block <- Seq(Block.Stone,Block.Torch,Block.IronPickaxe); kick <- Seq(0f,0.25f,0.6f,1f); blocked <- Seq(0f,0.5f,1f) do
-      val pose=FirstPersonPose.itemPose(block,kick,1.5f,1f,blocked,1f)
-      val arm=FirstPersonPose.handPose(kick,1.5f,1f,blocked,1f)
+      val pose=FirstPersonPose.itemPose(block,kick,blocked,1f)
+      val arm=FirstPersonPose.handPose(kick,blocked,1f)
       assert(pose.position.z < -0.55f && arm.position.z < -0.55f && pose.attack.x.isFinite && arm.yaw.isFinite)
     val open=FirstPersonPose.obstruction(Vec3(0.5f,41.6f,2.5f),0,0,(_,_,_) => Block.Air)
     val wall=FirstPersonPose.obstruction(Vec3(0.5f,41.6f,2.5f),0,0,(_,_,z) => if z==1 then Block.Stone else Block.Air)
     val side=FirstPersonPose.obstruction(Vec3(0.5f,41.6f,2.5f),0,0,(x,_,_) => if x==1 then Block.Stone else Block.Air)
     assert(open==0 && wall>0.9f && side>0.9f,"front and side walls retract the hand")
-    val free=FirstPersonPose.itemPose(Block.Stone,0,0,0,0,1); val close=FirstPersonPose.itemPose(Block.Stone,0,0,0,1,1)
+    val free=FirstPersonPose.itemPose(Block.Stone,0,0,1); val close=FirstPersonPose.itemPose(Block.Stone,0,1,1)
     assert(close.position.z>free.position.z && close.position.y<free.position.y,"obstruction pulls the complete rig toward the camera and down")
 
   def atmosphere(): Unit =

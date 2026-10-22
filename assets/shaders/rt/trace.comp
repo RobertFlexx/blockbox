@@ -76,7 +76,7 @@ float daylightAmount(vec3 sun) { return smoothstep(-0.15, 0.12, sun.y); }
 float nightAmount(vec3 sun) { return 1.0-smoothstep(-0.16, 0.01, sun.y); }
 float goldenHour(vec3 sun) { return exp(-pow((sun.y-0.035)*4.4,2.0)); }
 vec3 sunlightColor(vec3 sun) {
-    return mix(vec3(1.65,1.68,1.72),vec3(1.65,0.59,0.18),goldenHour(sun));
+    return mix(vec3(1.90,1.82,1.65),vec3(1.82,0.65,0.22),goldenHour(sun));
 }
 vec3 skyScattering(vec3 dir,vec3 sun,float storm) {
     float day=daylightAmount(sun);
@@ -167,14 +167,14 @@ void main() {
         vec3 world = worldFromView(view);
         vec3 viewN = normalize(g.rgb * 2.0 - 1.0);
         vec3 worldN = normalize(mat3(frame.invView) * viewN);
-        vec3 origin = world + worldN * 0.08;
+        vec3 origin = world + worldN * 0.025;
 
         float vis = 0.0;
         vec3 tangent = normalize(abs(sun.y) < 0.95 ? cross(sun, vec3(0.0, 1.0, 0.0)) : cross(sun, vec3(1.0, 0.0, 0.0)));
         vec3 bitangent = cross(sun, tangent);
         for (int i = 0; i < 4; i++) {
             float a = hashF(seed + uint(i) * 13u) * 6.2831853;
-            float r = sqrt(hashF(seed + uint(i) * 29u)) * 0.045;
+            float r = sqrt(hashF(seed + uint(i) * 29u)) * 0.00465;
             vec3 dir = normalize(sun + (tangent * cos(a) + bitangent * sin(a)) * r);
             vis += occluded(origin, dir, 220.0) ? 0.0 : 1.0;
         }

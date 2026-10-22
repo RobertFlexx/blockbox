@@ -12,17 +12,27 @@ object FirstPersonPose:
   /** The bare arm's offset and swing; the fixed vanilla arm chain follows it. */
   final case class HandPose(position: Vec3, yaw: Float, roll: Float)
 
+  final case class WalkPose(position: Vec3,pitch: Float,roll: Float)
+
+  /** Vanilla's side-to-side roll and twice-per-stride vertical motion, applied
+    * once to the complete hand/item frame. The world camera remains stable. */
+  def walkPose(phase: Float,amount: Float): WalkPose =
+    val weight=amount.max(0f).min(1.15f)
+    val side=sin(phase).toFloat
+    WalkPose(Vec3(side*0.035f*weight,-abs(cos(phase).toFloat)*0.028f*weight,0),
+      abs(cos(phase-0.2f).toFloat)*0.65f*weight,side*0.85f*weight)
+
   private def swingProgress(kick: Float): Float = if kick>0 then 1f-kick.max(0).min(1) else 0f
 
-  /** Vanilla renderPlayerArm, plus a small walk bob and wall retraction.
+  /** Vanilla renderPlayerArm and wall retraction. Walking uses the shared WalkPose.
     * @param equip 0 while the hand is fully lowered for an item switch, 1 when raised */
-  def handPose(kick: Float,bobPhase: Float,bob: Float,obstruction: Float,equip: Float): HandPose =
+  def handPose(kick: Float,obstruction: Float,equip: Float): HandPose =
     val progress=swingProgress(kick)
     val root=sqrt(progress).toFloat
     val blocked=obstruction.max(0).min(1)
     val lowered=1f-equip.max(0).min(1)
-    HandPose(Vec3(0.64f-0.3f*sin(root*Pi).toFloat+sin(bobPhase).toFloat*0.012f*bob,
-      -0.6f+0.4f*sin(root*2*Pi).toFloat-lowered*0.6f-blocked*0.08f+sin(bobPhase*2).toFloat*0.008f*bob,
+    HandPose(Vec3(0.64f-0.3f*sin(root*Pi).toFloat,
+      -0.6f+0.4f*sin(root*2*Pi).toFloat-lowered*0.6f-blocked*0.08f,
       -0.72f-0.4f*sin(progress*Pi).toFloat+blocked*0.06f),
       45f+70f*sin(root*Pi).toFloat,-20f*sin(progress*progress*Pi).toFloat)
 
@@ -49,15 +59,15 @@ object FirstPersonPose:
   /** Vanilla applyItemArmTransform and applyItemArmAttackTransform, then the held
     * thing's display transform. Item sprites and the torch are centered on (0.5, 0.5)
     * after it, blocks are a centered unit cube; no arm is drawn, as in Minecraft. */
-  def itemPose(item: Block,kick: Float,bobPhase: Float,bob: Float,obstruction: Float,equip: Float): ItemPose =
+  def itemPose(item: Block,kick: Float,obstruction: Float,equip: Float): ItemPose =
     val progress=swingProgress(kick)
     val root=sqrt(progress).toFloat
     val swing=sin(root*Pi).toFloat
     val squared=sin(progress*progress*Pi).toFloat
     val blocked=obstruction.max(0).min(1)
     val lowered=1f-equip.max(0).min(1)
-    ItemPose(Vec3(0.56f-0.4f*swing+sin(bobPhase).toFloat*0.012f*bob,
-      -0.52f+0.2f*sin(root*2*Pi).toFloat-lowered*0.6f-blocked*0.08f+sin(bobPhase*2).toFloat*0.008f*bob,
+    ItemPose(Vec3(0.56f-0.4f*swing,
+      -0.52f+0.2f*sin(root*2*Pi).toFloat-lowered*0.6f-blocked*0.08f,
       -0.72f-0.2f*sin(progress*Pi).toFloat+blocked*0.06f),
       Vec3(-80f*swing,45f-20f*squared,-20f*swing),
       if Block.isItem(item) || item==Block.Torch then generatedDisplay else blockDisplay)

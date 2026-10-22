@@ -53,7 +53,7 @@ void main() {
     float flicker=0.975+0.025*sin(uTime*9.0+vUv.x*41.0);
     color=mix(color,pow(texel.rgb,vec3(2.2))*vec3(4.0,2.2,0.75)*flicker,vEmission);
     direct*=1.0-vEmission;
-    if(bbPlanarPass!=0) color=mix(reflectedSurface(ambient,direct,vWorldPos,n,sun),color,vEmission);
+    if(bbPlanarPass!=0) color=mix(reflectedSurface(ambient,direct,vWorldPos,n,sun,uTime,rainStrength),color,vEmission);
     if (isEyeInWater!=0) {
         float waves=sin((vWorldPos.x+vWorldPos.z)*1.57+uTime*0.8)+sin((vWorldPos.x-vWorldPos.z)*0.78-uTime*0.65);
         float caustic=pow(max(1.0-abs(waves)*2.4,0.0),6.0);

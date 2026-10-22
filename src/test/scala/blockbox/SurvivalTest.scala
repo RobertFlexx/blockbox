@@ -1,5 +1,7 @@
 package blockbox
 
+import scala.math.*
+
 import java.io.*
 import scala.collection.mutable
 
@@ -93,6 +95,48 @@ object SurvivalTest:
     val quarry=ZombieSystem.Target("Quarry",Vec3(0.5f,2.62f,-7))
     for _ <- 0 until 340 do ZombieSystem.update(hunter,0.05f,Seq(quarry),false,false,barricade)
     assert(hunter.pos.z< -5.5f && !ZombieSystem.collides(hunter.pos,barricade),s"zombies navigate around a tall barricade: ${hunter.pos}")
+    // A moving target changes heading without instantaneous grid-aligned turns.
+    val smooth=ZombieSystem.Zombie(40,Vec3(0.5f,1,0.5f))
+    var previousVelocity=Vec3(0,0,0)
+    for i <- 0 until 180 do
+      val before=smooth.pos; val yaw=smooth.yaw
+      val target=ZombieSystem.Target("Moving",Vec3(5f+sin(i*0.015).toFloat*2f,2.62f,-8))
+      ZombieSystem.update(smooth,1f/60f,Seq(target),false,false,floor)
+      val velocity=(smooth.pos-before)*60f
+      assert(sqrt((velocity-previousVelocity).lengthSquared)<0.4f,"steering accelerates continuously")
+      assert(abs(smooth.yaw-yaw)<=3.01f,"heading changes are bounded independently of waypoints")
+      previousVelocity=velocity
+    // A deep lake has no nearby solid support. Zombies must rise, settle with
+    // their heads above water, and continue pursuing across its surface.
+    def lake(x: Int,y: Int,z: Int): Block = if y<=0 then Block.Stone else if y<=4 then Block.Water else Block.Air
+    for step <- Seq(1f/30f,1f/60f,1f/120f) do
+      val swimmer=ZombieSystem.Zombie(41,Vec3(0.5f,1,0.5f))
+      val target=ZombieSystem.Target("Swimmer",Vec3(0.5f,5.37f,-15))
+      var low=Float.MaxValue; var high=Float.MinValue
+      for i <- 0 until (9f/step).toInt do
+        val before=swimmer.pos
+        ZombieSystem.update(swimmer,step,Seq(target),true,false,lake)
+        assert(!ZombieSystem.collides(swimmer.pos,lake),"swimming respects body collisions")
+        assert((swimmer.pos-before).lengthSquared<0.025f,"buoyancy never teleports a swimmer")
+        if i*step>6f then {low=low.min(swimmer.pos.y);high=high.max(swimmer.pos.y)}
+      assert(abs(swimmer.pos.y-3.75f)<0.025f && high-low<0.035f,s"stable waterline at $step: $low..$high")
+      assert(swimmer.pos.z< -8f && swimmer.swimming>0.98f && swimmer.burning==0,"surface pursuit and swimming animation")
+    val flowing=ZombieSystem.waterSurface(Vec3(0.5f,3.5f,0.5f),lake,(_,_,_) => 2).get
+    assert(abs(flowing-(4f+WaterSurface.height(2)))<0.001f,"buoyancy uses flowing-water surface heights")
+    def shore(x: Int,y: Int,z: Int): Block =
+      if y<=0 || z< -4 && y<=4 then Block.Stone else if y<=4 then Block.Water else Block.Air
+    val climber=ZombieSystem.Zombie(42,Vec3(0.5f,3.75f,0.5f))
+    val bank=ZombieSystem.Target("Bank",Vec3(0.5f,6.62f,-9))
+    for _ <- 0 until 500 do ZombieSystem.update(climber,0.02f,Seq(bank),false,false,shore)
+    assert(climber.pos.z< -6f && climber.pos.y>=4.99f,s"swimmers climb a one-block shore: ${climber.pos}")
+    def roof(x: Int,y: Int,z: Int): Block = if y==4 then Block.Stone else lake(x,y,z)
+    val enclosed=ZombieSystem.Zombie(43,Vec3(0.5f,1,0.5f))
+    for _ <- 0 until 300 do
+      ZombieSystem.update(enclosed,0.02f,Seq.empty,false,false,roof)
+      assert(!ZombieSystem.collides(enclosed.pos,roof),"buoyancy cannot push a zombie through a ceiling")
+    val crowd=(0 until 20).map(i => ZombieSystem.Zombie(100+i,Vec3(0.5f,1,0.5f)))
+    ZombieSystem.separate(crowd,floor,1f/60f)
+    assert(crowd.forall(z => (z.pos-Vec3(0.5f,1,0.5f)).lengthSquared<=0.00014f),"crowd separation is bounded per frame, including dense groups")
     hunter.heldItem=Block.DiamondSword
     assert(ZombieSystem.parseSnapshot(ZombieSystem.snapshot(Seq(hunter))).head._7==Block.DiamondSword,"equipment survives mob synchronization and persistence")
     assert(ZombieSystem.parseSnapshot("MOBS|1,0,1,0,0,20,0,0").head._7==Block.Air,"older mob saves remain readable")
