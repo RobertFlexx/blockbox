@@ -58,12 +58,20 @@ the submerged portion of a character takes the water's color.
 
 Zombies spawn away from players in unlit caves and outside at night. Place torches
 to protect your base and mine. A coal item above a stick makes four torches. Zombies
-approach with their arms out, can climb a block by jumping, and attack at close range.
+approach with their arms out, route around walls, jump up a block, avoid dangerous
+drops and cactus, and attack at close range. They remember the last place they saw
+you for six seconds and can hear nearby players behind cover. They spread out when
+crowded and search again when a route is blocked.
 Attack with left click; swords deal the most damage. Defeated zombies drop coal, with
 a small chance of an iron ingot. Exposed daylight ignites them; roofs, rain and water
 protect them from the sun. Damage briefly flashes their skin red. Their groans,
 attacks, pain and deaths use recorded monster voice performances, with distance,
 stereo positioning, and muffling through walls or water.
+
+Eight percent spawn carrying a tool or weapon. All sixteen tools are possible;
+wood and stone are more common than iron and diamond. Armed zombies hit harder and
+have a fifteen percent chance to drop their equipment when defeated. Their held
+items, damage flashes, movement and voices are synchronized in multiplayer.
 
 Players can fight in multiplayer with left click. Aim within three and a half blocks;
 solid walls block attacks, and hits have a half-second cooldown. Swords do more damage
@@ -74,5 +82,5 @@ The inventory has a live character preview, nine-column storage, the crafting gr
 and the hotbar. The creative catalog has category tabs and a search field; click an
 item, then a hotbar slot to equip its stack. Right click a catalog hotbar slot to clear it.
 
-Multiplayer uses protocol **7**. All players need this version. The host controls
+Multiplayer uses protocol **8**. All players need this version. The host controls
 zombie movement, spawning, attacks and drops; held tools and blocks are synchronized.

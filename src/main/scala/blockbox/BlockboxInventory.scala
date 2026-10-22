@@ -33,6 +33,8 @@ trait BlockboxInventory:
   protected def totalItemCount(block: Block): Int
   protected def consumeInventory(block: Block, amount: Int): Boolean
   protected def gainItem(block: Block, amount: Int): Unit
+  /** Progress tracking for items that reach the inventory without gainItem. */
+  protected def noteCollected(block: Block, amount: Int): Unit
 
   protected def smeltableInputs: Array[Block] = InventoryModel.smeltableInputs
   protected def fuelBlocks: Array[Block] = InventoryModel.fuelBlocks
@@ -213,6 +215,44 @@ trait BlockboxInventory:
       backpackBlocks(slot) = heldInventoryBlock; backpackCounts(slot) = heldInventoryCount
       setHeldItem(oldBlock, oldCount, fromHotbar = true); syncInventoryTotalsFromBackpack()
 
+  private type SlotRef = (Array[Block], Array[Int], Int)
+  private def slotRefs(blocks: Array[Block], counts: Array[Int]): IndexedSeq[SlotRef] = blocks.indices.map(i => (blocks, counts, i))
+  private def hotbarSlots = slotRefs(hotbarBlocks, hotbarCounts)
+  private def backpackSlots = slotRefs(backpackBlocks, backpackCounts)
+
+  /** Minecraft's moveItemStackTo: top up matching stacks, then fill empty slots, in order. */
+  private def moveInto(block: Block, amount: Int, targets: Seq[SlotRef]): Int =
+    var remaining = amount
+    for (blocks, counts, i) <- targets do
+      if remaining > 0 && blocks(i) == block && counts(i) > 0 && counts(i) < maxStackSize then
+        val moved = remaining.min(maxStackSize - counts(i)); counts(i) += moved; remaining -= moved
+    for (blocks, counts, i) <- targets do
+      if remaining > 0 && (blocks(i) == Block.Air || counts(i) <= 0) then
+        val moved = remaining.min(maxStackSize); blocks(i) = block; counts(i) = moved; remaining -= moved
+    amount - remaining
+
+  /** Shift-click (survival): the slot's whole stack moves to the other section, as far as
+    * it fits; the cursor stack is left alone. */
+  private def quickMove(blocks: Array[Block], counts: Array[Int], slot: Int, targets: Seq[SlotRef]): Unit =
+    val block = blocks(slot); val count = counts(slot)
+    if gameMode == GameMode.Survival && validHotbarBlock(block) && count > 0 then
+      val moved = moveInto(block, count, targets)
+      counts(slot) -= moved
+      if counts(slot) <= 0 then
+        blocks(slot) = Block.Air; counts(slot) = 0
+      if moved > 0 then
+        syncInventoryTotalsFromBackpack(); compactHotbarAssignments()
+
+  protected def quickMoveHotbar(slot: Int): Unit = quickMove(hotbarBlocks, hotbarCounts, slot, backpackSlots)
+  protected def quickMoveBackpack(slot: Int): Unit = quickMove(backpackBlocks, backpackCounts, slot, hotbarSlots)
+  protected def quickMoveCraft(slot: Int): Unit = quickMove(craftGridBlocks, craftGridCounts, slot, backpackSlots ++ hotbarSlots)
+
+  /** Creative shift-click: a full stack into the first free hotbar slot, as from Minecraft's creative tabs. */
+  protected def creativeQuickGive(block: Block): Unit =
+    val slot = hotbarBlocks.indexWhere(b => !validHotbarBlock(b))
+    if validHotbarBlock(block) && !hotbarBlocks.contains(block) && slot >= 0 then
+      hotbarBlocks(slot) = block; hotbarCounts(slot) = maxStackSize
+
   protected def hotbarItemCount(block: Block): Int =
     if !validHotbarBlock(block) then 0
     else
@@ -329,19 +369,31 @@ trait BlockboxInventory:
       ok
     }
 
-  protected def tryCraftGrid(): Unit =
+  /** @param all shift-click: craft until an ingredient or inventory room runs out. Like
+    * Minecraft, those results fill the hotbar from the right, then the backpack from the end. */
+  protected def tryCraftGrid(all: Boolean = false): Unit =
+    val quick = all && gameMode == GameMode.Survival
     currentCraftingResult match
       case Some(recipe) if canCraftCurrent(recipe) =>
-        if gameMode == GameMode.Survival then
-          var i = 0
-          while i < craftGridBlocks.length do
-            if craftGridBlocks(i) != Block.Air then
-              craftGridCounts(i) -= 1
-              if craftGridCounts(i) <= 0 then
-                craftGridBlocks(i) = Block.Air
-                craftGridCounts(i) = 0
-            i += 1
-        gainItem(recipe.output, recipe.outputCount); playPlaceSound()
+        var crafting = true
+        while crafting do
+          if gameMode == GameMode.Survival then
+            var i = 0
+            while i < craftGridBlocks.length do
+              if craftGridBlocks(i) != Block.Air then
+                craftGridCounts(i) -= 1
+                if craftGridCounts(i) <= 0 then
+                  craftGridBlocks(i) = Block.Air
+                  craftGridCounts(i) = 0
+              i += 1
+          if quick then
+            moveInto(recipe.output, recipe.outputCount, (backpackSlots ++ hotbarSlots).reverse)
+            noteCollected(recipe.output, recipe.outputCount)
+          else gainItem(recipe.output, recipe.outputCount)
+          crafting = quick && currentCraftingResult.contains(recipe) && canCraftCurrent(recipe)
+        if quick then
+          syncInventoryTotalsFromBackpack(); compactHotbarAssignments()
+        playPlaceSound()
       case Some(_) => addChatMessage("Missing crafting ingredients")
       case None => addChatMessage("No matching recipe")
 

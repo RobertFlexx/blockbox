@@ -73,11 +73,13 @@ final class BlockboxShaderPipeline(rootDir: File,launchPack: Option[String]=Opti
   private var failedPackName = ""
   private var failedSourceStamp = Long.MinValue
 
-  // HDR scene + depth and two color-only ping-pong targets. Geometry is rendered
-  // exactly once into sceneFbo. Every additional effect is a fullscreen GPU pass.
+  // HDR scene + depth and color-only ping-pong targets. Flat water additionally
+  // captures the mirrored scene at half resolution, with filtered cutout coverage.
   private var sceneFbo = 0
   private var sceneColor = 0
   private var sceneDepth = 0
+  private var waterTestDepth = 0
+  private var waterDepthBound = false
   private var sceneNormal = 0
   private var sceneMaterial = 0
   // Iris-style post processing keeps an alternate texture for every logical
@@ -89,6 +91,17 @@ final class BlockboxShaderPipeline(rootDir: File,launchPack: Option[String]=Opti
   private var targetW = 0
   private var targetH = 0
   private var sceneBound = false
+  private var reflectionFbo = 0
+  private var reflectionColor = 0
+  private var reflectionDepth = 0
+  private var reflectionBound = false
+  private var reflectionReady = false
+  private var reflectionHeight = 0f
+  private val reflectionModelView = identityMatrix()
+  private val reflectionModelViewInverse = identityMatrix()
+  private val reflectionClipPlane = BufferUtils.createDoubleBuffer(4)
+  def isReflectionBound: Boolean = reflectionBound
+  def hasWaterReflection: Boolean = reflectionReady
 
   // Directional Minecraft-style shadow pass. Two shadowcolor attachments are exposed
   // and one depth map is aliased as both shadowtex0/1 for broad pack compatibility.
@@ -124,12 +137,28 @@ final class BlockboxShaderPipeline(rootDir: File,launchPack: Option[String]=Opti
   def setAntialiasing(enabled: Boolean): Unit = antialiasing = enabled
   private var nightShading = true
   def setNightShading(enabled: Boolean): Unit = nightShading = enabled
+  private var rayTracing = false
+  private var volumetricClouds = false
+  private var linearLighting = false
+  private var planarReflections = false
+  def needsWaterReflection: Boolean = planarReflections
+  private var waterSurfaceY=0f
+  def setWaterSurface(y: Float): Unit = waterSurfaceY=y
+  private var rayFrameReady = false
+  /** The active pack asked for the hardware ray-tracing pass. */
+  def rayTracingEnabled: Boolean = rayTracing
+  /** The pack draws its own clouds, so the block cloud layer should stay out of the way. */
+  def rendersVolumetricClouds: Boolean = volumetricClouds && activePackName.nonEmpty
+  /** Fixed-function entities must supply linear colour while drawing into HDR packs. */
+  def linearSceneLighting: Boolean = linearLighting && (sceneBound || reflectionBound)
+  def updateRayGeometry(chunks: Iterable[Chunk]): Unit =
+    if rayTracing then BlockboxRayTrace.updateWorld(chunks, cameraPos._1, cameraPos._3)
   private var lightEnvironment = BlockboxLightmap.Environment.Noon
   /** Dusk tint, weather and torch flicker for this frame's lightmap. */
   def setLightEnvironment(environment: BlockboxLightmap.Environment): Unit = lightEnvironment = environment
 
   /** The compatibility renderer uses the same block/sky lightmap as shader packs. */
-  def beginCompatibilityLighting(day: Float): Unit =
+  def beginCompatibilityLighting(day: Float,eyeY: Float = Float.NaN,surfaceY: Float = Float.NaN): Unit =
     if lightmapTexture==0 then lightmapTexture=createLightmapTexture()
     updateLightmapTexture(day)
     glActiveTexture(GL_TEXTURE1)
@@ -137,8 +166,10 @@ final class BlockboxShaderPipeline(rootDir: File,launchPack: Option[String]=Opti
     glTexEnvi(GL_TEXTURE_ENV,GL_TEXTURE_ENV_MODE,GL_MODULATE)
     glMatrixMode(GL_TEXTURE); glLoadIdentity(); glTranslatef(0.03125f,0.03125f,0f); glScalef(1f/256f,1f/256f,1f)
     glMatrixMode(GL_MODELVIEW); glActiveTexture(GL_TEXTURE0)
+    UnderwaterFog.begin(eyeY,surfaceY)
 
   def endCompatibilityLighting(): Unit =
+    UnderwaterFog.end()
     glActiveTexture(GL_TEXTURE1); glDisable(GL_TEXTURE_2D); glBindTexture(GL_TEXTURE_2D,0)
     glMatrixMode(GL_TEXTURE); glLoadIdentity(); glMatrixMode(GL_MODELVIEW)
     glActiveTexture(GL_TEXTURE0)
@@ -210,7 +241,7 @@ final class BlockboxShaderPipeline(rootDir: File,launchPack: Option[String]=Opti
   /** An explicit UI selection overrides the launch default for this session. */
   def selectPack(name: String): Boolean =
     if !availablePackNames.contains(name) then return false
-    if sceneBound || shadowPassBound then
+    if sceneBound || reflectionBound || shadowPassBound then
       pendingPackName=Some(name)
       return true
     val previous = selectedPackName
@@ -243,7 +274,7 @@ final class BlockboxShaderPipeline(rootDir: File,launchPack: Option[String]=Opti
       reload(force = true)
 
   def reloadIfChanged(now: Double): Unit =
-    if !sceneBound && !shadowPassBound && pendingPackName.nonEmpty then
+    if !sceneBound && !reflectionBound && !shadowPassBound && pendingPackName.nonEmpty then
       val next=pendingPackName.get
       pendingPackName=None
       selectPack(next)
@@ -270,6 +301,7 @@ final class BlockboxShaderPipeline(rootDir: File,launchPack: Option[String]=Opti
 
   /** Bind the offscreen scene target before Main clears and draws a 3D screen. */
   def prepareFrame(width: Int, height: Int): Boolean =
+    reflectionReady = false
     val scale = if foveaHook != null && foveaHook.enabled then foveaHook.internalScale else 1f
     frameWidth = (width * scale).round.max(1)
     frameHeight = (height * scale).round.max(1)
@@ -328,10 +360,35 @@ final class BlockboxShaderPipeline(rootDir: File,launchPack: Option[String]=Opti
       sceneDrawBuffers.rewind()
       glDrawBuffers(sceneDrawBuffers)
 
+  /** Preserve opaque depth for refraction while depth-testing water against its
+    * nearest interface. Copying on the GPU avoids order-dependent water aux data.
+    */
+  def beginWaterSurface(): Unit =
+    if sceneBound && waterTestDepth!=0 && !waterDepthBound then
+      val old=glGetInteger(GL_TEXTURE_BINDING_2D)
+      glBindTexture(GL_TEXTURE_2D,waterTestDepth)
+      glCopyTexSubImage2D(GL_TEXTURE_2D,0,0,0,0,0,frameWidth,frameHeight)
+      glBindTexture(GL_TEXTURE_2D,old)
+      glFramebufferTexture2D(GL_FRAMEBUFFER,GL_DEPTH_ATTACHMENT,GL_TEXTURE_2D,waterTestDepth,0)
+      waterDepthBound=true
+      glDepthMask(true)
+
+  def endWaterSurface(): Unit =
+    if waterDepthBound then
+      glFramebufferTexture2D(GL_FRAMEBUFFER,GL_DEPTH_ATTACHMENT,GL_TEXTURE_2D,sceneDepth,0)
+      waterDepthBound=false
+      glDepthMask(false)
+
   /** Run deferred/composite/final passes and return to the real framebuffer. */
   def finishFrame(width: Int, height: Int, time: Float): Unit =
     if !sceneBound then return
+    endWaterSurface()
     sceneBound = false
+    rayFrameReady = false
+    if rayTracing && sceneDepth != 0 then
+      val waterNormal = if gbufferCount > 3 then sceneExtraColors(0) else 0
+      val waterDepth = if gbufferCount > 4 then sceneExtraColors(1) else 0
+      rayFrameReady = BlockboxRayTrace.trace(rootDir, frameWidth, frameHeight, cameraPos, previousCameraPos, sunDir, daylight, rainAmount, worldTime, nearPlane, farPlane, projectionInverse, modelViewInverse, previousProjection, previousModelView, sceneDepth, sceneNormal, waterNormal, waterDepth)
 
     glDisable(GL_DEPTH_TEST)
     glDepthMask(false)
@@ -570,6 +627,63 @@ final class BlockboxShaderPipeline(rootDir: File,launchPack: Option[String]=Opti
 
   def setPass(pass: Int): Unit = usePass(pass)
 
+  /** A real mirrored view preserves off-screen trees and their alpha silhouettes.
+    * No water is drawn into this target; uncovered pixels keep zero coverage for
+    * the atmospheric sky fallback. Filtering the premultiplied coverage prevents
+    * distant leaves becoming a field of isolated screen-space ray hits.
+    */
+  def captureWaterReflection(height: Float)(draw: => Unit): Boolean =
+    if !sceneBound || !planarReflections || eyeInWater!=0 || !height.isFinite || cameraPos._2<=height || reflectionFbo==0 then return false
+    val savedCamera=cameraPos
+    copyMatrix(modelView,reflectionModelView)
+    copyMatrix(modelViewInverse,reflectionModelViewInverse)
+    reflectionBound=true; sceneBound=false
+    reflectionHeight=height
+    glMatrixMode(GL_MODELVIEW); glPushMatrix()
+    glPushAttrib(GL_ENABLE_BIT | GL_DEPTH_BUFFER_BIT | GL_COLOR_BUFFER_BIT | GL_VIEWPORT_BIT)
+    try
+      glBindFramebuffer(GL_FRAMEBUFFER,reflectionFbo)
+      glDrawBuffer(GL_COLOR_ATTACHMENT0)
+      glViewport(0,0,(targetW/2).max(1),(targetH/2).max(1))
+      glDepthMask(true); glEnable(GL_DEPTH_TEST); glDisable(GL_BLEND); glDisable(GL_FOG)
+      glClearColor(0,0,0,0); glClearDepth(1)
+      glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
+      glTranslatef(0,2f*height,0); glScalef(1,-1,1)
+      reflectionClipPlane.clear(); reflectionClipPlane.put(0).put(1).put(0).put(-height.toDouble).flip()
+      glClipPlane(GL_CLIP_PLANE0,reflectionClipPlane); glEnable(GL_CLIP_PLANE0)
+      cameraPos=(savedCamera._1,2f*height-savedCamera._2,savedCamera._3)
+      captureMatrix(GL_MODELVIEW_MATRIX,modelView); invertMatrix(modelView,modelViewInverse)
+      usePass(0)
+      draw
+      end()
+      glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D,reflectionColor)
+      glGenerateMipmap(GL_TEXTURE_2D)
+      reflectionReady=true
+      true
+    finally
+      glUseProgram(0); activeProgram=null
+      cameraPos=savedCamera
+      copyMatrix(reflectionModelView,modelView)
+      copyMatrix(reflectionModelViewInverse,modelViewInverse)
+      reflectionBound=false; sceneBound=true
+      glBindFramebuffer(GL_FRAMEBUFFER,sceneFbo)
+      glPopAttrib()
+      glMatrixMode(GL_MODELVIEW); glPopMatrix()
+      glViewport(0,0,targetW,targetH)
+      usePass(0)
+
+  def beginEntityLighting(): Boolean =
+    if !linearSceneLighting then false
+    else
+      enableGBufferWrites()
+      usePass(1)
+      if activeProgram!=null then set1i(activeProgram,"bbEntityPass",1)
+      true
+
+  def endEntityLighting(): Unit =
+    end()
+    enableColorOnlyWrites()
+
   def end(): Unit =
     if GL.getCapabilities.OpenGL20 then glUseProgram(0)
     activeProgram = null
@@ -579,7 +693,7 @@ final class BlockboxShaderPipeline(rootDir: File,launchPack: Option[String]=Opti
     glMatrixMode(GL_MODELVIEW)
     glActiveTexture(GL_TEXTURE0)
     resetCompatibilityTextureUnits()
-    if !sceneBound then commitPreviousFrame()
+    if !sceneBound && !reflectionBound then commitPreviousFrame()
 
   private def commitPreviousFrame(): Unit =
     copyMatrix(projection, previousProjection)
@@ -587,6 +701,8 @@ final class BlockboxShaderPipeline(rootDir: File,launchPack: Option[String]=Opti
     previousCameraPos = cameraPos
 
   def destroy(): Unit =
+    BlockboxRayTrace.destroy()
+    UnderwaterFog.destroy()
     liveProgramIds.foreach(id => if id != 0 then glDeleteProgram(id))
     if noiseTexture != 0 then glDeleteTextures(noiseTexture)
     if lightmapTexture != 0 then glDeleteTextures(lightmapTexture)
@@ -625,11 +741,14 @@ final class BlockboxShaderPipeline(rootDir: File,launchPack: Option[String]=Opti
     set3f(p, "uFogColor", fogR, fogG, fogB); set3f(p, "fogColor", fogR, fogG, fogB); set3f(p, "skyColor", fogR, fogG, fogB)
     set1f(p, "uFogStart", fogStart); set1f(p, "uFogEnd", fogEnd)
     set1f(p, "uDaylight", daylight); set1f(p, "sunBrightness", daylight)
+    set1f(p, "bbLightning", lightEnvironment.flash.max(0f).min(1f))
     set1f(p, "uNightDarkness", if nightShading then ((1f-daylight)/0.82f*0.65f).max(0f).min(0.65f) else 0f)
     set1f(p, "uTime", worldTime); set1f(p, "frameTimeCounter", worldTime % 3600f); set1f(p, "frameTime", frameTimeSeconds)
     set1i(p, "worldTime", minecraftTicks); set1i(p, "worldDay", worldDay)
     set1f(p, "rainStrength", rainAmount); set1f(p, "wetness", wetnessAmount); set1f(p, "screenBrightness", 1f); set1f(p, "nightVision", 0f); set1f(p, "blindness", 0f)
     set1i(p, "uPass", pass); set1i(p, "renderStage", pass)
+    set1i(p,"bbEntityPass",0)
+    set1i(p,"bbPlanarPass",if reflectionBound then 1 else 0)
     set1i(p, "frameCounter", (frameIndex % 720720L).toInt)
     set3f(p, "uSunDir", sunDir._1, sunDir._2, sunDir._3); set3f(p, "sunPosition", sunDir._1, sunDir._2, sunDir._3)
     set3f(p, "uMoonDir", moonDir._1, moonDir._2, moonDir._3); set3f(p, "moonPosition", moonDir._1, moonDir._2, moonDir._3)
@@ -638,6 +757,7 @@ final class BlockboxShaderPipeline(rootDir: File,launchPack: Option[String]=Opti
     set3f(p, "cameraPositionFract", cameraPos._1 - cix, cameraPos._2 - ciy, cameraPos._3 - ciz)
     set1f(p, "eyeAltitude", cameraPos._2)
     set1i(p, "isEyeInWater", eyeInWater)
+    set1f(p,"uWaterSurfaceY",waterSurfaceY)
     set2f(p, "eyeBrightness", 240f, (daylight.max(0.06f) * 240f).min(240f))
     set2f(p, "eyeBrightnessSmooth", 240f, (daylight.max(0.06f) * 240f).min(240f))
     set1i(p, "hideGUI", 0); set1i(p, "heldBlockLightValue", 0)
@@ -659,6 +779,11 @@ final class BlockboxShaderPipeline(rootDir: File,launchPack: Option[String]=Opti
     glActiveTexture(GL_TEXTURE0)
 
   private def applyPostUniforms(p: Program, width: Int, height: Int, time: Float): Unit =
+    if reflectionReady then bindTextureUniform(p,"planarReflection",7,reflectionColor)
+    set1i(p,"planarActive",if reflectionReady then 1 else 0)
+    set1f(p,"planarHeight",reflectionHeight)
+    set2f(p,"planarSize",(targetW/2).max(1).toFloat,(targetH/2).max(1).toFloat)
+    set1f(p,"uWaterSurfaceY",waterSurfaceY)
     set1i(p,"uAntialiasing",if antialiasing then 1 else 0)
     val phase = BlockboxSky.dayPhase(celestialTime)
     val minecraftTicks = ((phase * 24000f).toInt % 24000 + 24000) % 24000
@@ -675,6 +800,7 @@ final class BlockboxShaderPipeline(rootDir: File,launchPack: Option[String]=Opti
     set3f(p, "moonPosition", moonDir._1, moonDir._2, moonDir._3)
     set1f(p, "sunBrightness", daylight)
     set1f(p, "rainStrength", rainAmount); set1f(p, "wetness", wetnessAmount); set1f(p, "screenBrightness", 1f); set1f(p, "nightVision", 0f); set1f(p, "blindness", 0f)
+    set1f(p, "bbLightning", lightEnvironment.flash.max(0f).min(1f))
     set1f(p, "eyeAltitude", cameraPos._2)
     set1i(p, "isEyeInWater", eyeInWater)
     set2f(p, "eyeBrightness", 240f, (daylight.max(0.06f) * 240f).min(240f))
@@ -686,6 +812,17 @@ final class BlockboxShaderPipeline(rootDir: File,launchPack: Option[String]=Opti
     setMat4(p, "gbufferModelView", modelView); setMat4(p, "gbufferModelViewInverse", modelViewInverse)
     setMat4(p, "gbufferPreviousProjection", previousProjection); setMat4(p, "gbufferPreviousModelView", previousModelView)
     applyShadowUniforms(p)
+    applyRayUniforms(p)
+
+  private def applyRayUniforms(p: Program): Unit =
+    val lighting = if rayFrameReady then BlockboxRayTrace.lightingTexture else 0
+    val reflection = if rayFrameReady then BlockboxRayTrace.reflectionTexture else 0
+    val volume = if rayFrameReady then BlockboxRayTrace.volumeTexture else 0
+    if lighting != 0 then bindTextureUniform(p, "rtLighting", 13, lighting)
+    if reflection != 0 then bindTextureUniform(p, "rtReflection", 14, reflection)
+    if volume != 0 then bindTextureUniform(p, "rtVolume", 15, volume)
+    set1i(p, "rtActive", if rayFrameReady then 1 else 0)
+    set2f(p, "rtSize", BlockboxRayTrace.targetWidth.toFloat, BlockboxRayTrace.targetHeight.toFloat)
 
   private def applyShadowUniforms(p: Program): Unit =
     if shadowDepth != 0 then
@@ -812,7 +949,7 @@ final class BlockboxShaderPipeline(rootDir: File,launchPack: Option[String]=Opti
     glBindTexture(GL_TEXTURE_2D, 0)
 
   private def resetCompatibilityTextureUnits(): Unit =
-    var unit = math.min(maxTextureUnits - 1, 12)
+    var unit = math.min(maxTextureUnits - 1, 15)
     while unit >= 0 do
       glActiveTexture(GL_TEXTURE0 + unit)
       glBindTexture(GL_TEXTURE_2D, 0)
@@ -902,7 +1039,8 @@ final class BlockboxShaderPipeline(rootDir: File,launchPack: Option[String]=Opti
       val nextGbufferCount = discoverRequestedColorBufferCount(nextPackDir, built)
       val nextAlternateTargets = posts.flatMap(_.renderTargets.getOrElse(Array(0))).toSet
       val nextFormats = resolveColorFormats(nextPackDir)
-      if desiredGbufferCount != nextGbufferCount || alternateTargets != nextAlternateTargets || !colorFormats.sameElements(nextFormats) then
+      val nextPlanarReflections=posts.exists(_.uniform("planarReflection")>=0)
+      if desiredGbufferCount != nextGbufferCount || alternateTargets != nextAlternateTargets || !colorFormats.sameElements(nextFormats) || planarReflections!=nextPlanarReflections then
         desiredGbufferCount = nextGbufferCount
         alternateTargets = nextAlternateTargets
         colorFormats = nextFormats
@@ -926,6 +1064,13 @@ final class BlockboxShaderPipeline(rootDir: File,launchPack: Option[String]=Opti
       postPrograms = posts
       finalProgram = fin
       activePackName = nextPackName
+      rayTracing = packFlag(nextPackDir, "blockbox.raytracing")
+      volumetricClouds = packFlag(nextPackDir, "blockbox.volumetricClouds")
+      linearLighting = packFlag(nextPackDir, "blockbox.linearLighting")
+      planarReflections = nextPlanarReflections
+      if !rayTracing then
+        rayFrameReady = false
+        BlockboxRayTrace.destroy()
       sourceStamp = nextStamp
       failedSourceStamp = Long.MinValue
       val postCount = posts.length + (if fin.nonEmpty then 1 else 0)
@@ -956,6 +1101,18 @@ final class BlockboxShaderPipeline(rootDir: File,launchPack: Option[String]=Opti
 
   private def liveProgramIds: Set[Int] =
     worldPrograms.values.map(_.id).toSet ++ shadowPrograms.values.map(_.id) ++ postPrograms.map(_.id) ++ finalProgram.map(_.id)
+
+  private def packFlag(pack: Option[File], key: String): Boolean =
+    pack match
+      case Some(dir) =>
+        val file = File(dir, "pack.properties")
+        if !file.isFile then false
+        else
+          val props = java.util.Properties()
+          val in = java.io.FileInputStream(file)
+          try props.load(in) finally in.close()
+          Option(props.getProperty(key)).exists(_.trim.equalsIgnoreCase("true"))
+      case None => false
 
   private def resolvePackName(): String =
     selectedPackName.orElse(launchPack).getOrElse {
@@ -1256,6 +1413,7 @@ final class BlockboxShaderPipeline(rootDir: File,launchPack: Option[String]=Opti
 
     sceneColor = createColorTexture(width, height, hdr = true, format = colorFormats(0))
     sceneDepth = createDepthTexture(width, height)
+    waterTestDepth = createDepthTexture(width,height)
     sceneNormal = createColorTexture(width, height, hdr = true, smooth = false, format = colorFormats(1))
     sceneMaterial = createColorTexture(width, height, hdr = false, smooth = false, format = colorFormats(2))
     sceneExtraColors = Array.fill[Int](MaxCompatColorBuffers - 3)(0)
@@ -1283,6 +1441,18 @@ final class BlockboxShaderPipeline(rootDir: File,launchPack: Option[String]=Opti
         postAlternateColors(alt) = createColorTexture(width, height, hdr = alt <= 1, smooth = alt == 0, format = colorFormats(alt))
       alt += 1
     postFbo = glGenFramebuffers()
+
+    if planarReflections then
+      val rw=(width/2).max(1); val rh=(height/2).max(1)
+      reflectionColor=createColorTexture(rw,rh,hdr=true)
+      glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_LINEAR_MIPMAP_LINEAR)
+      glGenerateMipmap(GL_TEXTURE_2D)
+      reflectionDepth=createDepthTexture(rw,rh)
+      reflectionFbo=glGenFramebuffers(); glBindFramebuffer(GL_FRAMEBUFFER,reflectionFbo)
+      glFramebufferTexture2D(GL_FRAMEBUFFER,GL_COLOR_ATTACHMENT0,GL_TEXTURE_2D,reflectionColor,0)
+      glFramebufferTexture2D(GL_FRAMEBUFFER,GL_DEPTH_ATTACHMENT,GL_TEXTURE_2D,reflectionDepth,0)
+      glDrawBuffer(GL_COLOR_ATTACHMENT0)
+      checkFramebuffer("water reflection")
 
     glBindTexture(GL_TEXTURE_2D, 0)
     glBindFramebuffer(GL_FRAMEBUFFER, 0)
@@ -1426,8 +1596,14 @@ final class BlockboxShaderPipeline(rootDir: File,launchPack: Option[String]=Opti
     if status != GL_FRAMEBUFFER_COMPLETE then throw IllegalStateException(f"$label framebuffer incomplete: 0x$status%04x")
 
   private def destroyTargets(): Unit =
+    if reflectionColor!=0 then glDeleteTextures(reflectionColor)
+    if reflectionDepth!=0 then glDeleteTextures(reflectionDepth)
+    if reflectionFbo!=0 then glDeleteFramebuffers(reflectionFbo)
+    reflectionColor=0; reflectionDepth=0; reflectionFbo=0; reflectionBound=false; reflectionReady=false
     if sceneColor != 0 then glDeleteTextures(sceneColor)
     if sceneDepth != 0 then glDeleteTextures(sceneDepth)
+    if waterTestDepth!=0 then glDeleteTextures(waterTestDepth)
+    waterTestDepth=0; waterDepthBound=false
     if sceneNormal != 0 then glDeleteTextures(sceneNormal)
     if sceneMaterial != 0 then glDeleteTextures(sceneMaterial)
     sceneExtraColors.filter(_ != 0).foreach(glDeleteTextures)

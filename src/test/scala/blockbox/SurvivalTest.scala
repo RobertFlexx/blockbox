@@ -5,8 +5,8 @@ import scala.collection.mutable
 
 object SurvivalTest:
   def run(): Unit =
-    tools(); breathing(); ores(); zombies(); combat(); furnace(); saves()
-    println("[survival] tool progression, recipes, breathing, ore veins, furnace, zombies, PvP and save compatibility passed")
+    tools(); breathing(); ores(); zombies(); combat(); furnace(); quickMove(); saves()
+    println("[survival] tool progression, recipes, breathing, ore veins, furnace, shift-click, zombies, PvP and save compatibility passed")
 
   private def grid(rows: Seq[Seq[Block]]): Array[Block] =
     val result=Array.fill(9)(Block.Air)
@@ -88,6 +88,17 @@ object SurvivalTest:
     assert(ZombieSystem.rayDistance(Vec3(mob.pos.x,2,mob.pos.z+3),Vec3(0,0,-1),mob,4).nonEmpty)
     val wall=(x: Int,y: Int,z: Int) => if z== -2 then Block.Stone else floor(x,y,z)
     assert(!ZombieSystem.visible(Vec3(0,2,0),Vec3(0,2,-4),wall))
+    val barricade=(x: Int,y: Int,z: Int) => if z== -3 && math.abs(x)<=2 && y>=1 && y<=3 then Block.Stone else floor(x,y,z)
+    val hunter=ZombieSystem.Zombie(3,Vec3(0.5f,1,0.5f))
+    val quarry=ZombieSystem.Target("Quarry",Vec3(0.5f,2.62f,-7))
+    for _ <- 0 until 340 do ZombieSystem.update(hunter,0.05f,Seq(quarry),false,false,barricade)
+    assert(hunter.pos.z< -5.5f && !ZombieSystem.collides(hunter.pos,barricade),s"zombies navigate around a tall barricade: ${hunter.pos}")
+    hunter.heldItem=Block.DiamondSword
+    assert(ZombieSystem.parseSnapshot(ZombieSystem.snapshot(Seq(hunter))).head._7==Block.DiamondSword,"equipment survives mob synchronization and persistence")
+    assert(ZombieSystem.parseSnapshot("MOBS|1,0,1,0,0,20,0,0").head._7==Block.Air,"older mob saves remain readable")
+    val rng=scala.util.Random(123)
+    val equipment=(0 until 10000).map(_ => ZombieSystem.spawnEquipment(rng)).filter(_!=Block.Air)
+    assert(equipment.length>650 && equipment.length<950 && equipment.distinct.length==16,"rare equipped spawns can use every tool and weapon tier")
 
   private def method(game: Blockbox,name: String,args: AnyRef*): Any =
     val m=game.getClass.getDeclaredMethods.find(m => m.getName==name && m.getParameterCount==args.length).get
@@ -130,6 +141,27 @@ object SurvivalTest:
     assert(counts(0)==2 && counts(1)==0 && get[Float](game,"furnaceFuelRemaining")==7,"one ore and one coal are spent exactly once")
     method(game,"takeFurnaceOutput")
     assert(method(game,"totalItemCount",Block.IronIngot)==Int.box(1))
+
+  def quickMove(): Unit =
+    val game=Blockbox(); set(game,"soundEnabled",false)
+    val hotbar=get[Array[Block]](game,"hotbarBlocks"); val hotCounts=get[Array[Int]](game,"hotbarCounts")
+    val pack=get[Array[Block]](game,"backpackBlocks"); val packCounts=get[Array[Int]](game,"backpackCounts")
+    for i <- hotbar.indices do { hotbar(i)=Block.Air; hotCounts(i)=0 }
+    for i <- pack.indices do { pack(i)=Block.Air; packCounts(i)=0 }
+    hotbar(2)=Block.Stone; hotCounts(2)=40; pack(5)=Block.Stone; packCounts(5)=60
+    method(game,"quickMoveHotbar",Int.box(2))
+    assert(packCounts(5)==64 && pack(0)==Block.Stone && packCounts(0)==36 && hotbar(2)==Block.Air,
+      "shift-click tops up a matching stack before filling the first empty slot")
+    method(game,"quickMoveBackpack",Int.box(0))
+    assert(hotbar(0)==Block.Stone && hotCounts(0)==36 && pack(0)==Block.Air,"backpack stacks move to the hotbar")
+    val cells=get[Array[Block]](game,"craftGridBlocks"); val cellCounts=get[Array[Int]](game,"craftGridCounts")
+    cells(0)=Block.BirchPlanks; cellCounts(0)=3; cells(3)=Block.BirchPlanks; cellCounts(3)=3
+    method(game,"tryCraftGrid",java.lang.Boolean.TRUE)
+    assert(hotbar(8)==Block.Stick && hotCounts(8)==12 && cells(0)==Block.Air && cells(3)==Block.Air,
+      "shift-crafting spends every ingredient and fills the hotbar from the right")
+    set(game,"gameMode",GameMode.Creative)
+    method(game,"creativeQuickGive",Block.Torch)
+    assert(hotbar(1)==Block.Torch && hotCounts(1)==64,"creative shift-click gives a full stack in the first free hotbar slot")
 
   def saves(): Unit =
     val game=Blockbox()

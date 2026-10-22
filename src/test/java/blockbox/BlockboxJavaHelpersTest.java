@@ -7,6 +7,8 @@ import blockbox.net.BlockboxSockets;
 import blockbox.net.PacketBudget;
 import blockbox.render.ViewFrustum;
 import blockbox.render.ShaderSources;
+import blockbox.render.RayFrameLayout;
+import blockbox.ai.VoxelNavigation;
 
 import java.io.BufferedReader;
 import java.io.IOException;
@@ -26,6 +28,8 @@ public final class BlockboxJavaHelpersTest {
     testFrustum();
     testPacketBudget();
     testShaderSources();
+    testRayLayout();
+    testNavigation();
     System.out.println("BlockboxJavaHelpersTest: OK");
   }
 
@@ -93,7 +97,11 @@ public final class BlockboxJavaHelpersTest {
     expectIllegalArgument(() -> BlockboxNet.parseEnvironment(BlockboxNet.packet("ENV|150|-1|0|0|0|0")), "environment rejects truncated state");
   }
 
-  private static void testPacketBudget() {
+  private static void testPacketBudget() throws Exception {
+    expectIllegalArgument(()->new PacketBudget(Double.POSITIVE_INFINITY,2,0),"non-finite packet rate rejected");
+    expectIllegalArgument(()->new PacketBudget(10,Double.POSITIVE_INFINITY,0),"non-finite packet capacity rejected");
+    PacketBudget wrap=new PacketBudget(10,1,Long.MAX_VALUE-100_000_000L);
+    check(wrap.allow(Long.MAX_VALUE-100_000_000L) && wrap.allow(Long.MIN_VALUE+100_000_000L),"nanoTime wrap preserves refill");
     PacketBudget budget = new PacketBudget(10, 2, 1_000_000_000L);
     check(budget.allow(1_000_000_000L) && budget.allow(1_000_000_000L), "packet burst allowed");
     check(!budget.allow(1_000_000_000L), "packet burst bounded");
@@ -102,9 +110,13 @@ public final class BlockboxJavaHelpersTest {
     check(!budget.allow(1_100_000_000L), "refill does not create excess tokens");
   }
 
-  private static void testFrustum() {
+  private static void testFrustum() throws Exception {
     ViewFrustum frustum = new ViewFrustum();
     float[] identity = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
+    expectIllegalArgument(()->frustum.update(new float[3],identity),"truncated frustum matrix rejected");
+    float[] bad=identity.clone(); bad[0]=Float.NaN;
+    expectIllegalArgument(()->frustum.update(bad,identity),"NaN frustum matrix rejected");
+    expectIllegalArgument(()->frustum.intersects(2,0,0,1,1,1),"inverted bounds rejected");
     frustum.update(identity, identity);
     check(frustum.intersects(-1,-1,-1,1,1,1), "frustum includes its boundary");
     check(!frustum.intersects(2,2,2,3,3,3), "frustum rejects outside bounds");
@@ -128,6 +140,31 @@ public final class BlockboxJavaHelpersTest {
       check(frustum.intersects(-1,-1,-20,1,1,-18), "forward terrain visible");
       check(!frustum.intersects(-1,-1,18,1,1,20), "terrain behind horizontal camera culled");
     }
+  }
+
+  private static void testRayLayout() throws Exception {
+    check(RayFrameLayout.groups(1)==1 && RayFrameLayout.groups(8)==1 && RayFrameLayout.groups(9)==2,"GPU dispatch covers partial workgroups");
+    expectIllegalArgument(()->RayFrameLayout.groups(Integer.MAX_VALUE),"oversized GPU target rejected before integer overflow");
+    var data=java.nio.ByteBuffer.allocateDirect(80);
+    float[] matrix={1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
+    RayFrameLayout.matrix(data,matrix); RayFrameLayout.vector(data,1,2,3,4);
+    check(data.position()==80 && data.getFloat(64)==1 && data.getFloat(76)==4,"native frame layout preserves matrices and vector alignment");
+    data.clear(); matrix[3]=Float.NaN;
+    expectIllegalArgument(()->RayFrameLayout.matrix(data,matrix),"non-finite GPU matrix rejected");
+    check(data.position()==0,"failed frame validation writes no partial matrix");
+  }
+
+  private static void testNavigation() {
+    VoxelNavigation.Cells wall=(x,y,z)->y==0 || (z==-3 && Math.abs(x)<=2 && y>=1 && y<=3) ? VoxelNavigation.SOLID : 0;
+    var route=VoxelNavigation.find(wall,0,1,0,0,1,-7,16,768);
+    check(!route.isEmpty() && route.getLast().z()==-7,"zombies find a route around a tall wall");
+    check(route.stream().anyMatch(p->Math.abs(p.x())>=3),"route goes around the obstruction");
+    VoxelNavigation.Cells cliff=(x,y,z)->y==0 && x<3 ? VoxelNavigation.SOLID : 0;
+    var safe=VoxelNavigation.find(cliff,0,1,0,8,1,0,12,256);
+    check(safe.stream().allMatch(p->p.x()<3),"unreachable target cannot route the actor into a cliff");
+    VoxelNavigation.Cells stairs=(x,y,z)->y==0 || (x==2 && y==1) ? VoxelNavigation.SOLID : 0;
+    check(VoxelNavigation.find(stairs,0,1,0,4,1,0,8,128).stream().anyMatch(p->p.y()==2),"route climbs a one-block step");
+    check(VoxelNavigation.find(wall,0,1,0,0,1,-7,16,1).size()<=1,"path search honors its work budget");
   }
 
   private static void testShaderSources() throws Exception {

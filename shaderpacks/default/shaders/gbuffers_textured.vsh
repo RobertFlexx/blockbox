@@ -2,6 +2,7 @@
 uniform float uTime;
 uniform mat4 gbufferModelViewInverse;
 uniform int isEyeInWater;
+uniform float uWaterSurfaceY;
 varying vec4 vColor;
 varying vec2 vLightUv;
 varying float vBlockLight;
@@ -34,5 +35,9 @@ void main() {
     vNormalWorld = normalize(gl_Normal);
     vNormalView = normalize(gl_NormalMatrix * gl_Normal);
     vFogDepth = isEyeInWater != 0 ? length(eye.xyz) : length((gbufferModelViewInverse * eye).xz);
+    if(isEyeInWater!=0 && gl_Vertex.y>uWaterSurfaceY) {
+        float eyeY=(gbufferModelViewInverse*vec4(0.0,0.0,0.0,1.0)).y;
+        vFogDepth*=clamp((uWaterSurfaceY-eyeY)/max(gl_Vertex.y-eyeY,0.001),0.0,1.0);
+    }
     vWorldPos = gl_Vertex.xyz;
 }

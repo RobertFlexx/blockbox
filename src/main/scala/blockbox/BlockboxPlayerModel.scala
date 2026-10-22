@@ -8,12 +8,13 @@ import scala.math.*
   *
   * Every part is a cuboid textured from [[BlockboxSkin]] with Minecraft's box UV layout,
   * so faces, hair, clothes and hands carry pixel detail instead of flat colour.
-  * Models are lit like Minecraft entities: two fixed directional lights plus ambient,
-  * multiplied by the terrain light colour where the model stands, so a player under a
-  * tree, in a cave or next to a torch matches the blocks around them.
+  * Shader packs shade these normals with the same sun, skylight and shadow maps as
+  * terrain. Compatibility and inventory views use two directional lights plus ambient.
   */
 object BlockboxPlayerModel:
   private var lit = false
+  private var sceneShaded = false
+  def shaderLighting: Boolean = sceneShaded
   private var tint = (1f, 1f, 1f)
   private val lightBuffer = BufferUtils.createFloatBuffer(4)
   private def put(a: Float, b: Float, c: Float, d: Float) =
@@ -28,7 +29,8 @@ object BlockboxPlayerModel:
   /** Enables entity lighting. Call while the modelview holds only the camera rotation
     * (world lights) or identity (`viewSpace`, for the first-person arm).
     */
-  def beginLighting(viewSpace: Boolean): Unit =
+  def beginLighting(viewSpace: Boolean,shaderColor: Boolean = false): Unit =
+    sceneShaded=shaderColor
     val (l0, l1) =
       if viewSpace then (Vec3(-0.35f, 0.90f, 0.62f).normalized, Vec3(0.62f, 0.25f, 0.35f).normalized)
       else (Vec3(0.2f, 1.0f, -0.7f).normalized, Vec3(-0.2f, 1.0f, 0.7f).normalized)
@@ -53,6 +55,7 @@ object BlockboxPlayerModel:
     glDisable(GL_LIGHT0); glDisable(GL_LIGHT1); glDisable(GL_LIGHTING)
     glDisable(GL_COLOR_MATERIAL); glDisable(GL_NORMALIZE)
     lit = false
+    sceneShaded = false
 
   private def bindSkin(shirt: (Float, Float, Float), light: (Float, Float, Float),zombie: Boolean = false,hurt: Boolean = false): Unit =
     tint = light

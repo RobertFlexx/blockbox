@@ -3,6 +3,7 @@
 //> using dep "org.lwjgl:lwjgl-glfw:3.4.1"
 //> using dep "org.lwjgl:lwjgl-opengl:3.4.1"
 //> using dep "org.lwjgl:lwjgl-stb:3.4.1"
+//> using dep "org.lwjgl:lwjgl-vulkan:3.4.1"
 //> using dep "org.apache.groovy:groovy:5.0.6"
 
 package blockbox
@@ -221,6 +222,7 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
   // Shadow casters use a distance-only set instead of the camera frustum. A tree
   // just outside the player's view can still cast a visible shadow into the view.
   private val shadowChunkScratch = ArrayBuffer.empty[Chunk]
+  private val reflectionChunkScratch = ArrayBuffer.empty[Chunk]
   private val translucentChunkScratch = ArrayBuffer.empty[Chunk]
   private val waterChunkScratch = ArrayBuffer.empty[Chunk]
   private val cursorXBuffer = BufferUtils.createDoubleBuffer(1)
@@ -1162,6 +1164,7 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
   private def handleMenuMouse(): Unit =
     val leftDown = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS
     val rightDown = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS
+    val shift = down(GLFW_KEY_LEFT_SHIFT) || down(GLFW_KEY_RIGHT_SHIFT)
     if leftDown && !menuLeftWasDown then
       val (mx, my) = mouseFramebufferPos()
       screen match
@@ -1172,8 +1175,8 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
         case Screen.Resources => handleResourcesClick(mx, my)
         case Screen.Settings => handleSettingsClick(mx, my)
         case Screen.Paused => handlePauseClick(mx, my)
-        case Screen.Inventory => handleInventoryClick(mx, my, rightClick = false)
-        case Screen.Catalog => handleCatalogClick(mx, my)
+        case Screen.Inventory => handleInventoryClick(mx, my, rightClick = false, quickMove = shift)
+        case Screen.Catalog => handleCatalogClick(mx, my, quickMove = shift)
         case Screen.FurnaceUI => handleFurnaceClick(mx, my)
         case Screen.JoinGame => handleJoinClick(mx, my)
         case Screen.HostGame => handleHostClick(mx, my)
@@ -1185,10 +1188,10 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
         case Screen.Playing => ()
     if rightDown && !menuRightWasDown && screen == Screen.Inventory then
       val (mx, my) = mouseFramebufferPos()
-      handleInventoryClick(mx, my, rightClick = true)
+      handleInventoryClick(mx, my, rightClick = true, quickMove = shift)
     if rightDown && !menuRightWasDown && screen==Screen.Catalog then
       val (mx,my)=mouseFramebufferPos()
-      handleCatalogClick(mx,my,rightClick=true)
+      handleCatalogClick(mx,my,rightClick=true,quickMove=shift)
     if leftDown && screen == Screen.Settings && sliderActive != null then
       val (mx, my) = mouseFramebufferPos()
       updateSlider(mx)
@@ -1428,7 +1431,8 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
       screen = Screen.Settings
     else if inRect(mx, my, bx, by0 + (bh + gap) * 2f, bw, bh) then leaveGame(Screen.MainMenu)
 
-  private def handleInventoryClick(mx: Float, my: Float, rightClick: Boolean): Unit =
+  /** @param quickMove shift held: Minecraft's quick move for the clicked slot, either button */
+  private def handleInventoryClick(mx: Float, my: Float, rightClick: Boolean, quickMove: Boolean = false): Unit =
     val l=BlockboxUiLayout.inventory(framebufferWidth,framebufferHeight,uiScale)
     if l.close.contains(mx,my) then
       if releaseHeldItem() then enterGame()
@@ -1436,12 +1440,16 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
       if releaseHeldItem() then openFurnace()
     else if l.journal.contains(mx,my) then
       if releaseHeldItem() then screen=Screen.Journal
-    else if l.output.contains(mx,my) then tryCraftGrid()
+    else if l.output.contains(mx,my) then tryCraftGrid(all=quickMove)
     else
       val hot=l.hotbar.indexWhere(_.contains(mx,my))
       val storage=l.storage.indexWhere(_.contains(mx,my))
       val craft=l.craft.indexWhere(_.contains(mx,my))
-      if hot>=0 then
+      if quickMove then
+        if hot>=0 then quickMoveHotbar(hot)
+        else if storage>=0 then quickMoveBackpack(storage)
+        else if craft>=0 then quickMoveCraft(craft)
+      else if hot>=0 then
         if heldInventoryBlock!=Block.Air then placeHeldItemInHotbar(hot,rightClick)
         else
           selectedBlock=hot; takeHotbarSlot(hot,rightClick)
@@ -1449,7 +1457,7 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
       else if storage>=0 then handleBackpackSlotClick(storage,rightClick)
       else if craft>=0 then handleCraftSlotClick(craft,rightClick)
 
-  private def handleCatalogClick(mx: Float, my: Float,rightClick: Boolean=false): Unit =
+  private def handleCatalogClick(mx: Float, my: Float,rightClick: Boolean=false,quickMove: Boolean=false): Unit =
     val l=BlockboxUiLayout.catalog(framebufferWidth,framebufferHeight,uiScale)
     if l.close.contains(mx,my) then
       if releaseHeldItem() then enterGame()
@@ -1472,7 +1480,8 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
     catalogScroll=catalogScroll.max(0).min(scrollMax)
     val slot=l.slots.indexWhere(_.contains(mx,my))
     val index=slot+catalogScroll*9
-    if slot>=0 && index<items.length then setHeldItem(items(index),maxStackSize)
+    if slot>=0 && index<items.length then
+      if quickMove then creativeQuickGive(items(index)) else setHeldItem(items(index),maxStackSize)
     else if l.scroll.contains(mx,my) then
       catalogScroll=math.round((my-l.scroll.y)/l.scroll.h*scrollMax).max(0).min(scrollMax)
 
@@ -2104,8 +2113,8 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
               airSupply.remaining=if air.isFinite then air.max(0f).min(airSupply.capacity) else airSupply.capacity
               furnaceRequested=meta.readInt().max(0).min(64)
               fieldJournal.readProgress(meta)
-              ZombieSystem.parseSnapshot(meta.readUTF()).foreach { (id,pos,angle,hp,burn,hurt) =>
-                val z=ZombieSystem.Zombie(id,pos); z.yaw=angle; z.targetYaw=angle; z.health=hp; z.burning=burn
+              ZombieSystem.parseSnapshot(meta.readUTF()).foreach { (id,pos,angle,hp,burn,hurt,gear) =>
+                val z=ZombieSystem.Zombie(id,pos); z.yaw=angle; z.targetYaw=angle; z.health=hp; z.burning=burn; z.heldItem=gear
                 zombies+=z; zombieSerial=zombieSerial.max(id+1)
               }
         storedChunks.foreach((cx,cz) => loadChunkIfSaved(cx,cz))
@@ -2129,9 +2138,12 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
     if gameMode == GameMode.Creative && validHotbarBlock(block) then maxStackSize
     else if validHotbarBlock(block) then backpackItemCount(block) + hotbarItemCount(block) else 0
 
+  protected def noteCollected(block: Block, amount: Int): Unit =
+    if gameMode==GameMode.Survival then fieldJournal.collected(block,amount)
+
   protected def gainItem(block: Block, amount: Int): Unit =
     if validHotbarBlock(block) && amount > 0 then
-      if gameMode==GameMode.Survival then fieldJournal.collected(block,amount)
+      noteCollected(block,amount)
       var remaining = amount
       if gameMode == GameMode.Survival then
         var i = 0
@@ -2962,13 +2974,13 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
     else
       glfwSetWindowMonitor(window, NULL, windowedX.max(0), windowedY.max(0), windowedW, windowedH, GLFW_DONT_CARE)
 
-  private def down(key: Int): Boolean = glfwGetKey(window, key) == GLFW_PRESS
+  private def down(key: Int): Boolean = window!=0L && glfwGetKey(window, key) == GLFW_PRESS
 
   private def blockAt(pos: Vec3): Block = activeBlockAt(floor(pos.x).toInt, floor(pos.y).toInt, floor(pos.z).toInt)
 
   private def isUnderwater: Boolean =
     val x=floor(camera.x).toInt; val y=floor(camera.y).toInt; val z=floor(camera.z).toInt
-    activeBlockAt(x,y,z)==Block.Water && (activeBlockAt(x,y+1,z)==Block.Water || camera.y<y+(waterLevelAt(x,y,z)/8f)*0.90f)
+    activeBlockAt(x,y,z)==Block.Water && (activeBlockAt(x,y+1,z)==Block.Water || camera.y<y+WaterSurface.height(waterLevelAt(x,y,z)))
 
   private def waterSubmersion: Float =
     val probes = Array(camera, camera + Vec3(0f, -0.72f, 0f), camera + Vec3(0f, -1.45f, 0f))
@@ -3105,9 +3117,9 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
           val snapshot=ZombieSystem.parseSnapshot(line)
           val alive=snapshot.map(_._1).toSet
           zombies.filterInPlace(z => alive(z.id))
-          snapshot.foreach { (id,pos,angle,hp,burn,hurt) =>
+          snapshot.foreach { (id,pos,angle,hp,burn,hurt,gear) =>
             val z=zombies.find(_.id==id).getOrElse { val created=ZombieSystem.Zombie(id,pos); zombies+=created; created }
-            z.target=pos; z.targetYaw=angle; z.health=hp; z.burning=burn; z.hurt=hurt
+            z.target=pos; z.targetYaw=angle; z.health=hp; z.burning=burn; z.hurt=hurt; z.heldItem=gear
           }
         else if line.startsWith("ZHIT|") && gameServer!=null then
           if parts.length==3 then hitZombie(parts(1),parts(2).toInt)
@@ -3133,7 +3145,7 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
         else if line.startsWith("ZLOOT|") && isClientOnlyMultiplayer then
           if parts.length==3 then
             val item=Block.fromOrdinal(parts(1).toInt); val count=parts(2).toInt
-            if Set(Block.CoalLump,Block.IronIngot,Block.CopperIngot).contains(item) && count>=1 && count<=2 then
+            if (Set(Block.CoalLump,Block.IronIngot,Block.CopperIngot).contains(item) || ToolSystem.isTool(item)) && count>=1 && count<=2 then
               gainItem(item,count); fieldJournal.defeatedZombie()
         else if line.startsWith("RULES|") && isClientOnlyMultiplayer then
           modManager.rules.receive(line.stripPrefix("RULES|"))
@@ -3425,6 +3437,14 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
 
   private def render(): Unit =
     updateFramebufferSize()
+    renderFrame(framebufferWidth,framebufferHeight)
+
+  /** The normal gameplay frame, also used by deterministic GPU reviews. Window
+    * size queries stay outside so reviews exercise the real frame without GLFW.
+    */
+  private[blockbox] def renderFrame(width: Int,height: Int): Unit =
+    require(width>0 && height>0,"Invalid framebuffer size")
+    framebufferWidth=width; framebufferHeight=height
     // Hard reset the render state every frame. Immediate-mode OpenGL state is global;
     // one debug/wireframe/menu/name-tag pass leaking state can make the next screen look
     // like a dark blue void or shrink/warp the UI. Reset first, then each pass opts in.
@@ -3537,7 +3557,7 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
     // X/Z camera-relative rendering: chunk VBOs are local and translated by
     // (chunkBase - camera). Only vertical camera motion remains in the view matrix.
     glTranslatef(0f, -camera.y, 0f)
-    if !isUnder then renderSky()
+    renderSky()
     renderBubbles()
     renderFallingSand()
     restoreChunkRenderState(isUnder, fogR, fogG, fogB)
@@ -3553,6 +3573,7 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
       if chunkVisibleForCamera(c, visibleDist) then renderChunkScratch += c
     val chunkList = renderChunkScratch
     shadowChunkScratch.clear()
+    reflectionChunkScratch.clear()
     val shadowCasterRadius = if shadersEnabled && shaderPipeline != null then shaderPipeline.shadowDistanceLimit(visibleDist + Terrain.chunkSize * 1.5f) else 0f
     val shadowCasterRadiusSq = shadowCasterRadius * shadowCasterRadius
     val shadowIter = chunks.valuesIterator
@@ -3561,6 +3582,7 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
       val dx = (c.cx * Terrain.chunkSize + Terrain.chunkSize * 0.5f) - camera.x
       val dz = (c.cz * Terrain.chunkSize + Terrain.chunkSize * 0.5f) - camera.z
       if dx * dx + dz * dz <= shadowCasterRadiusSq then shadowChunkScratch += c
+      if dx * dx + dz * dz <= (visibleDist+Terrain.chunkSize)*(visibleDist+Terrain.chunkSize) then reflectionChunkScratch += c
     // Batch opaque pass - bind texture + client states once for all chunks
     glDisable(GL_BLEND)
     glDepthMask(true)
@@ -3577,6 +3599,7 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
     if shaderPipeline != null then
       shaderPipeline.setNightShading(worldDarkening)
       shaderPipeline.setLightEnvironment(frameLight)
+      shaderPipeline.setWaterSurface(camera.y+waterDepthAt(camera))
     val shadowActive =
       if shadersEnabled && shaderPipeline != null then
         shaderPipeline.beginShadow((camera.x, camera.y, camera.z), sunDirection, moonDirection, daylightFactor, shadowCasterRadius, gameTime, localRain, localWetness)
@@ -3587,12 +3610,15 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
       glEnable(GL_ALPHA_TEST); glAlphaFunc(GL_GREATER, 0.5f)
       shaderPipeline.setShadowPass(1)
       shadowChunkScratch.foreach(_.drawCutout(camera))
+      renderEntityShadows()
       glDisable(GL_ALPHA_TEST)
       shaderPipeline.endShadow()
       // endShadow restores texture unit 0 and the scene target; make the intended
       // world state explicit because third-party shadow shaders are allowed to alter it.
       glEnable(GL_TEXTURE_2D); activeAtlas.bind()
       glEnable(GL_DEPTH_TEST); glDepthMask(true); glDisable(GL_BLEND)
+      glEnableClientState(GL_VERTEX_ARRAY); glEnableClientState(GL_COLOR_ARRAY)
+      glEnableClientState(GL_NORMAL_ARRAY); glEnableClientState(GL_TEXTURE_COORD_ARRAY)
     if shaderPipeline != null then
       shaderPipeline.setCelestialTime(timeOverride.getOrElse(gameTime))
       shaderPipeline.setAntialiasing(antiAliasing)
@@ -3603,9 +3629,38 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
       else false
     if shaderActive then
       glDisable(GL_FOG)
+      if !isUnder && shaderPipeline.needsWaterReflection then
+        val planes=scala.collection.mutable.HashMap.empty[Float,Float]
+        chunkList.foreach { c => c.flatWaterPlane.foreach { (height,count) =>
+          if height<camera.y then
+            val dx=c.cx*Terrain.chunkSize+Terrain.chunkSize*0.5f-camera.x
+            val dz=c.cz*Terrain.chunkSize+Terrain.chunkSize*0.5f-camera.z
+            planes.update(height,planes.getOrElse(height,0f)+count/(1f+(dx*dx+dz*dz)/1024f))
+        }}
+        planes.maxByOption(_._2).foreach { (height,_) =>
+          shaderPipeline.setWaterSurface(height)
+          shaderPipeline.captureWaterReflection(height) {
+            shaderPipeline.setPass(0)
+            reflectionChunkScratch.foreach(_.drawOpaque(camera))
+            glEnable(GL_ALPHA_TEST); glAlphaFunc(GL_GREATER,0.5f)
+            shaderPipeline.setPass(1)
+            reflectionChunkScratch.foreach(_.drawCutout(camera))
+            glDisable(GL_ALPHA_TEST)
+            shaderPipeline.end()
+            glClientActiveTexture(GL_TEXTURE1); glDisableClientState(GL_TEXTURE_COORD_ARRAY); glClientActiveTexture(GL_TEXTURE0)
+            renderRemotePlayers3D()
+            renderZombies3D()
+          }
+          resetGlArraysAndBuffers()
+          glEnable(GL_TEXTURE_2D); activeAtlas.bind()
+          glEnable(GL_DEPTH_TEST); glDepthMask(true); glDisable(GL_BLEND); glDisable(GL_FOG)
+          glEnableClientState(GL_VERTEX_ARRAY); glEnableClientState(GL_COLOR_ARRAY)
+          glEnableClientState(GL_NORMAL_ARRAY); glEnableClientState(GL_TEXTURE_COORD_ARRAY)
+        }
       shaderPipeline.enableGBufferWrites()
       shaderPipeline.setPass(0)
-    else if shaderPipeline!=null then shaderPipeline.beginCompatibilityLighting(daylightFactor)
+    else if shaderPipeline!=null then shaderPipeline.beginCompatibilityLighting(daylightFactor,
+      if isUnder then camera.y else Float.NaN,if isUnder then camera.y+waterDepthAt(camera) else Float.NaN)
     chunkList.foreach(_.drawOpaque(camera))
     // Batch cutout pass
     glEnable(GL_ALPHA_TEST); glAlphaFunc(GL_GREATER, 0.5f)
@@ -3624,7 +3679,8 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
     if shaderActive then
       shaderPipeline.beginWorld(fogR,fogG,fogB,fogStart,fogEnd,daylightFactor,gameTime,sunDirection,moonDirection,(camera.x,camera.y,camera.z),near.toFloat,far.toFloat,localRain,localWetness,isUnder)
       glDisable(GL_FOG)
-    else if shaderPipeline!=null then shaderPipeline.beginCompatibilityLighting(daylightFactor)
+    else if shaderPipeline!=null then shaderPipeline.beginCompatibilityLighting(daylightFactor,
+      if isUnder then camera.y else Float.NaN,if isUnder then camera.y+waterDepthAt(camera) else Float.NaN)
     // Batch translucent + water pass
     glEnable(GL_BLEND)
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
@@ -3655,6 +3711,7 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
     if shaderActive then
       shaderPipeline.enableGBufferWrites()
       shaderPipeline.setPass(3)
+      shaderPipeline.beginWaterSurface()
     waterChunkScratch.clear()
     var wi = 0
     while wi < chunkList.length do
@@ -3668,6 +3725,7 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
     }
     waterChunkScratch.foreach(_.drawWater(camera))
     if shaderActive then
+      shaderPipeline.endWaterSurface()
       shaderPipeline.end()
       shaderPipeline.enableColorOnlyWrites()
     else if shaderPipeline!=null then shaderPipeline.endCompatibilityLighting()
@@ -3680,7 +3738,10 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
     glClientActiveTexture(GL_TEXTURE0); glDisableClientState(GL_TEXTURE_COORD_ARRAY)
     glDisableClientState(GL_NORMAL_ARRAY); glDisableClientState(GL_COLOR_ARRAY); glDisableClientState(GL_VERTEX_ARRAY)
     glBindBuffer(GL_ARRAY_BUFFER, 0); glBindTexture(GL_TEXTURE_2D, 0)
-    if cloudsEnabled && !isUnder then
+    if shaderActive && shaderPipeline != null && shaderPipeline.rayTracingEnabled then
+      shaderPipeline.updateRayGeometry(chunks.values)
+    val packClouds = shadersEnabled && shaderPipeline != null && shaderPipeline.rendersVolumetricClouds
+    if cloudsEnabled && !isUnder && !packClouds then
       BlockboxSky.renderClouds(camera, gameTime, cloudRenderDistanceBlocks, dayPhase, daylightFactor, stormCloudCover, localLightning, worldSeed)
     BlockboxWeather.render(camera,gameTime,daylightFactor,weatherCells,weatherStrikes,cloudRenderDistanceBlocks)
     applyTerrainFog(isUnder)
@@ -3779,16 +3840,20 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
     if activeBlockAt(x,y,z)!=Block.Water then 0f
     else
       while y<Terrain.worldHeight-1 && activeBlockAt(x,y+1,z)==Block.Water do y+=1
-      (y+0.9f-pos.y).max(0f)
+      (y+WaterSurface.height(waterLevelAt(x,y,z))-pos.y).max(0f)
 
-  private def renderImmersedEntity(eye: Vec3)(draw: ((Float,Float,Float)) => Unit): Unit =
-    val light=lightColorAt(eye.x,eye.y-0.6f,eye.z)
+  private def renderImmersedEntity(eye: Vec3,sceneShaded: Boolean = false)(draw: ((Float,Float,Float)) => Unit): Unit =
+    val light=if sceneShaded then (1f,1f,1f) else lightColorAt(eye.x,eye.y-0.6f,eye.z)
+    // The mirrored capture already clips every vertex at its water plane.
+    if shaderPipeline!=null && shaderPipeline.isReflectionBound then
+      draw(light)
+      return
     val feet=eye.y-1.62f
     val x=floor(eye.x).toInt; val z=floor(eye.z).toInt
     val water=(floor(feet).toInt to ceil(eye.y+0.2f).toInt).filter(y => activeBlockAt(x,y,z)==Block.Water)
     if water.isEmpty then draw(light)
     else
-      val top=water.max+0.9f
+      val top=water.max+WaterSurface.height(waterLevelAt(x,water.max,z))
       val depth=waterDepthAt(Vec3(eye.x,feet+0.1f,eye.z)).max(1.2f)
       val tinted=WaterAppearance.tint(light,depth)
       def clip(sign: Double): Unit =
@@ -3836,7 +3901,7 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
             val effectiveSky=if exposed then 15 else sky
             if !targets.exists(p => (p.eye-feet).lengthSquared<20*20) &&
                 ZombieSystem.canSpawn(feet,daylightFactor,effectiveSky,block,activeBlockAt) then
-              val mob=ZombieSystem.Zombie(zombieSerial,feet); zombieSerial+=1
+              val mob=ZombieSystem.Zombie(zombieSerial,feet); mob.heldItem=ZombieSystem.spawnEquipment(zombieRng); zombieSerial+=1
               zombies+=mob; spawned=true
             y-=1
         tries+=1
@@ -3855,6 +3920,7 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
       }
       if z.health<beforeHealth then emitZombieVoice(z,if z.health<=0 then 3 else 1)
     }
+    ZombieSystem.separate(zombies.toVector,activeBlockAt)
     zombies.filterInPlace(z => z.health>0 && z.pos.y>1 && targets.exists(p => (p.eye-z.pos).lengthSquared<112*112))
     zombieSyncTimer-=dt
     if gameServer!=null && zombieSyncTimer<=0 then
@@ -3897,7 +3963,7 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
         z.velocity=away*4f+Vec3(0,3f,0); z.grounded=false
         emitZombieVoice(z,if z.health<=0f then 3 else 1)
         if z.health<=0f then
-          val loot=if zombieRng.nextFloat()<0.12f then Block.IronIngot else Block.CoalLump
+          val loot=if z.heldItem!=Block.Air && zombieRng.nextFloat()<0.15f then z.heldItem else if zombieRng.nextFloat()<0.12f then Block.IronIngot else Block.CoalLump
           if attacker==playerName then
             gainItem(loot,1)
             fieldJournal.defeatedZombie()
@@ -3946,21 +4012,53 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
 
   private def damageFlash(value: Float): Boolean = value>0f && (value*14f).toInt%2==0
 
+  /** The same animated bodies cast into the terrain shadow map. Keep this map
+    * for dynamic actors even when Vulkan supplies the static-world ray shadows.
+    */
+  private def renderEntityShadows(): Unit =
+    resetGlArraysAndBuffers()
+    glDisable(GL_FOG); glDisable(GL_BLEND); glEnable(GL_DEPTH_TEST); glDepthMask(true)
+    BlockboxPlayerModel.beginLighting(viewSpace=false,shaderColor=true)
+    val local=RemotePlayer(playerName,camera,camera,yaw,yaw,pitch,pitch,0,localColorId,heldHotbarBlock)
+    local.gait=cameraBobPhase; local.stride=cameraBobAmount; local.swing=viewmodelKick
+    val ownItem=if heldHotbarBlock==Block.Air then None else Some(() => drawHeldItemAtGrip(heldHotbarBlock,(1,1,1)))
+    BlockboxPlayerModel.render(local,camera,colorForId(localColorId),(1,1,1),gameTime,ownItem)
+    val now=glfwGetTime()
+    remotePlayers.valuesIterator.filter(p => now-p.lastSeen<=8).foreach { p =>
+      val held=if p.heldBlock==Block.Air then None else Some(() => drawHeldItemAtGrip(p.heldBlock,(1,1,1)))
+      BlockboxPlayerModel.render(p,camera,colorForId(p.colorId),(1,1,1),gameTime,held)
+    }
+    zombies.foreach { z =>
+      val p=z.avatar
+      p.pos=z.pos+Vec3(0,1.62f,0); p.yaw=z.yaw; p.bodyYaw=z.yaw; p.gait=z.gait; p.stride=z.stride
+      val held=if z.heldItem==Block.Air then None else Some(() => drawHeldItemAtGrip(z.heldItem,(1,1,1)))
+      BlockboxPlayerModel.render(p,camera,(0.17f,0.4f,0.39f),(1,1,1),gameTime,held,zombie=true)
+    }
+    BlockboxPlayerModel.endLighting()
+
+  private def entityLightLevels(eye: Vec3): Unit =
+    val (sky,block)=lightLevelsAt(floor(eye.x).toInt,floor(eye.y-0.6f).toInt,floor(eye.z).toInt)
+    org.lwjgl.opengl.GL13.glMultiTexCoord2f(GL_TEXTURE1,block*16f,sky*16f)
+
   private def renderZombies3D(): Unit =
     if zombies.isEmpty then return
     resetGlArraysAndBuffers()
     glEnable(GL_DEPTH_TEST); glDepthMask(true); glEnable(GL_FOG); glDisable(GL_BLEND)
     applyTerrainFog(isUnderwater)
-    BlockboxPlayerModel.beginLighting(viewSpace=false)
+    val sceneShaded=shadersEnabled && shaderPipeline!=null && shaderPipeline.beginEntityLighting()
+    BlockboxPlayerModel.beginLighting(viewSpace=false,shaderColor=sceneShaded)
     zombies.foreach { z =>
       val avatar=z.avatar
       avatar.pos=z.pos+Vec3(0,1.62f,0); avatar.yaw=z.yaw; avatar.bodyYaw=z.yaw
       avatar.gait=z.gait; avatar.stride=z.stride
-      renderImmersedEntity(avatar.pos) { light =>
-        BlockboxPlayerModel.render(avatar,camera,(0.17f,0.40f,0.39f),light,gameTime,None,zombie=true,hurt=damageFlash(z.hurt))
+      if sceneShaded then entityLightLevels(avatar.pos)
+      renderImmersedEntity(avatar.pos,sceneShaded) { light =>
+        val held=if z.heldItem==Block.Air then None else Some(() => drawHeldItemAtGrip(z.heldItem,light))
+        BlockboxPlayerModel.render(avatar,camera,(0.17f,0.40f,0.39f),light,gameTime,held,zombie=true,hurt=damageFlash(z.hurt))
       }
     }
     BlockboxPlayerModel.endLighting()
+    if sceneShaded then shaderPipeline.endEntityLighting()
     zombies.filter(_.burning>0).foreach(z => ZombieFire.render(z,camera,gameTime))
 
   private def renderRemotePlayers3D(): Unit =
@@ -3970,15 +4068,18 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
     glDisable(GL_TEXTURE_2D); glEnable(GL_FOG); glDisable(GL_BLEND)
     glDepthMask(true); glEnable(GL_DEPTH_TEST)
     applyTerrainFog(isUnderwater)
-    BlockboxPlayerModel.beginLighting(viewSpace = false)
+    val sceneShaded=shadersEnabled && shaderPipeline!=null && shaderPipeline.beginEntityLighting()
+    BlockboxPlayerModel.beginLighting(viewSpace=false,shaderColor=sceneShaded)
     remotePlayers.valuesIterator.foreach { rp =>
       if now - rp.lastSeen <= 8.0 then
-        renderImmersedEntity(rp.pos) { light =>
+        if sceneShaded then entityLightLevels(rp.pos)
+        renderImmersedEntity(rp.pos,sceneShaded) { light =>
           val held = if rp.heldBlock == Block.Air then None else Some(() => drawHeldItemAtGrip(rp.heldBlock, light))
           BlockboxPlayerModel.render(rp, camera, colorForId(rp.colorId), light, gameTime, held,hurt=damageFlash(rp.hurt))
         }
     }
     BlockboxPlayerModel.endLighting()
+    if sceneShaded then shaderPipeline.endEntityLighting()
 
   private def projectWorldToScreen(pos: Vec3): Option[(Float, Float, Float)] =
     val rel = pos - camera
@@ -5174,9 +5275,13 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
     glMatrixMode(GL_MODELVIEW); glPushMatrix(); glLoadIdentity(); glTranslatef(0,0,-4)
     glRotatef(6f+(my-p.y-p.h/2)/p.h*8f,1,0,0)
     BlockboxPlayerModel.beginLighting(viewSpace=true)
-    val angle=180f+((mx-p.x-p.w/2)/p.w*22f).max(-30).min(30)
-    val preview=RemotePlayer(playerName,Vec3(0,1.62f,0),Vec3(0,1.62f,0),angle,angle,0,0,0,localColorId,heldHotbarBlock)
-    preview.pitch=((my-p.y-p.h/2)/p.h*30f).max(-25).min(25)
+    // Minecraft's follow-the-cursor pose, measured from the eye (0.19 of the box down): the
+    // head turns twice as far as the body. Yaw 180 faces the viewer; smaller yaw turns it to screen right.
+    val reach=p.h*0.63f
+    val turn=atan((mx-p.x-p.w/2)/reach).toFloat
+    val lift=atan((my-p.y-p.h*0.19f)/reach).toFloat
+    val preview=RemotePlayer(playerName,Vec3(0,1.62f,0),Vec3(0,1.62f,0),180f-turn*40f,180f-turn*40f,lift*20f,lift*20f,0,localColorId,heldHotbarBlock)
+    preview.bodyYaw=180f-turn*20f
     val held=if heldHotbarBlock==Block.Air then None else Some(() => drawHeldItemAtGrip(heldHotbarBlock,(1f,1f,1f)))
     BlockboxPlayerModel.render(preview,Vec3(0,0,0),colorForId(localColorId),(1f,1f,1f),0,held)
     BlockboxPlayerModel.endLighting()

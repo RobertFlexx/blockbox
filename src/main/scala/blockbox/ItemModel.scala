@@ -82,7 +82,9 @@ object ItemModel:
   })
 
   def render(item: Block,light: (Float,Float,Float)): Unit =
-    glDisable(GL_TEXTURE_2D)
+    if BlockboxPlayerModel.shaderLighting then
+      glEnable(GL_TEXTURE_2D); glBindTexture(GL_TEXTURE_2D,BlockboxSkin.whiteTexture)
+    else glDisable(GL_TEXTURE_2D)
     val lit=glIsEnabled(GL_LIGHTING)
     glBegin(GL_QUADS)
     mesh(item).foreach { v =>

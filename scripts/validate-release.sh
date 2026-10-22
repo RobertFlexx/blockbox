@@ -23,8 +23,20 @@ if ((${#java_test_sources[@]})); then
 fi
 say 'checking Scala source structure and release invariants'
 python3 scripts/validate-scala-structure.py
+if [[ -z "${__EGL_VENDOR_LIBRARY_FILENAMES:-}" && -f /usr/share/glvnd/egl_vendor.d/10_nvidia.json ]]; then
+  export __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/10_nvidia.json
+fi
 say 'driver-compiling every installed GLSL program'
 EGL_PLATFORM=surfaceless python3 scripts/validate-glsl.py
+if command -v glslangValidator >/dev/null 2>&1 && command -v spirv-val >/dev/null 2>&1; then
+  say 'compiling and validating native Vulkan ray kernels and shipped SPIR-V'
+  for kernel in assets/shaders/rt/*.comp; do
+    [[ -f "$kernel" ]] || continue
+    glslangValidator -V --target-env vulkan1.2 "$kernel" -o "$tmp/ray-kernel.spv"
+    spirv-val --target-env vulkan1.2 "$tmp/ray-kernel.spv"
+    spirv-val --target-env vulkan1.2 "${kernel%.comp}.spv"
+  done
+fi
 say 'render-smoke testing terrain shaders for color-channel collapse'
 EGL_PLATFORM=surfaceless python3 scripts/validate-shader-render.py
 say 'checking shader-pack selection'
@@ -35,8 +47,12 @@ if [[ -n "${BLOCKBOX_SCALA_TOOLCHAIN:-}" ]]; then
   [[ -n "${BLOCKBOX_TEST_CLASSPATH:-}" ]] || fail 'offline validation requires BLOCKBOX_TEST_CLASSPATH with the Scala libraries and project dependencies'
   say 'compiling the complete Scala project and regression tests with the supplied offline toolchain'
   mkdir -p "$tmp/scala-classes"
+  mapfile -t gpu_java_sources < <(find src/main/scala -type f -name '*.java' | sort)
+  if ((${#gpu_java_sources[@]})); then
+    javac --release 21 -encoding UTF-8 -cp "$helper_jar:$BLOCKBOX_TEST_CLASSPATH" -d "$tmp/scala-classes" "${gpu_java_sources[@]}"
+  fi
   mapfile -t scala_sources < <(find src/main/scala src/test/scala -type f -name '*.scala' | sort)
-  "$BLOCKBOX_SCALA_TOOLCHAIN/bin/scalac" -classpath "$helper_jar:$BLOCKBOX_TEST_CLASSPATH" -d "$tmp/scala-classes" "${scala_sources[@]}"
+  "$BLOCKBOX_SCALA_TOOLCHAIN/bin/scalac" -classpath "$tmp/scala-classes:$helper_jar:$BLOCKBOX_TEST_CLASSPATH" -d "$tmp/scala-classes" "${scala_sources[@]}"
   say 'running gameplay regression tests'
   java -cp "$tmp/scala-classes:$helper_jar:$BLOCKBOX_TEST_CLASSPATH" blockbox.runGameSystemsTests
   if [[ "${BLOCKBOX_RUN_ENGINE_RENDER_TESTS:-0}" == "1" ]]; then

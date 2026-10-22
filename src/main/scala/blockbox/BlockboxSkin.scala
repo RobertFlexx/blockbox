@@ -23,6 +23,15 @@ object BlockboxSkin:
   private val cache = mutable.HashMap.empty[Int, Int]
   private var undeadTexture=0
   private var undeadHurtTexture=0
+  private var white=0
+  def whiteTexture: Int =
+    if white==0 then
+      white=glGenTextures(); glBindTexture(GL_TEXTURE_2D,white)
+      val pixel=BufferUtils.createByteBuffer(4); pixel.putInt(-1).flip()
+      glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA8,1,1,0,GL_RGBA,GL_UNSIGNED_BYTE,pixel)
+      glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_NEAREST)
+      glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_NEAREST)
+    white
 
   private val skinTone: Rgb = (222, 172, 128)
   private val hairTone: Rgb = (68, 44, 29)
@@ -318,6 +327,8 @@ object BlockboxSkin:
     id
 
   def dispose(): Unit =
+    if white!=0 then glDeleteTextures(white)
+    white=0
     cache.valuesIterator.foreach(glDeleteTextures)
     cache.clear()
     if undeadTexture!=0 then glDeleteTextures(undeadTexture)

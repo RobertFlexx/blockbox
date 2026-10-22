@@ -93,10 +93,11 @@ final class Chunk(val cx: Int, val cz: Int, initialAtlas: TextureAtlas, gen: Ter
   val baseZ = cz * Terrain.chunkSize
 
   // position(3) + color(4) + normal(3) + atlas UV(2) + Minecraft-style
-  // lightmap coordinates(2). The second UV set carries block/sky light on a 0..240
-  // scale, matching the compatibility-profile convention expected by many Iris /
-  // OptiFine terrain vertex shaders. The fixed-function path ignores UV1.
-  private val floatsPerVertex = 14
+  // lightmap coordinates(3). UV1.xy carries block/sky light on a 0..240 scale.
+  // UV1.z carries the baked compatibility face shade, or the water wave weight.
+  // HDR packs remove that face shade before applying directional lighting;
+  // compatibility rendering retains it. Legacy pack lightmap UV1.xy stays valid.
+  private val floatsPerVertex = 15
 
   /** Primitive mesh builder used on worker threads. ArrayBuffer[Float] routes every
     * vertex component through a generic collection and creates avoidable boxing/GC
@@ -124,6 +125,10 @@ final class Chunk(val cx: Int, val cz: Int, initialAtlas: TextureAtlas, gen: Ter
   private var cutoutVbo = 0; private var cutoutCount = 0
   private var translucentVbo = 0; private var translucentCount = 0
   private var waterVbo = 0; private var waterCount = 0
+  // Published with the mesh, so reflection selection never scans live voxels.
+  private var waterPlane: Option[(Float,Int)] = None
+  @volatile private var pendingWaterPlane: Option[(Float,Int)] = None
+  def flatWaterPlane: Option[(Float,Int)] = waterPlane
 
   // Threaded mesh data: worker fills these, main thread uploads them.
   // The mesh queue flag/revision pair prevents the same chunk from being meshed by
@@ -147,6 +152,9 @@ final class Chunk(val cx: Int, val cz: Int, initialAtlas: TextureAtlas, gen: Ter
 
   def markDirtyMesh(): Unit =
     meshRevision += 1
+
+  /** Bumps when the voxel contents change, so the ray-tracing geometry can rebuild just that chunk. */
+  def geometryRevision: Int = meshRevision
 
   def tryQueueMesh(): Boolean =
     !disposed && meshQueued.compareAndSet(false, true)
@@ -321,6 +329,7 @@ final class Chunk(val cx: Int, val cz: Int, initialAtlas: TextureAtlas, gen: Ter
     val buildRevision = meshRevision
     val opaqueVerts = FloatMeshBuilder(65536); val cutoutVerts = FloatMeshBuilder(8192)
     val translucentVerts = FloatMeshBuilder(8192); val waterVerts = FloatMeshBuilder(16384)
+    val flatWaterFaces = scala.collection.mutable.HashMap.empty[Int,Int]
     val cs = Terrain.chunkSize
     val height = Terrain.worldHeight
     val smooth = smoothLightingEnabled
@@ -385,10 +394,7 @@ final class Chunk(val cx: Int, val cz: Int, initialAtlas: TextureAtlas, gen: Ter
         // surface so all natural oceans, rivers, ponds and lakes share one exact
         // plane. Do not use 0.94 or mixed freshwater heights here; tiny offsets plus
         // transparency caused the visible sheet/step artifacts in large beaches.
-        if raw <= 0 || raw >= 8 then fy + 1f
-        else
-          val level = raw.max(1).min(7).toFloat
-          fy + 0.36f + 0.52f * (level / 7f)
+        fy+WaterSurface.height(raw)
     def waterCornerY(cells: Array[(Int, Int, Int)], fy: Float, fallback: Float): Float =
       var sum = 0f
       var count = 0
@@ -412,21 +418,24 @@ final class Chunk(val cx: Int, val cz: Int, initialAtlas: TextureAtlas, gen: Ter
         nb != Block.Water && (nb == Block.Air || nb.cutout || (nb.translucent && nb != Block.Water))
 
     def shouldDrawWaterSide(lx: Int, y: Int, lz: Int, nlx: Int, ny: Int, nlz: Int): Boolean =
-      if !isWaterSideVisible(nlx, ny, nlz) then false
-      else
-        val raw = localWaterRawLevel(lx, y, lz)
-        if raw <= 0 then false
-        else
-          // Static generated water keeps clean top-only lakes/oceans. Dynamic water draws
-          // every exposed side, including stacked waterfall sides when water exists above.
-          true
+      isWaterSideVisible(nlx,ny,nlz)
+    lazy val foliageExposure=new Array[Byte](region.length)
+    def boundaryLeaf(x: Int,y: Int,z: Int): Boolean =
+      val i=cell(x,y,z)
+      if foliageExposure(i)==0 then
+        val boundary= !BlockTints.isFoliage(localBlock(x-1,y,z)) || !BlockTints.isFoliage(localBlock(x+1,y,z)) ||
+          !BlockTints.isFoliage(localBlock(x,y-1,z)) || !BlockTints.isFoliage(localBlock(x,y+1,z)) ||
+          !BlockTints.isFoliage(localBlock(x,y,z-1)) || !BlockTints.isFoliage(localBlock(x,y,z+1))
+        foliageExposure(i)=if boundary then 2 else 1
+      foliageExposure(i)==2
     def isVisible(nlx: Int, ny: Int, nlz: Int, block: Block): Boolean =
       val nb = localBlock(nlx, ny, nlz)
       if nb == Block.Air then true
       else if block == Block.Water then isWaterSideVisible(nlx, ny, nlz)
       else if nb == Block.Water then true
-      // Leaves hide the face they share with another leaf. The outer shell still draws.
-      else if BlockTints.isFoliage(block) && BlockTints.isFoliage(nb) then false
+      // Keep one interior layer behind cutouts. A hollow shell exposes the sky
+      // through the entire canopy and its reflection; buried core faces stay culled.
+      else if BlockTints.isFoliage(block) && BlockTints.isFoliage(nb) then boundaryLeaf(nlx,ny,nlz)
       else if nb.cutout && !nb.solid then true
       else if block.cutout && nb.cutout then true
       else if nb.cutout then block != nb
@@ -590,6 +599,12 @@ final class Chunk(val cx: Int, val cz: Int, initialAtlas: TextureAtlas, gen: Ter
             // Lightmap input: x = block light, y = sky light, on Minecraft's 0..240 scale.
             target += cornerBlock(i) * 240f
             target += cornerSky(i) * 240f
+            if block==Block.Water then
+              val surface=cfy>fy+0.1f && localBlock(lx,y+1,lz)!=Block.Water
+              val weight=if surface then WaterSurface.waveWeight(math.round(cfx),y,math.round(cfz),
+                (x,h,z) => localBlock(x,h,z)==Block.Water) else 0f
+              target += weight
+            else target += shade
           // Split each quad along the diagonal that keeps light gradients symmetric.
           def weight(i: Int): Float = cornerAo(i) * (0.35f + 0.65f * cornerSky(i).max(cornerBlock(i)))
           val order =
@@ -621,6 +636,7 @@ final class Chunk(val cx: Int, val cz: Int, initialAtlas: TextureAtlas, gen: Ter
             cutoutVerts += vertex.nx; cutoutVerts += vertex.ny; cutoutVerts += vertex.nz
             cutoutVerts += u; cutoutVerts += v
             cutoutVerts += (if vertex.flame then 240f else glow * 240f); cutoutVerts += skyHere * 240f
+            cutoutVerts += (if vertex.flame then 1f else shade)
           }
         else if block == Block.Water then
           // Render dynamic water as actual block-volume water with internal culling.
@@ -633,8 +649,9 @@ final class Chunk(val cx: Int, val cz: Int, initialAtlas: TextureAtlas, gen: Ter
           val swTop = if fullAbove then fy + 1f else waterCornerY(Array((lx, y, lz), (lx - 1, y, lz), (lx, y, lz + 1), (lx - 1, y, lz + 1)), fy, topY)
           if !fullAbove then
             addFace(1.00f, Array((fx, nwTop, fz, 0f, 0f), (fx + 1, neTop, fz, 1f, 0f), (fx + 1, seTop, fz + 1, 1f, 1f), (fx, swTop, fz + 1, 0f, 1f)), FaceKind.Top)
-          // Static generated oceans/lakes are drawn as clean surface water only. Dynamic
-          // placed/flowing water gets full sides so waterfalls and streams read as volume.
+            if nwTop==fy+1f && neTop==nwTop && seTop==nwTop && swTop==nwTop then
+              flatWaterFaces.update(y+1,flatWaterFaces.getOrElse(y+1,0)+1)
+          // Close every exposed side, including static water. Interior faces stay culled.
           if shouldDrawWaterSide(lx, y, lz, lx + 1, y, lz) then
             addFace(0.72f, Array((fx + 1, fy, fz, 0f, 1f), (fx + 1, fy, fz + 1, 1f, 1f), (fx + 1, seTop, fz + 1, 1f, 0f), (fx + 1, neTop, fz, 0f, 0f)), FaceKind.East)
           if shouldDrawWaterSide(lx, y, lz, lx - 1, y, lz) then
@@ -643,6 +660,8 @@ final class Chunk(val cx: Int, val cz: Int, initialAtlas: TextureAtlas, gen: Ter
             addFace(0.86f, Array((fx + 1, fy, fz + 1, 0f, 1f), (fx, fy, fz + 1, 1f, 1f), (fx, swTop, fz + 1, 1f, 0f), (fx + 1, seTop, fz + 1, 0f, 0f)), FaceKind.South)
           if shouldDrawWaterSide(lx, y, lz, lx, y, lz - 1) then
             addFace(0.86f, Array((fx, fy, fz, 0f, 1f), (fx + 1, fy, fz, 1f, 1f), (fx + 1, neTop, fz, 1f, 0f), (fx, nwTop, fz, 0f, 0f)), FaceKind.North)
+          if isWaterSideVisible(lx,y-1,lz) then
+            addFace(0.5f,Array((fx,fy,fz+1,0f,0f),(fx+1,fy,fz+1,1f,0f),(fx+1,fy,fz,1f,1f),(fx,fy,fz,0f,1f)),FaceKind.Bottom)
         else
           // Minecraft's directional face shade: tops full, north/south 0.8, east/west 0.6,
           // undersides 0.5. Shader packs replace this with real sun and sky terms.
@@ -681,6 +700,7 @@ final class Chunk(val cx: Int, val cz: Int, initialAtlas: TextureAtlas, gen: Ter
       releaseMeshQueue()
     else
       packedLight = packed
+      pendingWaterPlane = flatWaterFaces.maxByOption(_._2).map((y,count) => (y.toFloat,count))
       pendingData = Array(opaqueVerts, cutoutVerts, translucentVerts, waterVerts)
       pendingRevision = buildRevision
       meshReady = true
@@ -698,6 +718,7 @@ final class Chunk(val cx: Int, val cz: Int, initialAtlas: TextureAtlas, gen: Ter
       val (cv, cc) = upload(pd(1)); cutoutVbo = cv; cutoutCount = cc
       val (tv, tc) = upload(pd(2)); translucentVbo = tv; translucentCount = tc
       val (wv, wc) = upload(pd(3)); waterVbo = wv; waterCount = wc
+      waterPlane = pendingWaterPlane
       pendingData = null; pendingRevision = -1; meshReady = false; releaseMeshQueue()
       true
     else
@@ -743,6 +764,7 @@ final class Chunk(val cx: Int, val cz: Int, initialAtlas: TextureAtlas, gen: Ter
   def drawWater(camera: Vec3): Unit = if waterCount > 0 then drawBufferAt(waterVbo, waterCount, camera)
 
   def destroy(): Unit =
+    waterPlane=None
     if opaqueVbo != 0 then glDeleteBuffers(opaqueVbo); opaqueVbo = 0; opaqueCount = 0
     if cutoutVbo != 0 then glDeleteBuffers(cutoutVbo); cutoutVbo = 0; cutoutCount = 0
     if translucentVbo != 0 then glDeleteBuffers(translucentVbo); translucentVbo = 0; translucentCount = 0
@@ -857,7 +879,7 @@ final class Chunk(val cx: Int, val cz: Int, initialAtlas: TextureAtlas, gen: Ter
       glTexCoordPointer(2, GL_FLOAT, stride, 40L)
       glClientActiveTexture(GL_TEXTURE1)
       glEnableClientState(GL_TEXTURE_COORD_ARRAY)
-      glTexCoordPointer(2, GL_FLOAT, stride, 48L)
+      glTexCoordPointer(3, GL_FLOAT, stride, 48L)
       glClientActiveTexture(GL_TEXTURE0)
       glDrawArrays(GL_TRIANGLES, 0, count)
       glPopMatrix()

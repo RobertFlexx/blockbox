@@ -29,7 +29,9 @@ import scala.collection.mutable.ArrayBuffer
   val configs = BufferUtils.createPointerBuffer(1); val count = Array(0)
   val attributes = Array(EGL_SURFACE_TYPE,EGL_PBUFFER_BIT,0x3040,EGL_OPENGL_BIT,EGL_RED_SIZE,8,EGL_GREEN_SIZE,8,EGL_BLUE_SIZE,8,EGL_ALPHA_SIZE,8,EGL_DEPTH_SIZE,24,EGL_NONE)
   assert(eglChooseConfig(display,attributes,configs,count) && count(0)>0)
-  val width = 960; val height = 640
+  val savedReview=sys.env.get("BLOCKBOX_REVIEW_WORLD").map(Path.of(_))
+  val width = if savedReview.nonEmpty then 1920 else 960
+  val height = if savedReview.nonEmpty then 1080 else 640
   val surface = eglCreatePbufferSurface(display,configs.get(0),Array(EGL_WIDTH,width,EGL_HEIGHT,height,EGL_NONE))
   val context = eglCreateContext(display,configs.get(0),EGL_NO_CONTEXT,Array(EGL_NONE))
   assert(surface!=EGL_NO_SURFACE && context!=EGL_NO_CONTEXT)
@@ -45,13 +47,15 @@ import scala.collection.mutable.ArrayBuffer
   org.lwjgl.opengl.GL43.glDebugMessageCallback(debug,0L)
   println(s"[pipeline-render] ${glGetString(GL_RENDERER)} / ${glGetString(GL_VERSION)}")
   try
-    ShaderPipelineTest.pipeline(root,width,height)
-    ShaderPipelineTest.gameFrames(root,artifacts,width,height)
-    ShaderPipelineTest.playerPreview(artifacts,width,height)
-    ShaderPipelineTest.atmosphereFrames(artifacts,width,height)
-    ShaderPipelineTest.polishFrames(root,artifacts,width,height)
-    ShaderPipelineTest.skyPreview(artifacts,width,height)
-    println(s"[pipeline-render] all engine render checks passed; previews in $artifacts")
+    if savedReview.nonEmpty then ShaderPipelineTest.savedWorldFrames(root,savedReview.get,artifacts,width,height)
+    else
+      ShaderPipelineTest.pipeline(root,width,height)
+      ShaderPipelineTest.gameFrames(root,artifacts,width,height)
+      ShaderPipelineTest.playerPreview(artifacts,width,height)
+      ShaderPipelineTest.atmosphereFrames(artifacts,width,height)
+      ShaderPipelineTest.polishFrames(root,artifacts,width,height)
+      ShaderPipelineTest.skyPreview(artifacts,width,height)
+    println(s"[pipeline-render] ${if savedReview.nonEmpty then "saved gameplay review" else "all engine render checks"} passed; previews in $artifacts")
   finally
     org.lwjgl.opengl.GL43.glDebugMessageCallback(null,0L)
     debug.free()
@@ -59,6 +63,85 @@ import scala.collection.mutable.ArrayBuffer
     eglDestroyContext(display,context); eglDestroySurface(display,surface); eglTerminate(display)
 
 object ShaderPipelineTest:
+  /** Read-only review of a real saved camera, terrain, preferences and weather.
+    * Shader selection lives in a temporary pack root; no save/settings are written.
+    */
+  def savedWorldFrames(root: Path,world: Path,output: Path,width: Int,height: Int): Unit =
+    val game=Blockbox()
+    val preferences=game.getClass.getDeclaredMethod("loadUserSettings"); preferences.setAccessible(true); preferences.invoke(game)
+    val packMethod=game.getClass.getDeclaredMethod("selectedTexturePack"); packMethod.setAccessible(true)
+    val atlas=TextureAtlas(packMethod.invoke(game).asInstanceOf[TexturePack],get[Boolean](game,"anisotropicFiltering"))
+    set(game,"textureAtlas",atlas)
+    val chunks=get[mutable.AnyRefMap[(Int,Int),Chunk]](game,"chunks")
+    var savedChunks=Vector.empty[(Int,Int)]
+    blockbox.io.BlockboxSaveFiles.readWorldData(world,in =>
+      set(game,"worldSeed",in.readLong())
+      set(game,"camera",Vec3(in.readFloat(),in.readFloat(),in.readFloat()))
+      set(game,"yaw",in.readFloat()); set(game,"pitch",in.readFloat())
+      set(game,"gameMode",GameMode.fromOrdinal(in.readByte().toInt)); set(game,"worldCheatsEnabled",in.readBoolean())
+      val count=in.readInt(); require(count>=0 && count<=200000,"Invalid saved chunk count")
+      savedChunks=Vector.fill(count)((in.readInt(),in.readInt()))
+      val inventory=game.getClass.getDeclaredMethod("readWorldExtras",classOf[java.io.DataInputStream]); inventory.setAccessible(true); inventory.invoke(game,in)
+      if in.available()>=4 && in.readInt()==0x454E5631 then
+        val env=blockbox.net.BlockboxNet.parseEnvironment(blockbox.net.BlockboxNet.packet(in.readUTF()))
+        set(game,"worldClock",env.time.toDouble); set(game,"timeOverride",if env.timeOverride<0 then None else Some(env.timeOverride))
+        set(game,"rainStrength",env.rain); set(game,"wetness",env.wetness); set(game,"stormCloudCover",env.cloudCover)
+        set(game,"weatherWind",env.wind)
+    )
+    val seed=get[Long](game,"worldSeed"); val gen=TerrainGenerator(seed)
+    set(game,"terrainGen",gen)
+    val camera=get[Vec3](game,"camera"); val distance=get[Int](game,"renderDistance")*Terrain.chunkSize+32
+    val temporary=Files.createTempDirectory("blockbox-saved-review")
+    blockbox.io.BlockboxFiles.copyRecursive(root.resolve("assets/shaders"),temporary.resolve("assets/shaders"))
+    blockbox.io.BlockboxFiles.copyRecursive(root.resolve("shaderpacks"),temporary.resolve("shaderpacks"))
+    val pipeline=BlockboxShaderPipeline(temporary.toFile); pipeline.initialize()
+    val fovea=BlockboxFovea(); pipeline.setFovea(fovea)
+    set(game,"shaderPipeline",pipeline); set(game,"foveaPass",fovea); set(game,"screen",Screen.Playing)
+    set(game,"viewmodelYaw",get[Float](game,"yaw")); set(game,"viewmodelPitch",get[Float](game,"pitch"))
+    try
+      savedChunks.filter { (cx,cz) =>
+        val dx=cx*16+8-camera.x; val dz=cz*16+8-camera.z
+        dx*dx+dz*dz<distance*distance
+      }.foreach { (cx,cz) =>
+        val chunk=Chunk(cx,cz,atlas,gen,smoothLightingEnabled=get[Boolean](game,"smoothLighting"))
+        chunk.load(world.resolve("chunks").toFile)
+        chunks((cx,cz))=chunk
+      }
+      chunks.values.foreach { c =>
+        for dx <- -1 to 1; dz <- -1 to 1 if dx!=0 || dz!=0 do chunks.get((c.cx+dx,c.cz+dz)).foreach(c.setNeighbor(dx,dz,_))
+      }
+      chunks.values.foreach(c => assert(c.forceBuildNowAndUpload()))
+      val depths=mutable.HashMap.empty[Int,Int]
+      for x <- camera.x.toInt-32 to camera.x.toInt+32; z <- camera.z.toInt-32 to camera.z.toInt+32 do
+        chunks.get((Math.floorDiv(x,16),Math.floorDiv(z,16))).foreach { c =>
+          val lx=Math.floorMod(x,16); val lz=Math.floorMod(z,16)
+          var y=Terrain.worldHeight-1
+          while y>0 && c.getBlock(lx,y,lz)!=Block.Water do y-=1
+          if y>0 then
+            val top=y
+            while y>0 && c.getBlock(lx,y,lz)==Block.Water do y-=1
+            depths.update(top-y,depths.getOrElse(top-y,0)+1)
+        }
+      println(s"[saved-review] nearby water columns by depth=${depths.toSeq.sortBy(_._1).mkString(",")} cutout vertices=${chunks.valuesIterator.map(c => get[Int](c,"cutoutCount").toLong).sum}")
+      val time=get[Double](game,"worldClock").toFloat
+      val rain=get[Float](game,"rainStrength")
+      val cells=WeatherField.cells(seed,time,camera.x,camera.z,rain,get[Int](game,"cloudRenderDistance")*16f)
+      val local=WeatherField.sample(cells,camera.x,camera.z)
+      set(game,"weatherCells",cells); set(game,"weatherStrikes",WeatherField.strikes(cells,time))
+      set(game,"localRain",local.rain); set(game,"localCloud",local.cloud); set(game,"localWetness",get[Float](game,"wetness")*local.cloud)
+      println(s"[saved-review] ${world.getFileName}: seed=$seed eye=$camera fov=${get[Float](game,"fov")} chunks=${chunks.size} time=$time")
+      for pack <- Seq("ultra","ray-traced") do
+        assert(pipeline.selectPack(pack))
+        for _ <- 0 until 3 do game.renderFrame(width,height)
+        capture(output.resolve("saved-world-"+pack+".png"),width,height)
+        noError("saved world full gameplay frame "+pack)
+        println(s"[saved-review] $pack reflection=${pipeline.hasWaterReflection} hardware=${BlockboxRayTrace.frameReady}")
+    finally
+      chunks.values.foreach(_.dispose()); chunks.clear(); pipeline.destroy(); atlas.destroy(); fovea.release()
+      get[FirstPersonPass](game,"firstPersonPass").destroy(); BlockboxSky.destroy(); TorchEffects.destroy(); BlockboxSkin.dispose()
+      RainRenderer.destroy(); UnderwaterEffect.destroy()
+      blockbox.io.BlockboxFiles.deleteRecursive(temporary)
+
   def polishFrames(root: Path,output: Path,width: Int,height: Int): Unit =
     val recorded=Files.walk(root.resolve("assets/audio"))
     val clips=try
@@ -85,7 +168,7 @@ object ShaderPipelineTest:
     blockbox.io.BlockboxFiles.copyRecursive(root.resolve("assets/shaders"),temporary.resolve("assets/shaders"))
     blockbox.io.BlockboxFiles.copyRecursive(root.resolve("shaderpacks"),temporary.resolve("shaderpacks"))
     val pipeline=BlockboxShaderPipeline(temporary.toFile,Some("default")); pipeline.initialize()
-    assert(pipeline.selectPack("aether-ultra"),"UI selection overrides the launch pack")
+    assert(pipeline.selectPack("ultra"),"UI selection overrides the launch pack")
     try
       for (name,time,moon) <- Seq(("sun-hdr",150f,false),("sunrise-hdr",12f,false),("moon-hdr",850f,true),("moon-crescent-hdr",850f+2160f,true)) do
         val phase=BlockboxSky.dayPhase(time); val daylight=BlockboxSky.daylightFactor(phase)
@@ -121,7 +204,7 @@ object ShaderPipelineTest:
       set(game,"textureAtlas",atlas); set(game,"terrainGen",gen); set(game,"shaderPipeline",pipeline)
       set(game,"renderDistance",5); set(game,"cloudRenderDistance",24); set(game,"foveatedRendering",false)
       set(game,"framebufferWidth",width); set(game,"framebufferHeight",height); set(game,"worldClock",150.0)
-      assert(pipeline.selectPack("minecraft-plus"))
+      assert(pipeline.selectPack("ultra"))
       try
         import scala.jdk.CollectionConverters.*
         for row <- Files.readAllLines(output.resolve("biome-locations.csv")).asScala.drop(1) do
@@ -211,7 +294,7 @@ object ShaderPipelineTest:
       assert(math.abs(retained(0)-0.8f)<0.02f,"working output retained after shader error")
       noError("failed reload recovery")
       blockbox.io.BlockboxFiles.copyRecursive(root.resolve("shaderpacks"),temporary.resolve("shaderpacks"))
-      for _ <- 0 until 2; pack <- Vector("aether-ultra","default","clarity","default","minecraft-plus","default","nocturne","default","aether-ultra") do
+      for _ <- 0 until 2; pack <- Vector("ultra","default","ray-traced","default","ultra","default","ray-traced") do
         assert(pipeline.selectPack(pack),s"switch to $pack: ${pipeline.status}")
         assert(pipeline.packName==pack && pipeline.prepareFrame(width,height))
         pipeline.clearPreparedFrame(0.28f,0.32f,0.36f)
@@ -226,6 +309,59 @@ object ShaderPipelineTest:
         pipeline.finishFrame(width,height,150)
         assert(readPixel().take(3).forall(v => v.isFinite && v>0.01f),s"$pack rendered black")
         noError(s"switch to $pack")
+      assert(pipeline.selectPack("ultra") && pipeline.prepareFrame(width,height))
+      pipeline.clearPreparedFrame(0,0,0)
+      glMatrixMode(GL_PROJECTION); glLoadIdentity(); glOrtho(-4,4,-4,4,0.25,100)
+      glMatrixMode(GL_MODELVIEW); glLoadIdentity(); glTranslatef(0,-62,-10)
+      assert(pipeline.beginWorld(0.6f,0.7f,0.8f,100,150,1,150,(0.5f,0.8f,0.2f),(-0.5f,-0.8f,-0.2f),(0,62,0),0.25f,100,0,0,false))
+      val before=BufferUtils.createFloatBuffer(16); glGetFloatv(GL_MODELVIEW_MATRIX,before)
+      val sceneTarget=glGetInteger(GL_FRAMEBUFFER_BINDING)
+      assert(pipeline.captureWaterReflection(60) {
+        pipeline.end(); glDisable(GL_TEXTURE_2D); glDisable(GL_LIGHTING); glDisable(GL_ALPHA_TEST)
+        def reflectedQuad(y: Float): Unit =
+          glBegin(GL_QUADS)
+          glVertex3f(-2,y,0); glVertex3f(2,y,0); glVertex3f(2,y+1,0); glVertex3f(-2,y+1,0)
+          glEnd()
+        glColor4f(0,1,0,1); reflectedQuad(60.5f)
+        glColor4f(1,0,0,1); reflectedQuad(58.5f)
+      })
+      assert(pipeline.hasWaterReflection && glGetInteger(GL_FRAMEBUFFER_BINDING)==sceneTarget,"capture restores the scene target")
+      val after=BufferUtils.createFloatBuffer(16); glGetFloatv(GL_MODELVIEW_MATRIX,after)
+      assert((0 until 16).forall(i => before.get(i)==after.get(i)),"capture restores the camera transform")
+      val reflected=BufferUtils.createFloatBuffer((width/2)*(height/2)*4)
+      glBindTexture(GL_TEXTURE_2D,get[Int](pipeline,"reflectionColor"))
+      glGetTexImage(GL_TEXTURE_2D,0,GL_RGBA,GL_FLOAT,reflected)
+      var above=0; var below=0
+      for i <- 0 until (width/2)*(height/2) do
+        if reflected.get(i*4+1)>0.9f then above+=1
+        if reflected.get(i*4)>0.9f then below+=1
+      assert(above>100 && below==0,"the mirror includes above-water objects and clips submerged geometry")
+      glBindTexture(GL_TEXTURE_2D,0); pipeline.end(); pipeline.finishFrame(width,height,150)
+      assert(pipeline.prepareFrame(width,height) && !pipeline.hasWaterReflection,"a previous reflection cannot leak into the next frame")
+      pipeline.clearPreparedFrame(0,0,0); pipeline.finishFrame(width,height,150)
+      noError("planar reflection coverage, clipping and state restoration")
+      assert(pipeline.selectPack("fixture") && pipeline.prepareFrame(width,height))
+      glDepthMask(true); pipeline.clearPreparedFrame(0,0,0)
+      glUseProgram(0); glDisable(GL_TEXTURE_2D); glDisable(GL_FOG); glDisable(GL_BLEND)
+      glEnable(GL_DEPTH_TEST); glDepthFunc(GL_LESS)
+      glMatrixMode(GL_PROJECTION); glLoadIdentity(); glOrtho(-1,1,-1,1,-1,1)
+      glMatrixMode(GL_MODELVIEW); glLoadIdentity()
+      def depthQuad(z: Float): Unit =
+        glBegin(GL_QUADS)
+        glVertex3f(-1,-1,z); glVertex3f(1,-1,z); glVertex3f(1,1,z); glVertex3f(-1,1,z)
+        glEnd()
+      def depthAtCenter(): Float =
+        val value=BufferUtils.createFloatBuffer(1)
+        glReadPixels(width/2,height/2,1,1,GL_DEPTH_COMPONENT,GL_FLOAT,value); value.get(0)
+      depthQuad(0)
+      val opaqueDepth=depthAtCenter()
+      pipeline.beginWaterSurface()
+      depthQuad(0.6f); depthQuad(0.2f) // near water, then far water in the wrong draw order
+      assert(math.abs(depthAtCenter()-0.2f)<0.001f,"water keeps the nearest interface independent of face order")
+      pipeline.endWaterSurface()
+      assert(math.abs(depthAtCenter()-opaqueDepth)<0.0001f,"refraction retains the original opaque depth")
+      noError("isolated water depth")
+      pipeline.finishFrame(width,height,150)
     finally
       pipeline.destroy(); scale.release()
       blockbox.io.BlockboxFiles.deleteRecursive(temporary)
@@ -234,7 +370,7 @@ object ShaderPipelineTest:
     val field = game.getClass.getDeclaredFields.find(f => f.getName==name || f.getName.endsWith("$$"+name)).get
     field.setAccessible(true); field.set(game,value)
 
-  private def get[A](game: Blockbox,name: String): A =
+  private def get[A](game: AnyRef,name: String): A =
     val field = game.getClass.getDeclaredFields.find(f => f.getName==name || f.getName.endsWith("$$"+name)).get
     field.setAccessible(true); field.get(game).asInstanceOf[A]
 
@@ -246,7 +382,7 @@ object ShaderPipelineTest:
     val temporary = Files.createTempDirectory("blockbox-game-frame")
     blockbox.io.BlockboxFiles.copyRecursive(root.resolve("assets/shaders"),temporary.resolve("assets/shaders"))
     blockbox.io.BlockboxFiles.copyRecursive(root.resolve("shaderpacks"),temporary.resolve("shaderpacks"))
-    Files.writeString(temporary.resolve("shaderpacks/active.txt"),"minecraft-plus\n")
+    Files.writeString(temporary.resolve("shaderpacks/active.txt"),"ultra\n")
     val pipeline = BlockboxShaderPipeline(temporary.toFile); pipeline.initialize()
     val fovea = BlockboxFovea(); fovea.enabled=false; pipeline.setFovea(fovea)
     val chunks = get[mutable.AnyRefMap[(Int,Int),Chunk]](game,"chunks")
@@ -265,15 +401,13 @@ object ShaderPipelineTest:
       val render = game.getClass.getDeclaredMethod("renderWorld"); render.setAccessible(true)
       def frame(name: String,position: Vec3,yaw: Float,pitch: Float,clouds: Boolean): Unit =
         set(game,"camera",position); set(game,"yaw",yaw); set(game,"pitch",pitch); set(game,"cloudsEnabled",clouds)
-        assert(pipeline.prepareFrame(width,height)); pipeline.clearPreparedFrame(0.60f,0.73f,0.85f)
-        render.invoke(game)
+        game.renderFrame(width,height)
         if pitch==90f then assert(get[ArrayBuffer[Chunk]](game,"renderChunkScratch").length==49,"downward camera retains all loaded chunks at every yaw")
-        pipeline.finishFrame(width,height,150)
         noError(name)
         capture(output.resolve(name+".png"),width,height)
       val spawn = BlockboxWorld.findSafeSpawn(gen,(x,y,z) => chunks.get((Math.floorDiv(x,16),Math.floorDiv(z,16))).map(c => c.getBlock(Math.floorMod(x,16),y,Math.floorMod(z,16))))
       frame("terrain",spawn+Vec3(0,10f,0),0,22,true)
-      for pack <- Vector("aether-ultra","default","clarity","nocturne","minecraft-plus") do
+      for pack <- Vector("ultra","default","ray-traced") do
         assert(pipeline.selectPack(pack),pipeline.status)
         frame("shader-"+pack,spawn+Vec3(0,10f,0),0,22,true)
       frame("aerial",Vec3(8,300,8),0,90,true)
@@ -301,13 +435,133 @@ object ShaderPipelineTest:
       torchFrames(game,atlas,pipeline,chunks,output,width,height)
       firstPersonFrames(game,output,width,height)
       heldToolFrames(game,output,width,height)
+      materialLightingFrames(game,atlas,pipeline,chunks,output,width,height)
       survivalFrames(game,atlas,pipeline,chunks,output,width,height)
       inventoryFrames(game,output,width,height)
+      cinematicFrames(game,atlas,pipeline,chunks,output,width,height)
     finally
       chunks.values.foreach(_.dispose()); atlas.destroy(); pipeline.destroy(); fovea.release()
       get[FirstPersonPass](game,"firstPersonPass").destroy(); BlockboxSky.destroy(); TorchEffects.destroy(); BlockboxSkin.dispose()
       RainRenderer.destroy(); UnderwaterEffect.destroy()
       blockbox.io.BlockboxFiles.deleteRecursive(temporary)
+
+  private def materialLightingFrames(game: Blockbox,atlas: TextureAtlas,pipeline: BlockboxShaderPipeline,
+                                     chunks: mutable.AnyRefMap[(Int,Int),Chunk],output: Path,width: Int,height: Int): Unit =
+    chunks.values.foreach(_.dispose()); chunks.clear()
+    val gen=TerrainGenerator(42)
+    val blocks=new Array[Byte](16*16*Terrain.worldHeight)
+    blocks((40*16+8)*16+8)=Block.Stone.id
+    val cube=Chunk(0,0,atlas,gen,blocks)
+    chunks((0,0))=cube; assert(cube.forceBuildNowAndUpload())
+    set(game,"terrainGen",gen); set(game,"camera",Vec3(12.5f,43.7f,14.5f)); set(game,"yaw",-34f); set(game,"pitch",24f)
+    set(game,"shadersEnabled",true); set(game,"foveatedRendering",false); set(game,"worldClock",150.0)
+    assert(pipeline.selectPack("ultra"))
+    game.renderFrame(width,height)
+    val albedo=BufferUtils.createFloatBuffer(width*height*4)
+    val normals=BufferUtils.createFloatBuffer(width*height*4)
+    glBindTexture(GL_TEXTURE_2D,get[Array[Int]](pipeline,"sceneExtraColors")(4)); glGetTexImage(GL_TEXTURE_2D,0,GL_RGBA,GL_FLOAT,albedo)
+    glBindTexture(GL_TEXTURE_2D,get[Int](pipeline,"sceneNormal")); glGetTexImage(GL_TEXTURE_2D,0,GL_RGBA,GL_FLOAT,normals)
+    glBindTexture(GL_TEXTURE_2D,0)
+    val inverse=get[Array[Float]](pipeline,"modelViewInverse")
+    val sums=Array.fill(3)(0.0); val counts=Array.fill(3)(0)
+    for i <- 0 until width*height if albedo.get(i*4+3)>0.9f do
+      val nx=normals.get(i*4)*2-1; val ny=normals.get(i*4+1)*2-1; val nz=normals.get(i*4+2)*2-1
+      val worldY=inverse(1)*nx+inverse(5)*ny+inverse(9)*nz
+      val worldX=inverse(0)*nx+inverse(4)*ny+inverse(8)*nz
+      val face=if worldY>0.8f then 0 else if math.abs(worldX)>0.8f then 1 else 2
+      sums(face)+=albedo.get(i*4)*0.2126+albedo.get(i*4+1)*0.7152+albedo.get(i*4+2)*0.0722
+      counts(face)+=1
+    assert(counts.forall(_>20),s"material fixture must expose three faces: ${counts.toSeq}")
+    val means=sums.zip(counts).map((sum,count) => sum/count)
+    assert(means.min/means.max>0.78,s"stone albedo is independent of face direction before lighting: ${means.toSeq}")
+    capture(output.resolve("material-directional-lighting.png"),width,height); noError("material face shading")
+    println("[material-render] three cube faces retain the same albedo before directional lighting")
+
+  /** One lakeshore across lighting/weather changes, with real shadow casters,
+    * transparent water, torch sources and a roof. This catches palette regressions
+    * that isolated shader compilation or a flat fullbright quad cannot show.
+    */
+  private def cinematicFrames(game: Blockbox,atlas: TextureAtlas,pipeline: BlockboxShaderPipeline,
+                              chunks: mutable.AnyRefMap[(Int,Int),Chunk],output: Path,width: Int,height: Int): Unit =
+    chunks.values.foreach(_.dispose()); chunks.clear()
+    val gen=TerrainGenerator(42)
+    set(game,"terrainGen",gen); set(game,"renderDistance",8); set(game,"cloudRenderDistance",32)
+    set(game,"screen",Screen.Playing); set(game,"shadersEnabled",true); set(game,"cloudsEnabled",true)
+    val tops=mutable.HashMap.empty[(Int,Int),Int]
+    for cx <- -4 to 3; cz <- -4 to 3 do
+      val blocks=new Array[Byte](16*16*Terrain.worldHeight)
+      for x <- 0 until 16; z <- 0 until 16 do
+        val wx=cx*16+x; val wz=cz*16+z
+        val r=math.sqrt(wx*wx+wz*wz).toFloat
+        val top=if r<10 then 22+(r*0.9f).toInt else if r<28 then (31+r/4).toInt.min(38) else
+          40+((r-28)*0.29f+math.sin(wx*0.13)*1.4+math.cos(wz*0.1)*1.4).toInt.max(0).min(12)
+        tops((wx,wz))=top
+        for y <- 0 to top.max(39) do
+          val b=if y>top then Block.Water else if y==top then
+            (if r<30 then Block.Sand else Block.Grass) else if y>top-3 then Block.Dirt else Block.Stone
+          blocks((y*16+z)*16+x)=b.id
+      chunks((cx,cz))=Chunk(cx,cz,atlas,gen,blocks)
+    def put(x: Int,y: Int,z: Int,b: Block): Unit =
+      chunks.get((Math.floorDiv(x,16),Math.floorDiv(z,16))).foreach(_.setBlock(Math.floorMod(x,16),y,Math.floorMod(z,16),b))
+    // Explicit water edits survive the world's old-water repair at this altitude.
+    for ((x,z),top) <- tops if top<39; y <- top+1 to 39 do put(x,y,z,Block.Water)
+    val rng=new scala.util.Random(619)
+    for x <- -58 to 54 by 7; z <- -58 to 54 by 7 do
+      val r=math.sqrt(x*x+z*z)
+      if r>32 && rng.nextFloat()<0.76f && !(x> -40 && x< -20 && z> -20 && z<1) then
+        val y=tops((x,z))+1; val h=6+rng.nextInt(4)
+        for k <- 0 until h do put(x,y+k,z,Block.Wood)
+        for k <- 2 to h+2; dx <- -3 to 3; dz <- -3 to 3 if math.abs(dx)+math.abs(dz)<(if k>h then 3 else 5) do
+          if dx!=0 || dz!=0 || k>=h then put(x+dx,y+k,z+dz,Block.Leaves)
+    // A lit log cabin gives night light a useful warm subject against the blue sky.
+    for x <- -37 to -26; z <- -16 to -6; y <- tops((x,z))+1 to 43 do put(x,y,z,Block.Dirt)
+    for x <- -37 to -26; z <- -16 to -6 do
+      put(x,44,z,Block.Planks)
+      for y <- 45 to 48 do
+        val wall=x== -37 || x== -26 || z== -16 || z== -6
+        val corner=(x== -37 || x== -26) && (z== -16 || z== -6)
+        val window=wall && !corner && (y==46 || y==47) && (z== -12 || z== -11 || x== -32 || x== -31)
+        put(x,y,z,if !wall then Block.Air else if window then Block.Glass else if corner then Block.Wood else Block.Planks)
+    for x <- -38 to -25; z <- -17 to -5 do
+      val y=49+((5.5f-math.abs(x+31.5f))*0.65f).toInt.max(0)
+      put(x,y,z,Block.Wood)
+    for (x,z) <- Seq((-27,-8),(-27,-14),(-35,-8),(-35,-14)) do put(x,45,z,Block.Torch)
+    // Two porch torches; unlike interior sources these are visible in the mirror.
+    for z <- Seq(-14,-8) do {put(-25,43,z,Block.Stone); put(-25,44,z,Block.Torch)}
+    chunks.values.foreach { c =>
+      for dx <- -1 to 1; dz <- -1 to 1 if dx!=0 || dz!=0 do chunks.get((c.cx+dx,c.cz+dz)).foreach(c.setNeighbor(dx,dz,_))
+    }
+    chunks.values.foreach(c => assert(c.forceBuildNowAndUpload()))
+    val render=game.getClass.getDeclaredMethod("renderWorld"); render.setAccessible(true)
+    val flames=game.getClass.getDeclaredMethod("refreshTorchFlames"); flames.setAccessible(true); flames.invoke(game)
+    def frame(pack: String,name: String,time: Float,rain: Float,underwater: Boolean=false): Float =
+      assert(pipeline.selectPack(pack))
+      set(game,"camera",if underwater then Vec3(0,31,0) else Vec3(22,43,14))
+      set(game,"yaw",if underwater then 73f else -65f); set(game,"pitch",if underwater then -55f else -3f)
+      set(game,"worldClock",time.toDouble)
+      set(game,"localRain",rain); set(game,"localCloud",rain); set(game,"stormCloudCover",rain)
+      set(game,"localWetness",rain); set(game,"weatherWind",0.35f)
+      set(game,"weatherCells",Vector(WeatherField.Cell(0,0,260,rain,42)))
+      assert(pipeline.prepareFrame(width,height)); pipeline.clearPreparedFrame(0,0,0)
+      render.invoke(game)
+      assert(pipeline.hasWaterReflection == !underwater,"lake views capture a mirror only above water")
+      pipeline.finishFrame(width,height,time)
+      if pack=="ray-traced" && sys.env.get("BLOCKBOX_REQUIRE_HARDWARE_RT").contains("1") then
+        assert(BlockboxRayTrace.frameReady,s"$name must complete a hardware ray frame: ${BlockboxRayTrace.status}")
+      capture(output.resolve(s"cinematic-$name-$pack.png"),width,height); noError(s"$pack $name")
+      val pixels=BufferUtils.createFloatBuffer(width*height*4)
+      glReadPixels(0,0,width,height,GL_RGBA,GL_FLOAT,pixels)
+      (0 until width*height).map(i => pixels.get(i*4)*0.2126f+pixels.get(i*4+1)*0.7152f+pixels.get(i*4+2)*0.0722f).sum/(width*height)
+    for pack <- Seq("ultra","ray-traced") do
+      val day=frame(pack,"day",150,0)
+      val sunset=frame(pack,"sunset",575,0)
+      val night=frame(pack,"night",1030,0)
+      val storm=frame(pack,"storm",150,1)
+      frame(pack,"underwater-sun",150,0,true)
+      assert(day>0.2f && sunset>0.08f,"day and golden hour preserve visible terrain")
+      assert(night<day*0.7f,"night has its own dark exposure instead of a grey daylight horizon")
+      assert(storm<day*0.85f,"rain darkens both the atmosphere and the landscape")
+    println("[cinematic-render] both packs passed daylight, sunset, blue night and storm scene checks")
 
   def playerPreview(output: Path,width: Int,height: Int): Unit =
     glBindFramebuffer(GL_FRAMEBUFFER,0); glViewport(0,0,width,height)
@@ -403,7 +657,7 @@ object ShaderPipelineTest:
       chunks((Math.floorDiv(x,16),Math.floorDiv(z,16))).setBlock(Math.floorMod(x,16),y,Math.floorMod(z,16),block)
     // Edited water is preserved above sea level by the legacy-water repair.
     for x <- 2 to 18; z <- -10 to 5; y <- 36 to 39 do put(x,y,z,Block.Water)
-    for (x,z) <- Seq((-10,-7),(-5,-18),(24,-3),(20,-18),(-16,5),(-9,15),(25,16)) do
+    for (x,z) <- Seq((-1,-1),(-10,-7),(-5,-18),(24,-3),(20,-18),(-16,5),(-9,15),(25,16)) do
       for y <- 40 to 45 do put(x,y,z,Block.Wood)
       for dx <- -2 to 2; dz <- -2 to 2; y <- 44 to 47 if !(math.abs(dx)==2 && math.abs(dz)==2) && (dx!=0 || dz!=0 || y>45) do put(x+dx,y,z+dz,Block.Leaves)
     put(-2,40,4,Block.Furnace)
@@ -411,6 +665,30 @@ object ShaderPipelineTest:
       for dx <- -1 to 1; dz <- -1 to 1 if dx!=0 || dz!=0 do chunks.get((c.cx+dx,c.cz+dz)).foreach(c.setNeighbor(dx,dz,_))
     }
     chunks.values.foreach(c => assert(c.forceBuildNowAndUpload()))
+    // Inspect the uploaded mesh: bank corners must stay fixed while interior water
+    // can move. These are the actual VBO weights consumed by both HDR packs.
+    val pondChunk=chunks((0,0))
+    val waterVbo=get[Int](pondChunk,"waterVbo"); val waterCount=get[Int](pondChunk,"waterCount")
+    val waterVertices=BufferUtils.createFloatBuffer(waterCount*15)
+    org.lwjgl.opengl.GL15.glBindBuffer(org.lwjgl.opengl.GL15.GL_ARRAY_BUFFER,waterVbo)
+    org.lwjgl.opengl.GL15.glGetBufferSubData(org.lwjgl.opengl.GL15.GL_ARRAY_BUFFER,0L,waterVertices)
+    org.lwjgl.opengl.GL15.glBindBuffer(org.lwjgl.opengl.GL15.GL_ARRAY_BUFFER,0)
+    var bankCorners=0; var interiorCorners=0
+    for i <- 0 until waterCount if waterVertices.get(i*15+8)>0.5f do
+      val x=waterVertices.get(i*15); val z=waterVertices.get(i*15+2); val weight=waterVertices.get(i*15+14)
+      if x==2f || z==6f then
+        assert(weight==0f,"shoreline vertices cannot rise above the bank"); bankCorners+=1
+      if x>=5f && x<=13f && z>= -6f && z<=2f then
+        assert(weight==1f,"interior water retains its waves"); interiorCorners+=1
+    assert(bankCorners>0 && interiorCorners>0,"the shoreline fixture must exercise both wave states")
+    val floatingBlocks=new Array[Byte](16*16*Terrain.worldHeight)
+    floatingBlocks((10*16+8)*16+8)=Block.Water.id
+    val floating=Chunk(5,5,atlas,gen,floatingBlocks)
+    try
+      assert(floating.getWaterRawLevel(8,10,8)==0,"fixture uses static water")
+      assert(floating.forceBuildNowAndUpload())
+      assert(get[Int](floating,"waterCount")==36,"an isolated water volume closes its top, bottom and four sides")
+    finally floating.dispose()
     val remotes=get[mutable.HashMap[String,RemotePlayer]](game,"remotePlayers")
     val mobs=get[ArrayBuffer[ZombieSystem.Zombie]](game,"zombies")
     val hotbar=get[Array[Block]](game,"hotbarBlocks"); val counts=get[Array[Int]](game,"hotbarCounts")
@@ -422,7 +700,7 @@ object ShaderPipelineTest:
     val health=game.getClass.getDeclaredMethod("renderHealth"); health.setAccessible(true)
     val bar=game.getClass.getDeclaredMethod("renderHotbar"); bar.setAccessible(true)
     set(game,"shadersEnabled",true); set(game,"foveatedRendering",false); set(game,"cloudsEnabled",true)
-    assert(pipeline.selectPack("minecraft-plus"))
+    assert(pipeline.selectPack("ultra"))
     def frame(name: String,eye: Vec3,heading: Float,look: Float,rain: Float,under: Boolean=false,shaders: Boolean=true): Unit =
       set(game,"camera",eye); set(game,"yaw",heading); set(game,"pitch",look)
       set(game,"viewmodelYaw",heading); set(game,"viewmodelPitch",look)
@@ -450,13 +728,57 @@ object ShaderPipelineTest:
     val wet=RemotePlayer("Swimming",Vec3(8,40.4f,-2),Vec3(8,40.4f,-2),150,150,0,0,0,1,Block.DiamondSword)
     remotes(wet.name)=wet
     frame("survival-clear",Vec3(0,43,14),0,13,0)
+    val originalPosition=dry.pos
+    dry.pos=Vec3(-4,41.62f,8)
+    frame("survival-shadow-with-avatar",Vec3(0,43,14),0,13,0)
+    val project=game.getClass.getDeclaredMethod("projectWorldToScreen",classOf[Vec3]); project.setAccessible(true)
+    val foot=project.invoke(game,Vec3(-4,40,8)).asInstanceOf[Option[(Float,Float,Float)]].get
+    val sx=foot._1.toInt-70; val sy=height-foot._2.toInt-45
+    def groundPixels(): Array[Float] =
+      val pixels=BufferUtils.createFloatBuffer(100*40*4)
+      glReadPixels(sx,sy,100,40,GL_RGBA,GL_FLOAT,pixels)
+      Array.tabulate(100*40)(i => pixels.get(i*4)*0.2126f+pixels.get(i*4+1)*0.7152f+pixels.get(i*4+2)*0.0722f)
+    val shaded=groundPixels()
+    remotes.remove(dry.name)
+    frame("survival-shadow-without-avatar",Vec3(0,43,14),0,13,0)
+    val bare=groundPixels()
+    val shadowPixels=bare.zip(shaded).count((a,b) => a-b>0.012f)
+    assert(shadowPixels>=8,s"an avatar casts a visible shadow on the ground: $shadowPixels pixels")
+    remotes(dry.name)=dry
+    frame("survival-entity-lighting",Vec3(-4,41.8f,12),0,4,0)
+    dry.pos=originalPosition
     frame("survival-storm",Vec3(0,43,14),0,13,1)
-    for pack <- Seq("aether-ultra","clarity","nocturne","default") do
+    for pack <- Seq("ultra","ray-traced","default") do
       assert(pipeline.selectPack(pack)); frame("survival-storm-"+pack,Vec3(0,43,14),0,13,1)
-    assert(pipeline.selectPack("minecraft-plus"))
+      if pack=="ray-traced" then
+        if sys.env.get("BLOCKBOX_REQUIRE_HARDWARE_RT").contains("1") then assert(BlockboxRayTrace.frameReady,BlockboxRayTrace.status)
+        println("[ray-trace] "+BlockboxRayTrace.status+"; completed world frame="+BlockboxRayTrace.frameReady)
+    assert(pipeline.selectPack("ultra"))
     get[AirSupply](game,"airSupply").remaining=7f
     frame("survival-underwater",Vec3(8,38.2f,4),0,3,0,true)
     frame("survival-underwater-compatibility",Vec3(8,38.2f,4),0,3,0,true,false)
+    for pack <- Seq("ultra","ray-traced","default") do
+      assert(pipeline.selectPack(pack))
+      frame("survival-underwater-up-"+pack,Vec3(8,38.2f,4),-65,-55,0,true)
+      if pack!="default" then
+        def edgeSkyVisible(): Unit =
+          val patch=BufferUtils.createFloatBuffer(48*48*4)
+          glReadPixels(width/30,height/2-24,48,48,GL_RGBA,GL_FLOAT,patch)
+          val luminance=(0 until 48*48).map(i => patch.get(i*4)*0.2126f+patch.get(i*4+1)*0.7152f+patch.get(i*4+2)*0.0722f).sum/(48*48)
+          assert(luminance>0.18f,s"$pack keeps the high-angle sky visible through the underwater interface: $luminance")
+        edgeSkyVisible()
+        val canopy=project.invoke(game,Vec3(-1,46,-1)).asInstanceOf[Option[(Float,Float,Float)]].get
+        val leafPixels=BufferUtils.createFloatBuffer(100*100*4)
+        glReadPixels(canopy._1.toInt-50,height-canopy._2.toInt-50,100,100,GL_RGBA,GL_FLOAT,leafPixels)
+        val green=(0 until 100*100).count { i =>
+          val r=leafPixels.get(i*4); val g=leafPixels.get(i*4+1); val b=leafPixels.get(i*4+2)
+          g>r*1.3f && g>b*0.8f && g>0.06f
+        }
+        assert(green>40,s"$pack preserves above-water foliage seen from below: $green pixels")
+        frame("survival-underwater-near-surface-"+pack,Vec3(8,39.94f,4),-65,-55,0,true)
+        edgeSkyVisible()
+    frame("survival-underwater-up-compatibility",Vec3(8,38.2f,4),-65,-55,0,true,false)
+    assert(pipeline.selectPack("ultra"))
     get[AirSupply](game,"airSupply").reset()
     val zombie=ZombieSystem.Zombie(1,Vec3(-2,40,-2)); zombie.yaw=160; zombie.gait=0.8f; zombie.stride=0.5f
     mobs+=zombie
@@ -499,6 +821,15 @@ object ShaderPipelineTest:
       capture(output.resolve(s"survival-$name.png"),w,h); noError(name)
     set(game,"framebufferWidth",width); set(game,"framebufferHeight",height)
     glViewport(0,0,width,height)
+    val player=game.getClass.getDeclaredMethod("renderInventoryPlayer",classOf[UiRect],java.lang.Float.TYPE,java.lang.Float.TYPE)
+    val scale=game.getClass.getDeclaredMethods.find(m => m.getName.endsWith("uiScale") && m.getParameterCount==0).get
+    player.setAccessible(true); scale.setAccessible(true)
+    val preview=BlockboxUiLayout.inventory(width,height,scale.invoke(game).asInstanceOf[Float]).preview
+    for (name,mx,my) <- Seq(("right",preview.x+preview.w*2.5f,preview.y+preview.h*0.19f),
+      ("up-left",preview.x-preview.w*1.5f,preview.y-preview.h*0.6f)) do
+      glClearColor(0.18f,0.26f,0.20f,1); glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT)
+      player.invoke(game,preview,Float.box(mx),Float.box(my))
+      capture(output.resolve(s"inventory-look-$name.png"),width,height); noError("inventory look "+name)
 
   private def heldToolFrames(game: Blockbox,output: Path,width: Int,height: Int): Unit =
     val grip=game.getClass.getDeclaredMethod("drawHeldItemAtGrip",classOf[Block],classOf[Tuple3[?,?,?]])

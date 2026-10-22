@@ -56,7 +56,7 @@ right now it has:
 * other players actually have a body, and the shirts are different colors
 * you can see your own hand
 * render distance settings
-* shader packs, a few of them come with the game (see SHADERPACKS.md)
+* shader packs. `default`, `ultra`, and `ray-traced` ship with the game (see SHADERPACKS.md)
 * basic multiplayer experiments
 * chat
 * commands
@@ -224,7 +224,7 @@ new tree shapes and cave entrances only show up in chunks that get generated aft
 
 multiplayer is experimental.
 
-there is lan hosting and joining, player names, chat, player positions, block updates, and some server side checks. the host owns the clock and the weather. everyone in the session has to be on the same version, right now that is protocol 7.
+there is lan hosting and joining, player names, chat, player positions, block updates, and some server side checks. the host owns the clock and the weather. everyone in the session has to be on the same version, right now that is protocol 8.
 
 it is not perfect yet. chunk sync and usernames are still being improved. the goal is to make it feel more like a real little server instead of just a quick hacked together connection.
 

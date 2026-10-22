@@ -55,7 +55,7 @@ checks=[
  ('27-slot physical backpack','backpackBlocks: Array[Block] = Array.fill(27)(Block.Air)' in main),
  ('save format v3','worldExtraVersion = 3' in main),
  ('counted crafting','craftGridCounts: Array[Int] = Array.fill(9)(0)' in main),
- ('right-click inventory','handleInventoryClick(mx, my, rightClick = true)' in main),
+ ('right-click inventory','handleInventoryClick(mx, my, rightClick = true, quickMove = shift)' in main),
  ('safe G-buffer clear','glClearBufferfv(GL_COLOR, 1' in shader and 'enableColorOnlyWrites' in shader),
  ('post texture-state cleanup','resetCompatibilityTextureUnits' in shader and 'glActiveTexture(GL_TEXTURE0 + unit)' in shader),
  ('isolated 3d viewmodel','drawHeldBlockCube' in main and 'glClear(GL_DEPTH_BUFFER_BIT)' in main and 'glFrustum(' in main),
