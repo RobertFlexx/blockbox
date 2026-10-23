@@ -14,21 +14,24 @@ varying vec3 vNormalView;
 varying vec3 vWorldPos;
 varying float vWaveWeight;
 void main() {
-    vec4 vertex = gl_Vertex;
-    vec4 baseEye=gl_ModelViewMatrix*vertex;
-    vec3 baseWorld=(gbufferModelViewInverse*baseEye).xyz+vec3(cameraPosition.x,0.0,cameraPosition.z);
-    vec3 wave=waterWaves(baseWorld.xz,uTime);
-    vertex.y+=wave.x*clamp(gl_MultiTexCoord1.z,0.0,1.0);
-    vec4 eye = gl_ModelViewMatrix * vertex;
-    gl_Position = gl_ProjectionMatrix * eye;
-    vColor = gl_Color;
-    vec2 lm = gl_MultiTexCoord1.xy;
-    vLightUv = max(lm.x, lm.y) > 1.5 ? clamp(lm, vec2(0.0), vec2(240.0)) * (1.0 / 256.0) + vec2(0.03125) : clamp(lm, vec2(0.0), vec2(1.0));
-    vBlockLight = clamp(gl_MultiTexCoord1.x / 240.0, 0.0, 1.0);
-    vSkyLight = clamp(gl_MultiTexCoord1.y / 240.0, 0.0, 1.0);
-    vUv = gl_MultiTexCoord0.xy;
-    vNormalWorld = normalize(gl_Normal);
-    vNormalView = normalize(gl_NormalMatrix * gl_Normal);
-    vWorldPos = (gbufferModelViewInverse * eye).xyz + vec3(cameraPosition.x,0.0,cameraPosition.z);
-    vWaveWeight=clamp(gl_MultiTexCoord1.z,0.0,1.0);
+  vec4 vertex = gl_Vertex;
+  vec4 baseEye = gl_ModelViewMatrix * vertex;
+  vec3 baseWorld =
+      (gbufferModelViewInverse * baseEye).xyz + vec3(cameraPosition.x, 0.0, cameraPosition.z);
+  vec3 wave = waterWaves(baseWorld.xz, uTime);
+  vertex.y += wave.x * clamp(gl_MultiTexCoord1.z, 0.0, 1.0);
+  vec4 eye = gl_ModelViewMatrix * vertex;
+  gl_Position = gl_ProjectionMatrix * eye;
+  vColor = gl_Color;
+  vec2 lm = gl_MultiTexCoord1.xy;
+  vLightUv = max(lm.x, lm.y) > 1.5
+                 ? clamp(lm, vec2(0.0), vec2(240.0)) * (1.0 / 256.0) + vec2(0.03125)
+                 : clamp(lm, vec2(0.0), vec2(1.0));
+  vBlockLight = clamp(gl_MultiTexCoord1.x / 240.0, 0.0, 1.0);
+  vSkyLight = clamp(gl_MultiTexCoord1.y / 240.0, 0.0, 1.0);
+  vUv = gl_MultiTexCoord0.xy;
+  vNormalWorld = normalize(gl_Normal);
+  vNormalView = normalize(gl_NormalMatrix * gl_Normal);
+  vWorldPos = (gbufferModelViewInverse * eye).xyz + vec3(cameraPosition.x, 0.0, cameraPosition.z);
+  vWaveWeight = clamp(gl_MultiTexCoord1.z, 0.0, 1.0);
 }

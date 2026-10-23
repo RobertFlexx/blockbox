@@ -7,10 +7,12 @@ layout(set = 0, binding = 0) uniform accelerationStructureEXT tlas;
 layout(set = 0, binding = 1, std430) buffer Result { uint hit; };
 
 void main() {
-    rayQueryEXT q;
-    // A unit triangle sits on z = 0. This ray leaves the camera and runs into it.
-    rayQueryInitializeEXT(q, tlas, gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsOpaqueEXT,
-        0xFFu, vec3(0.25, 0.25, -1.0), 0.0, vec3(0.0, 0.0, 1.0), 8.0);
-    while (rayQueryProceedEXT(q)) {}
-    hit = rayQueryGetIntersectionTypeEXT(q, true) == gl_RayQueryCommittedIntersectionNoneEXT ? 0u : 1u;
+  rayQueryEXT q;
+  // A unit triangle sits on z = 0. This ray leaves the camera and runs into it.
+  rayQueryInitializeEXT(q, tlas, gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsOpaqueEXT, 0xFFu,
+                        vec3(0.25, 0.25, -1.0), 0.0, vec3(0.0, 0.0, 1.0), 8.0);
+  while (rayQueryProceedEXT(q)) {
+  }
+  hit =
+      rayQueryGetIntersectionTypeEXT(q, true) == gl_RayQueryCommittedIntersectionNoneEXT ? 0u : 1u;
 }

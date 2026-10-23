@@ -46,3 +46,19 @@ zombie/attack_0.ogg,94f66bb5b1f945e709b0f7ea04cecb749bde7af23bf6b00b1db9acd5dc66
 zombie/attack_1.ogg,f8b69dddf113649d819c8e7521b7238e06b9eec87f5387e1f7a41ce26e30d9cd,CC0-1.0,artisticdude,https://opengameart.org/content/zombies-sound-pack#zombie-10.wav
 zombie/death_0.ogg,74fe41afece223de6f414c2b16b6721336eea1387eeb2c7b1d2335df0f6a82f3,CC0-1.0,artisticdude,https://opengameart.org/content/zombies-sound-pack#zombie-17.wav
 zombie/death_1.ogg,8fd3bc45d33334880806599ec752565b7a1c869341fe55ccc7d74e74ff17f215,CC0-1.0,artisticdude,https://opengameart.org/content/zombies-sound-pack#zombie-18.wav
+foley/snow_step_000.ogg,43ac3268037efb464ac8c27716b5de8ae0065be186abf43f7ecb6250ef58a54d,CC0-1.0,qubodup,https://opengameart.org/sites/default/files/qubodup-snow_steps_dry_0.7z#snow_step_dry-01.flac
+foley/snow_step_001.ogg,33aa71723b4709cd172e2c3957e1d5917ef8d416327962f50afa99919d659ca7,CC0-1.0,qubodup,https://opengameart.org/sites/default/files/qubodup-snow_steps_dry_0.7z#snow_step_dry-02.flac
+foley/snow_step_002.ogg,fe14c9ff3e20d26563bab70112ffb5f8f3f823b77b7ca7db8621417e0f3dfa44,CC0-1.0,qubodup,https://opengameart.org/sites/default/files/qubodup-snow_steps_dry_0.7z#snow_step_dry-03.flac
+foley/snow_step_003.ogg,585dba424566b1bd275eb72af577e20b8b7a9bdfc1d9d5b9572ba7e46ecaaf8f,CC0-1.0,qubodup,https://opengameart.org/sites/default/files/qubodup-snow_steps_dry_0.7z#snow_step_dry-04.flac
+foley/stone_break.ogg,b90c03d06546ff47fd3ad20a9c7c343e022a11e9ffbf86a498000a6b656fea4e,CC0-1.0,Julie Damsgaard / Spring Spring,https://opengameart.org/sites/default/files/break_stone.wav
+foley/stone_chip.ogg,912803093f8843f6c854d8c0e0b2f9069a0451633c1ac27b02a3d8ba76d49bb7,CC0-1.0,Julie Damsgaard / Spring Spring,https://opengameart.org/sites/default/files/small_rock_impact.wav
+foley/sand_break_000.ogg,73725958a58585c0a4c00fbc080ec71954ae87fb22582aff63f6a10491911b10,CC0-1.0,Fantozzi (sliced by qubodup) / Fantozzi-SandR1.flac,https://opengameart.org/sites/default/files/Fantozzi-footsteps.7z
+foley/sand_place_000.ogg,636735265e33ed94a685d7585d2b24405306e17bef5253e9afa115fa04be4d4c,CC0-1.0,Fantozzi (sliced by qubodup) / Fantozzi-SandL1.flac,https://opengameart.org/sites/default/files/Fantozzi-footsteps.7z
+foley/sand_break_001.ogg,6f05589ceb47200e04e0ede56b85268c0417d0d65941adbcc214a3967d50488c,CC0-1.0,Fantozzi (sliced by qubodup) / Fantozzi-SandR2.flac,https://opengameart.org/sites/default/files/Fantozzi-footsteps.7z
+foley/sand_place_001.ogg,c7b95ebb39b2c492c93b29fc6f5084cce41b269770e4c8c3d3d89a647aa4e5f1,CC0-1.0,Fantozzi (sliced by qubodup) / Fantozzi-SandL2.flac,https://opengameart.org/sites/default/files/Fantozzi-footsteps.7z
+foley/sand_break_002.ogg,5b4ae70dfd46fe0d851b7eafccbc59c148845c710abfd59b9461084992d07ce7,CC0-1.0,Fantozzi (sliced by qubodup) / Fantozzi-SandR3.flac,https://opengameart.org/sites/default/files/Fantozzi-footsteps.7z
+foley/sand_place_002.ogg,b857b20cc6cbd52bf1e5f91de612ff5359651dceaffd6423fcd2ead98b982e9a,CC0-1.0,Fantozzi (sliced by qubodup) / Fantozzi-SandL3.flac,https://opengameart.org/sites/default/files/Fantozzi-footsteps.7z
+foley/furnace_loop.ogg,94edaa1853c43cc589b39cbbfac3b1f60b6d63f6751f29daa84311427e4f862d,CC0-1.0,PagDev / fire.wav (8-second filtered excerpt),https://opengameart.org/sites/default/files/fire.wav
+foley/furnace_ignite.ogg,76b6b8d08be5a9a818a4e6817aa8bec709d20d7a8a84eafb4a505798469d69b0,CC0-1.0,PagDev / fire.wav (0.5-second ignition excerpt),https://opengameart.org/sites/default/files/fire.wav
+foley/water_splash_000.ogg,84a1efb507aa7fb7740130a471438a5776475158d71355e91cda4766a515eea9,CC0-1.0,Peludo / splash1.wav,https://opengameart.org/sites/default/files/splash1_0.wav
+foley/water_splash_001.ogg,8d4fd4c5dc1a84d7d48a1edd3937b2b7f1fddaa074e30aaf8e31d330110770f7,CC0-1.0,Peludo / splash2.wav,https://opengameart.org/sites/default/files/splash2_0.wav

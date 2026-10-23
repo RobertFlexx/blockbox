@@ -1,7 +1,8 @@
 # Survival in blockbox
 
-Press **J** for the two-page field journal. It records your progress, shows recipes,
-and saves completed goals with the world. Press **E** for the 3×3 crafting grid.
+Press **J** for the field journal (three pages at normal sizes, with larger readable rows on compact screens). It records eighteen survival, building, exploration and combat objectives, shows recipes,
+and saves progress with the world. Track a goal to pin it to the HUD; completed goals
+have a one-time reward. A full inventory leaves the reward available to collect later. Press **E** for the 3×3 crafting grid.
 Right click an inventory stack to split it; right click a crafting slot to place one item.
 
 ## Getting established
@@ -17,7 +18,14 @@ Right click an inventory stack to split it; right click a crafting slot to place
 
 Furnaces draw input and fuel from your inventory. Coal smelts eight items, a log two,
 a plank one and a half, and two sticks one. Smelt a log to make charcoal (the coal item).
-The input list scrolls when more than six materials are available.
+The furnace uses the same nine-column inventory slots as the backpack. Click a smeltable
+stack to select it; shift-click to queue the whole stack. Output is collected by clicking
+the output slot. Stop cancels the pending batch without spending unprocessed input.
+A running furnace changes its placed texture, emits warm light and small flame/smoke
+particles, and plays a quiet positional fire loop. It keeps working when you walk away;
+its chunk stays loaded until it finishes. Breaking it stops the batch. Multiplayer
+ignition/extinguishing is validated and relayed by the host, and disconnects release
+the player's running fire state.
 
 ## Tool recipes
 
@@ -56,12 +64,20 @@ ripples follow the weather. Roofs and tree canopies stop the local rain. Underwa
 vision has distance absorption, subtle refraction and moving light on the bottom;
 the submerged portion of a character takes the water's color.
 
-Zombies spawn away from players in unlit caves and outside at night. Place torches
+Zombies spawn in small groups 24–80 blocks from players, in unlit caves and outside
+at night. Every member checks ground support, available space, zero block light,
+and distance from every player. Place torches
 to protect your base and mine. A coal item above a stick makes four torches. Zombies
 approach with their arms out, route around walls, jump up a block, avoid dangerous
 drops and cactus, and attack at close range. They remember the last place they saw
-you for six seconds and can hear nearby players behind cover. They spread out when
+you for six seconds. They acquire players only with unobstructed sight within 32
+blocks, and cannot track a player's changing position through walls. They spread out when
 crowded and search again when a route is blocked.
+Without a target they pause, look for safe nearby destinations and wander at a
+slower pace. They float with their heads above water, keep pursuing while swimming,
+and climb accessible banks. Perception runs at staggered intervals; path searches
+share a bounded work budget while collision and smooth steering update every tick.
+This is deterministic perception and navigation, rather than a neural network.
 Attack with left click; swords deal the most damage. Defeated zombies drop coal, with
 a small chance of an iron ingot. Exposed daylight ignites them; roofs, rain and water
 protect them from the sun. Damage briefly flashes their skin red. Their groans,
@@ -72,6 +88,17 @@ Eight percent spawn carrying a tool or weapon. All sixteen tools are possible;
 wood and stone are more common than iron and diamond. Armed zombies hit harder and
 have a fifteen percent chance to drop their equipment when defeated. Their held
 items, damage flashes, movement and voices are synchronized in multiplayer.
+Sixty-four cached appearances vary skin, clothes, scars, hair and tears. The mob ID
+selects the same appearance on every peer and after loading. Equipped zombies hold
+their weapons upright in their extended hands.
+
+Snow steps use four separate crisp recordings by qubodup. Stone breaking and
+placing use Spring Spring's break and chip recordings. Sand walking alternates six
+Fantozzi performances; sand placing and breaking have gentler granular variations.
+Water entry uses two Peludo splash recordings, and PagDev's fireplace recording
+provides the quiet furnace ambience. These are CC0 public-domain
+dedications; source links and file hashes are in `assets/audio/CREDITS.md` and
+`assets/audio/manifest.csv`.
 
 Players can fight in multiplayer with left click. Aim within three and a half blocks;
 solid walls block attacks, and hits have a half-second cooldown. Swords do more damage
@@ -84,3 +111,31 @@ item, then a hotbar slot to equip its stack. Right click a catalog hotbar slot t
 
 Multiplayer uses protocol **8**. All players need this version. The host controls
 zombie movement, spawning, attacks and drops; held tools and blocks are synchronized.
+
+## Places to explore
+
+Willow marshes have winding shallow channels, muddy banks and low grassy islands.
+Reed beds follow the banks and lily pads grow in patches on shallow water, beneath
+forked willows with hanging leaf curtains. Autumn groves have amber and golden
+crowns around open glades, patchy earth, scattered leaf litter, fallen trunks and
+rocky outcrops. Ground cover has small cutout meshes, can be harvested and placed,
+and disappears when its support is removed. Plants do not block movement.
+
+Rocky coasts expose stone shores; dune deserts have wind-shaped ridges; badlands
+have layered mesas; snowy taiga and giant redwoods give forests different scales.
+Smaller coherent regional masks make these variations easier to encounter
+on an ordinary exploration trip. Red-desert badlands grow cacti on clay and do not
+spawn tree anchors. Existing saved blocks stay intact; new terrain uses the updated
+generator. Biome enum IDs are appended, preserving older discovery records.
+
+Ground movement uses the same walking/sprinting profile in both game modes. Flight
+collides with walls, and leaving it resets view FOV and gait state. The world camera
+stays steady while the hand/tool bobs. The projection near plane fits inside the eye's
+collision clearance, including at wide FOVs and ultrawide aspect ratios. Hurt colour
+holds a single restrained red overlay for half a second, with no repeated strobe.
+
+Short recordings trim quiet lead-in and preload during the title screen. The mixer
+uses 256-frame quanta, flushes every pipe write and drops stale queued impacts;
+block actions trigger audio before mesh work. Output devices add their own latency.
+
+See `FORMATTING.md` for the repeatable formatting command and release checks.

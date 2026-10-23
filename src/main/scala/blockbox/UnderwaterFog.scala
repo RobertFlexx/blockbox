@@ -1,44 +1,45 @@
 package blockbox
 
-import org.lwjgl.opengl.{GL,GL20}
+import org.lwjgl.opengl.{GL, GL20}
 import org.lwjgl.opengl.GL11.*
 
-/** The pack-free renderer's lightmap and linear fog, with air excluded from the
-  * optical path. This preserves alpha-tested leaves seen through the surface.
+/** The pack-free renderer's lightmap and linear fog, with air excluded from the optical path. This
+  * preserves alpha-tested leaves seen through the surface.
   */
 object UnderwaterFog:
-  private var program=0
-  private var previous=0
-  private var active=false
-  private var failed=false
+  private var program = 0
+  private var previous = 0
+  private var active = false
+  private var failed = false
 
-  def begin(eyeY: Float,surfaceY: Float): Unit =
-    if active || failed || !eyeY.isFinite || !surfaceY.isFinite || !GL.getCapabilities.OpenGL20 then return
+  def begin(eyeY: Float, surfaceY: Float): Unit =
+    if active || failed || !eyeY.isFinite || !surfaceY.isFinite || !GL.getCapabilities.OpenGL20 then
+      return
     try
-      if program==0 then program=BlockboxAtmosphere.buildProgram(vertex,fragment)
-      previous=glGetInteger(GL20.GL_CURRENT_PROGRAM)
+      if program == 0 then program = BlockboxAtmosphere.buildProgram(vertex, fragment)
+      previous = glGetInteger(GL20.GL_CURRENT_PROGRAM)
       GL20.glUseProgram(program)
-      GL20.glUniform1i(GL20.glGetUniformLocation(program,"atlas"),0)
-      GL20.glUniform1i(GL20.glGetUniformLocation(program,"lightmap"),1)
-      GL20.glUniform2f(GL20.glGetUniformLocation(program,"waterHeights"),eyeY,surfaceY)
-      active=true
+      GL20.glUniform1i(GL20.glGetUniformLocation(program, "atlas"), 0)
+      GL20.glUniform1i(GL20.glGetUniformLocation(program, "lightmap"), 1)
+      GL20.glUniform2f(GL20.glGetUniformLocation(program, "waterHeights"), eyeY, surfaceY)
+      active = true
     catch
       case e: Exception =>
         GL20.glUseProgram(previous)
-        failed=true
-        System.err.println("Underwater fog uses compatibility fallback: "+e.getMessage)
+        failed = true
+        System.err.println("Underwater fog uses compatibility fallback: " + e.getMessage)
 
   def end(): Unit =
     if active then
       GL20.glUseProgram(previous)
-      active=false
+      active = false
 
   def destroy(): Unit =
     end()
-    if program!=0 then GL20.glDeleteProgram(program)
-    program=0; failed=false
+    if program != 0 then GL20.glDeleteProgram(program)
+    program = 0; failed = false
 
-  private val vertex="""#version 120
+  private val vertex = """#version 120
     uniform vec2 waterHeights;
     varying vec2 uv,lightUv;
     varying vec4 tint;
@@ -55,7 +56,7 @@ object UnderwaterFog:
         wetDistance*=clamp((waterHeights.y-waterHeights.x)/max(gl_Vertex.y-waterHeights.x,0.001),0.0,1.0);
     }
   """
-  private val fragment="""#version 120
+  private val fragment = """#version 120
     uniform sampler2D atlas,lightmap;
     varying vec2 uv,lightUv;
     varying vec4 tint;

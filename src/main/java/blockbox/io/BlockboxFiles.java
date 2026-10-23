@@ -62,7 +62,8 @@ public final class BlockboxFiles {
     StringBuilder out = new StringBuilder(Math.max(8, Math.min(64, limit)));
     for (int i = 0; i < input.length() && out.length() < limit; i++) {
       char ch = input.charAt(i);
-      if (Character.isLetterOrDigit(ch) || ch == '_' || ch == '-' || ch == '.' || ch == ' ') out.append(ch);
+      if (Character.isLetterOrDigit(ch) || ch == '_' || ch == '-' || ch == '.' || ch == ' ')
+        out.append(ch);
     }
     String clean = out.toString().trim();
     return clean.isEmpty() ? (fallback == null || fallback.isBlank() ? "file" : fallback) : clean;
@@ -78,10 +79,13 @@ public final class BlockboxFiles {
 
   public static String readText(Path file, long maxBytes) throws IOException {
     Objects.requireNonNull(file, "file");
-    if (maxBytes < 0L) throw new IllegalArgumentException("maxBytes must be non-negative");
-    if (!Files.isRegularFile(file)) throw new IOException("not a regular file: " + file);
+    if (maxBytes < 0L)
+      throw new IllegalArgumentException("maxBytes must be non-negative");
+    if (!Files.isRegularFile(file))
+      throw new IOException("not a regular file: " + file);
     long size = Files.size(file);
-    if (size > maxBytes) throw new IOException("file too large: " + file + " (" + size + " bytes)");
+    if (size > maxBytes)
+      throw new IOException("file too large: " + file + " (" + size + " bytes)");
     return Files.readString(file, StandardCharsets.UTF_8);
   }
 
@@ -96,29 +100,37 @@ public final class BlockboxFiles {
     });
   }
 
-  public static void writeAtomic(Path file, Consumer<java.io.OutputStream> writer) throws IOException {
+  public static void writeAtomic(Path file, Consumer<java.io.OutputStream> writer)
+      throws IOException {
     writeAtomic(file, writer, true);
   }
 
-  /** Atomic replacement with optional parent-directory durability sync.
+  /**
+   * Atomic replacement with optional parent-directory durability sync.
    *
    * Batch save paths can safely defer the expensive directory fsync until every
    * chunk has been renamed, then sync the directory once. The default overload
    * keeps the old strongest-durability behavior for small standalone writes.
    */
-  public static void writeAtomic(Path file, Consumer<java.io.OutputStream> writer, boolean syncParent) throws IOException {
+  public static void writeAtomic(
+      Path file, Consumer<java.io.OutputStream> writer, boolean syncParent) throws IOException {
     Objects.requireNonNull(file, "file");
     Objects.requireNonNull(writer, "writer");
     Path target = file.toAbsolutePath().normalize();
     Path parent = target.getParent();
-    if (Files.isDirectory(target)) throw new IOException("target is a directory: " + target);
-    if (parent != null) ensureDirectory(parent);
+    if (Files.isDirectory(target))
+      throw new IOException("target is a directory: " + target);
+    if (parent != null)
+      ensureDirectory(parent);
     String prefix = target.getFileName() == null ? "bbx" : target.getFileName().toString();
-    if (prefix.length() < 3) prefix = "bbx" + prefix;
-    Path tmp = parent == null ? Files.createTempFile(prefix, ".tmp") : Files.createTempFile(parent, prefix, ".tmp");
+    if (prefix.length() < 3)
+      prefix = "bbx" + prefix;
+    Path tmp = parent == null ? Files.createTempFile(prefix, ".tmp")
+                              : Files.createTempFile(parent, prefix, ".tmp");
     boolean moved = false;
     try {
-      try (java.io.OutputStream out = Files.newOutputStream(tmp, StandardOpenOption.WRITE, StandardOpenOption.TRUNCATE_EXISTING)) {
+      try (java.io.OutputStream out = Files.newOutputStream(
+               tmp, StandardOpenOption.WRITE, StandardOpenOption.TRUNCATE_EXISTING)) {
         try {
           writer.accept(out);
         } catch (UncheckedIo e) {
@@ -129,14 +141,16 @@ public final class BlockboxFiles {
       }
       moveReplace(tmp, target);
       moved = true;
-      if (syncParent) fsyncParent(target);
+      if (syncParent)
+        fsyncParent(target);
     } finally {
-      if (!moved) Files.deleteIfExists(tmp);
+      if (!moved)
+        Files.deleteIfExists(tmp);
     }
   }
 
-
-  public static void writeBytesAtomic(Path file, byte[] bytes, boolean syncParent) throws IOException {
+  public static void writeBytesAtomic(Path file, byte[] bytes, boolean syncParent)
+      throws IOException {
     byte[] safe = bytes == null ? new byte[0] : bytes;
     writeAtomic(file, out -> {
       try {
@@ -149,8 +163,10 @@ public final class BlockboxFiles {
 
   /** Force directory metadata once after a batch of atomic renames. */
   public static void syncDirectory(Path dir) {
-    if (dir == null) return;
-    try (java.nio.channels.FileChannel channel = java.nio.channels.FileChannel.open(dir.toAbsolutePath().normalize(), StandardOpenOption.READ)) {
+    if (dir == null)
+      return;
+    try (java.nio.channels.FileChannel channel = java.nio.channels.FileChannel.open(
+             dir.toAbsolutePath().normalize(), StandardOpenOption.READ)) {
       channel.force(true);
     } catch (Exception ignored) {
     }
@@ -158,7 +174,8 @@ public final class BlockboxFiles {
 
   public static void moveReplace(Path source, Path target) throws IOException {
     try {
-      Files.move(source, target, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+      Files.move(
+          source, target, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
     } catch (AtomicMoveNotSupportedException e) {
       Files.move(source, target, StandardCopyOption.REPLACE_EXISTING);
     }
@@ -172,13 +189,15 @@ public final class BlockboxFiles {
 
   public static String sha256File(Path file) throws IOException {
     Objects.requireNonNull(file, "file");
-    if (!Files.isRegularFile(file)) throw new IOException("not a regular file: " + file);
+    if (!Files.isRegularFile(file))
+      throw new IOException("not a regular file: " + file);
     MessageDigest md = sha256Digest();
     byte[] buffer = new byte[HASH_BUFFER_BYTES];
     try (InputStream in = new BufferedInputStream(Files.newInputStream(file))) {
       int n;
       while ((n = in.read(buffer)) >= 0) {
-        if (n > 0) md.update(buffer, 0, n);
+        if (n > 0)
+          md.update(buffer, 0, n);
       }
     }
     return HexFormat.of().formatHex(md.digest());
@@ -187,13 +206,16 @@ public final class BlockboxFiles {
   public static String sha256Tree(Path root) throws IOException {
     Objects.requireNonNull(root, "root");
     Path normalized = root.toAbsolutePath().normalize();
-    if (Files.isRegularFile(normalized)) return sha256File(normalized);
+    if (Files.isRegularFile(normalized))
+      return sha256File(normalized);
     MessageDigest md = sha256Digest();
     List<Path> files = new ArrayList<>();
     if (Files.isDirectory(normalized)) {
       Files.walkFileTree(normalized, new SimpleFileVisitor<>() {
-        @Override public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) {
-          if (attrs.isRegularFile()) files.add(file.toAbsolutePath().normalize());
+        @Override
+        public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) {
+          if (attrs.isRegularFile())
+            files.add(file.toAbsolutePath().normalize());
           return FileVisitResult.CONTINUE;
         }
       });
@@ -210,16 +232,20 @@ public final class BlockboxFiles {
   }
 
   public static void deleteRecursive(Path root) throws IOException {
-    if (root == null || !Files.exists(root)) return;
+    if (root == null || !Files.exists(root))
+      return;
     Path normalized = root.toAbsolutePath().normalize();
     Files.walkFileTree(normalized, new SimpleFileVisitor<>() {
-      @Override public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) throws IOException {
+      @Override
+      public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) throws IOException {
         Files.deleteIfExists(file);
         return FileVisitResult.CONTINUE;
       }
 
-      @Override public FileVisitResult postVisitDirectory(Path dir, IOException exc) throws IOException {
-        if (exc != null) throw exc;
+      @Override
+      public FileVisitResult postVisitDirectory(Path dir, IOException exc) throws IOException {
+        if (exc != null)
+          throw exc;
         Files.deleteIfExists(dir);
         return FileVisitResult.CONTINUE;
       }
@@ -231,39 +257,54 @@ public final class BlockboxFiles {
     Objects.requireNonNull(target, "target");
     Path src = source.toAbsolutePath().normalize();
     Path dst = target.toAbsolutePath().normalize();
-    if (!Files.exists(src, LinkOption.NOFOLLOW_LINKS)) throw new IOException("source does not exist: " + src);
-    if (Files.isSymbolicLink(src)) throw new IOException("refusing to copy symbolic link: " + src);
+    if (!Files.exists(src, LinkOption.NOFOLLOW_LINKS))
+      throw new IOException("source does not exist: " + src);
+    if (Files.isSymbolicLink(src))
+      throw new IOException("refusing to copy symbolic link: " + src);
     if (Files.isDirectory(src, LinkOption.NOFOLLOW_LINKS)) {
-      if (dst.startsWith(src)) throw new IOException("target cannot be inside source: " + dst);
+      if (dst.startsWith(src))
+        throw new IOException("target cannot be inside source: " + dst);
       Files.walkFileTree(src, new SimpleFileVisitor<>() {
-        @Override public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs) throws IOException {
-          if (Files.isSymbolicLink(dir)) throw new IOException("refusing to copy symbolic link: " + dir);
+        @Override
+        public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs)
+            throws IOException {
+          if (Files.isSymbolicLink(dir))
+            throw new IOException("refusing to copy symbolic link: " + dir);
           Path out = resolveCopyTarget(src, dst, dir);
           ensureDirectory(out);
           return FileVisitResult.CONTINUE;
         }
 
-        @Override public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) throws IOException {
-          if (!attrs.isRegularFile() || Files.isSymbolicLink(file)) throw new IOException("refusing to copy non-regular file: " + file);
+        @Override
+        public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) throws IOException {
+          if (!attrs.isRegularFile() || Files.isSymbolicLink(file))
+            throw new IOException("refusing to copy non-regular file: " + file);
           Path out = resolveCopyTarget(src, dst, file);
           Path parent = out.getParent();
-          if (parent != null) ensureDirectory(parent);
-          Files.copy(file, out, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.COPY_ATTRIBUTES, LinkOption.NOFOLLOW_LINKS);
+          if (parent != null)
+            ensureDirectory(parent);
+          Files.copy(file, out, StandardCopyOption.REPLACE_EXISTING,
+              StandardCopyOption.COPY_ATTRIBUTES, LinkOption.NOFOLLOW_LINKS);
           return FileVisitResult.CONTINUE;
         }
       });
     } else {
-      if (!Files.isRegularFile(src, LinkOption.NOFOLLOW_LINKS)) throw new IOException("source is not a regular file: " + src);
+      if (!Files.isRegularFile(src, LinkOption.NOFOLLOW_LINKS))
+        throw new IOException("source is not a regular file: " + src);
       Path parent = dst.getParent();
-      if (parent != null) ensureDirectory(parent);
-      Files.copy(src, dst, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.COPY_ATTRIBUTES, LinkOption.NOFOLLOW_LINKS);
+      if (parent != null)
+        ensureDirectory(parent);
+      Files.copy(src, dst, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.COPY_ATTRIBUTES,
+          LinkOption.NOFOLLOW_LINKS);
     }
   }
 
-  private static Path resolveCopyTarget(Path sourceRoot, Path targetRoot, Path current) throws IOException {
+  private static Path resolveCopyTarget(Path sourceRoot, Path targetRoot, Path current)
+      throws IOException {
     Path relative = sourceRoot.relativize(current.toAbsolutePath().normalize());
     Path out = targetRoot.resolve(relative).normalize();
-    if (!out.startsWith(targetRoot)) throw new IOException("copy target escapes destination: " + out);
+    if (!out.startsWith(targetRoot))
+      throw new IOException("copy target escapes destination: " + out);
     return out;
   }
 
@@ -277,8 +318,10 @@ public final class BlockboxFiles {
 
   private static void fsyncParent(Path target) {
     Path parent = target.getParent();
-    if (parent == null) return;
-    try (java.nio.channels.FileChannel channel = java.nio.channels.FileChannel.open(parent, StandardOpenOption.READ)) {
+    if (parent == null)
+      return;
+    try (java.nio.channels.FileChannel channel =
+             java.nio.channels.FileChannel.open(parent, StandardOpenOption.READ)) {
       channel.force(true);
     } catch (Exception ignored) {
     }

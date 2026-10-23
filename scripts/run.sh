@@ -27,9 +27,12 @@ LWJGL_BUNDLED_NATIVE_DIR="${PROJECT_ROOT}/.lwjgl/3.4.1+2/x64"
 SCALA_SOURCE="${PROJECT_ROOT}/src/main/scala"
 JAVA_SOURCE="${PROJECT_ROOT}/src/main/java"
 
-log()  { printf 'Blockbox: %s\n' "$*"; }
+log() { printf 'Blockbox: %s\n' "$*"; }
 warn() { printf 'Blockbox warning: %s\n' "$*" >&2; }
-die()  { printf 'Blockbox error: %s\n' "$*" >&2; exit 1; }
+die() {
+  printf 'Blockbox error: %s\n' "$*" >&2
+  exit 1
+}
 
 path_has_slash() {
   [[ "$1" == */* ]]
@@ -39,7 +42,7 @@ cmd_exists() {
   if path_has_slash "$1"; then
     [[ -x "$1" ]]
   else
-    command -v "$1" >/dev/null 2>&1
+    command -v "$1" > /dev/null 2>&1
   fi
 }
 
@@ -157,7 +160,7 @@ for prefix in "${BREW_PREFIXES[@]}"; do
   append_path_if_dir "${prefix}/bin"
   append_path_if_dir "${prefix}/sbin"
 done
-hash -r 2>/dev/null || true
+hash -r 2> /dev/null || true
 
 if ! cmd_exists "${JAVA_CMD}"; then
   die "java command not found: ${JAVA_CMD}"
@@ -166,13 +169,13 @@ if ! cmd_exists "${JAVAC_CMD}"; then
   die "javac was not found. Install a JDK 21+, not only a JRE."
 fi
 
-if ! command -v scala-cli >/dev/null 2>&1; then
+if ! command -v scala-cli > /dev/null 2>&1; then
   die "scala-cli was not found. Install it or make it reachable in PATH. Current PATH=${PATH}"
 fi
 
 # If Java was provided as a bare command, resolve JAVA_HOME now for scala-cli --java-home.
 if [[ -z "${JAVA_HOME_RESOLVED:-}" ]]; then
-  if command -v "${JAVA_CMD}" >/dev/null 2>&1; then
+  if command -v "${JAVA_CMD}" > /dev/null 2>&1; then
     JAVA_HOME_RESOLVED="$(dirname -- "$(dirname -- "$(readlink -f "$(command -v "${JAVA_CMD}")")")")"
     export JAVA_HOME="${JAVA_HOME_RESOLVED}"
   fi
@@ -182,7 +185,7 @@ fi
 JAVA_VERSION_TEXT="$("${JAVA_CMD}" -version 2>&1 | head -n 1 || true)"
 JAVAC_VERSION_TEXT="$("${JAVAC_CMD}" -version 2>&1 | head -n 1 || true)"
 case "${JAVA_VERSION_TEXT}" in
-  *\"21.*|*\"22.*|*\"23.*|*\"24.*|*\"25.*|*\"26.*) ;;
+  *\"21.* | *\"22.* | *\"23.* | *\"24.* | *\"25.* | *\"26.*) ;;
   *) warn "Java version looks unexpected: ${JAVA_VERSION_TEXT}. Blockbox is built with --release 21." ;;
 esac
 
@@ -200,7 +203,7 @@ read_args_array() {
   fi
 }
 
-read_args_array BLOCKBOX_JVM_ARGS_ARRAY  BLOCKBOX_JVM_ARGS_FILE  BLOCKBOX_JVM_ARGS  "-Xmx4G"
+read_args_array BLOCKBOX_JVM_ARGS_ARRAY BLOCKBOX_JVM_ARGS_FILE BLOCKBOX_JVM_ARGS "-Xmx4G"
 read_args_array BLOCKBOX_GAME_ARGS_ARRAY BLOCKBOX_GAME_ARGS_FILE BLOCKBOX_GAME_ARGS ""
 
 for i in "${!BLOCKBOX_JVM_ARGS_ARRAY[@]}"; do
@@ -236,22 +239,21 @@ wayland_available() {
 }
 
 libdecor_installed() {
-  ldconfig -p 2>/dev/null | grep -qF libdecor-0.so && return 0
+  ldconfig -p 2> /dev/null | grep -qF libdecor-0.so && return 0
   local d
   for d in \
     /usr/lib64 \
     /usr/lib \
     /usr/lib/x86_64-linux-gnu \
     /usr/x86_64-pc-linux-gnu/lib \
-    /usr/local/lib
-  do
+    /usr/local/lib; do
     [[ -f "${d}/libdecor-0.so" ]] && return 0
   done
   return 1
 }
 
 nvidia_drm_available() {
-  grep -qF nvidia_drm /proc/modules 2>/dev/null
+  grep -qF nvidia_drm /proc/modules 2> /dev/null
 }
 
 clean_graphics_env() {
@@ -333,7 +335,7 @@ case "$BACKEND" in
     fi
     ;;
 
-  x11|x11-nvidia)
+  x11 | x11-nvidia)
     if x11_socket_available; then
       export GLFW_PLATFORM=x11
       setup_nvidia_glx
@@ -370,7 +372,7 @@ case "$BACKEND" in
     export GALLIUM_DRIVER=llvmpipe
     ;;
 
-  null|headless)
+  null | headless)
     export GLFW_PLATFORM=null
     ;;
 
@@ -421,10 +423,10 @@ scala_native_jar_args=()
 # That mismatch makes GL.createCapabilities() report that no context is current.
 LWJGL_OPENGL_CONTEXT_API=""
 case "${BLOCKBOX_GL_CONTEXT_API:-auto}" in
-  egl|EGL)
+  egl | EGL)
     LWJGL_OPENGL_CONTEXT_API="EGL"
     ;;
-  glx|GLX|native|NATIVE)
+  glx | GLX | native | NATIVE)
     LWJGL_OPENGL_CONTEXT_API="native"
     ;;
   *)
@@ -458,9 +460,9 @@ if [[ "${bundled_linux_x64}" == "true" ]]; then
   scala_native_java_args+=(--java-opt "-Dorg.lwjgl.librarypath=${LWJGL_BUNDLED_NATIVE_DIR}")
 else
   case "$(uname -m)" in
-    x86_64|amd64) LWJGL_NATIVE_CLASSIFIER="natives-linux" ;;
-    aarch64|arm64) LWJGL_NATIVE_CLASSIFIER="natives-linux-arm64" ;;
-    armv7l|armv7*) LWJGL_NATIVE_CLASSIFIER="natives-linux-arm32" ;;
+    x86_64 | amd64) LWJGL_NATIVE_CLASSIFIER="natives-linux" ;;
+    aarch64 | arm64) LWJGL_NATIVE_CLASSIFIER="natives-linux-arm64" ;;
+    armv7l | armv7*) LWJGL_NATIVE_CLASSIFIER="natives-linux-arm32" ;;
     ppc64le) LWJGL_NATIVE_CLASSIFIER="natives-linux-ppc64le" ;;
     riscv64) LWJGL_NATIVE_CLASSIFIER="natives-linux-riscv64" ;;
     *) die "unsupported CPU architecture for LWJGL natives: $(uname -m)" ;;
@@ -486,18 +488,18 @@ else
     rm -f "${tmp}"
     log "Downloading ${module} ${LWJGL_VERSION} ${LWJGL_NATIVE_CLASSIFIER}"
 
-    if command -v curl >/dev/null 2>&1; then
+    if command -v curl > /dev/null 2>&1; then
       curl -fL --retry 3 --retry-delay 1 --connect-timeout 15 -o "${tmp}" "${url}" || {
         rm -f "${tmp}"
         die "failed to download ${url}"
       }
-    elif command -v wget >/dev/null 2>&1; then
+    elif command -v wget > /dev/null 2>&1; then
       wget -O "${tmp}" "${url}" || {
         rm -f "${tmp}"
         die "failed to download ${url}"
       }
-    elif command -v python3 >/dev/null 2>&1; then
-      python3 - "${url}" "${tmp}" <<'PY_DOWNLOAD'
+    elif command -v python3 > /dev/null 2>&1; then
+      python3 - "${url}" "${tmp}" << 'PY_DOWNLOAD'
 import sys
 import urllib.request
 urllib.request.urlretrieve(sys.argv[1], sys.argv[2])

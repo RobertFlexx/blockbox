@@ -3,13 +3,48 @@ package blockbox
 import scala.collection.mutable.ArrayBuffer
 
 final case class CraftShape(width: Int, height: Int, cells: Vector[Block])
-final case class CraftRecipe(width: Int, height: Int, cells: Vector[Block], output: Block, outputCount: Int, label: String)
+final case class CraftRecipe(
+    width: Int,
+    height: Int,
+    cells: Vector[Block],
+    output: Block,
+    outputCount: Int,
+    label: String
+)
 
 object InventoryModel:
-  val smeltableInputs: Array[Block] = Array(Block.Sand, Block.Clay, Block.Stone, Block.Wood, Block.BirchWood, Block.PineWood, Block.AcaciaWood, Block.Copper, Block.IronOre, Block.GoldOre)
-  val fuelBlocks: Array[Block] = Array(Block.CoalLump, Block.Coal, Block.Wood, Block.BirchWood, Block.PineWood, Block.AcaciaWood, Block.Planks, Block.BirchPlanks, Block.PinePlanks, Block.AcaciaPlanks, Block.Stick)
+  val smeltableInputs: Array[Block] = Array(
+    Block.Sand,
+    Block.Clay,
+    Block.Stone,
+    Block.Wood,
+    Block.BirchWood,
+    Block.PineWood,
+    Block.AcaciaWood,
+    Block.Copper,
+    Block.IronOre,
+    Block.GoldOre
+  )
+  val fuelBlocks: Array[Block] = Array(
+    Block.CoalLump,
+    Block.Coal,
+    Block.Wood,
+    Block.BirchWood,
+    Block.PineWood,
+    Block.AcaciaWood,
+    Block.Planks,
+    Block.BirchPlanks,
+    Block.PinePlanks,
+    Block.AcaciaPlanks,
+    Block.Stick
+  )
 
-  private def craftRecipe(rows: Seq[Seq[Block]], output: Block, outputCount: Int, label: String): CraftRecipe =
+  private def craftRecipe(
+      rows: Seq[Seq[Block]],
+      output: Block,
+      outputCount: Int,
+      label: String
+  ): CraftRecipe =
     val h = rows.length.max(1)
     val w = rows.map(_.length).max.max(1)
     val cells = (0 until h).flatMap { y =>
@@ -25,66 +60,292 @@ object InventoryModel:
     craftRecipe(Seq(row(Block.BirchWood)), Block.BirchPlanks, 4, "birch wood -> planks"),
     craftRecipe(Seq(row(Block.PineWood)), Block.PinePlanks, 4, "pine wood -> planks"),
     craftRecipe(Seq(row(Block.AcaciaWood)), Block.AcaciaPlanks, 4, "acacia wood -> planks"),
-    craftRecipe(Seq(row(Block.Wood, Block.Wood), row(Block.Wood, Block.Wood)), Block.Planks, 18, "oak log pack -> planks"),
-    craftRecipe(Seq(row(Block.BirchWood, Block.BirchWood), row(Block.BirchWood, Block.BirchWood)), Block.BirchPlanks, 18, "birch log pack -> planks"),
-    craftRecipe(Seq(row(Block.PineWood, Block.PineWood), row(Block.PineWood, Block.PineWood)), Block.PinePlanks, 18, "pine log pack -> planks"),
-    craftRecipe(Seq(row(Block.AcaciaWood, Block.AcaciaWood), row(Block.AcaciaWood, Block.AcaciaWood)), Block.AcaciaPlanks, 18, "acacia log pack -> planks"),
-    craftRecipe(Seq(row(Block.Stone, Block.Stone), row(Block.Stone, Block.Stone)), Block.Brick, 8, "stone square -> brick"),
-    craftRecipe(Seq(row(Block.Clay, Block.Clay), row(Block.Clay, Block.Clay)), Block.Brick, 6, "clay square -> brick"),
-    craftRecipe(Seq(row(Block.Sand, Block.Clay), row(Block.Clay, Block.Sand)), Block.Brick, 4, "sand clay mix -> brick"),
-    craftRecipe(Seq(row(Block.Sand, Block.Sand), row(Block.Sand, Block.Sand)), Block.Glass, 4, "sand square -> glass"),
-    craftRecipe(Seq(row(Block.Glass, Block.Glass), row(Block.Glass, Block.Glass)), Block.Glass, 4, "glass polish"),
-    craftRecipe(Seq(row(Block.Sand, Block.Sand, Block.Sand), row(Block.Sand, Block.Clay, Block.Sand), row(Block.Sand, Block.Sand, Block.Sand)), Block.Glass, 12, "clear glass batch"),
-    craftRecipe(Seq(row(Block.Stone, Block.Stone, Block.Stone), row(Block.Stone, Block.Air, Block.Stone), row(Block.Stone, Block.Stone, Block.Stone)), Block.Furnace, 1, "stone furnace"),
-    craftRecipe(Seq(row(Block.Planks, Block.Planks), row(Block.Planks, Block.Planks)), Block.Furnace, 1, "plank crate -> furnace"),
-    craftRecipe(Seq(row(Block.BirchPlanks, Block.BirchPlanks), row(Block.BirchPlanks, Block.BirchPlanks)), Block.Furnace, 1, "birch crate -> furnace"),
-    craftRecipe(Seq(row(Block.PinePlanks, Block.PinePlanks), row(Block.PinePlanks, Block.PinePlanks)), Block.Furnace, 1, "pine crate -> furnace"),
-    craftRecipe(Seq(row(Block.AcaciaPlanks, Block.AcaciaPlanks), row(Block.AcaciaPlanks, Block.AcaciaPlanks)), Block.Furnace, 1, "acacia crate -> furnace"),
-    craftRecipe(Seq(row(Block.Coal), row(Block.Planks)), Block.Torch, 4, "coal over oak plank -> torches"),
-    craftRecipe(Seq(row(Block.Coal), row(Block.BirchPlanks)), Block.Torch, 4, "coal over birch plank -> torches"),
-    craftRecipe(Seq(row(Block.Coal), row(Block.PinePlanks)), Block.Torch, 4, "coal over pine plank -> torches"),
-    craftRecipe(Seq(row(Block.Coal), row(Block.AcaciaPlanks)), Block.Torch, 4, "coal over acacia plank -> torches"),
-    craftRecipe(Seq(row(Block.Dirt, Block.Dirt), row(Block.Dirt, Block.Dirt)), Block.Grass, 1, "dirt patch -> grass"),
+    craftRecipe(
+      Seq(row(Block.Wood, Block.Wood), row(Block.Wood, Block.Wood)),
+      Block.Planks,
+      18,
+      "oak log pack -> planks"
+    ),
+    craftRecipe(
+      Seq(row(Block.BirchWood, Block.BirchWood), row(Block.BirchWood, Block.BirchWood)),
+      Block.BirchPlanks,
+      18,
+      "birch log pack -> planks"
+    ),
+    craftRecipe(
+      Seq(row(Block.PineWood, Block.PineWood), row(Block.PineWood, Block.PineWood)),
+      Block.PinePlanks,
+      18,
+      "pine log pack -> planks"
+    ),
+    craftRecipe(
+      Seq(row(Block.AcaciaWood, Block.AcaciaWood), row(Block.AcaciaWood, Block.AcaciaWood)),
+      Block.AcaciaPlanks,
+      18,
+      "acacia log pack -> planks"
+    ),
+    craftRecipe(
+      Seq(row(Block.Stone, Block.Stone), row(Block.Stone, Block.Stone)),
+      Block.Brick,
+      8,
+      "stone square -> brick"
+    ),
+    craftRecipe(
+      Seq(row(Block.Clay, Block.Clay), row(Block.Clay, Block.Clay)),
+      Block.Brick,
+      6,
+      "clay square -> brick"
+    ),
+    craftRecipe(
+      Seq(row(Block.Sand, Block.Clay), row(Block.Clay, Block.Sand)),
+      Block.Brick,
+      4,
+      "sand clay mix -> brick"
+    ),
+    craftRecipe(
+      Seq(row(Block.Sand, Block.Sand), row(Block.Sand, Block.Sand)),
+      Block.Glass,
+      4,
+      "sand square -> glass"
+    ),
+    craftRecipe(
+      Seq(row(Block.Glass, Block.Glass), row(Block.Glass, Block.Glass)),
+      Block.Glass,
+      4,
+      "glass polish"
+    ),
+    craftRecipe(
+      Seq(
+        row(Block.Sand, Block.Sand, Block.Sand),
+        row(Block.Sand, Block.Clay, Block.Sand),
+        row(Block.Sand, Block.Sand, Block.Sand)
+      ),
+      Block.Glass,
+      12,
+      "clear glass batch"
+    ),
+    craftRecipe(
+      Seq(
+        row(Block.Stone, Block.Stone, Block.Stone),
+        row(Block.Stone, Block.Air, Block.Stone),
+        row(Block.Stone, Block.Stone, Block.Stone)
+      ),
+      Block.Furnace,
+      1,
+      "stone furnace"
+    ),
+    craftRecipe(
+      Seq(row(Block.Planks, Block.Planks), row(Block.Planks, Block.Planks)),
+      Block.Furnace,
+      1,
+      "plank crate -> furnace"
+    ),
+    craftRecipe(
+      Seq(row(Block.BirchPlanks, Block.BirchPlanks), row(Block.BirchPlanks, Block.BirchPlanks)),
+      Block.Furnace,
+      1,
+      "birch crate -> furnace"
+    ),
+    craftRecipe(
+      Seq(row(Block.PinePlanks, Block.PinePlanks), row(Block.PinePlanks, Block.PinePlanks)),
+      Block.Furnace,
+      1,
+      "pine crate -> furnace"
+    ),
+    craftRecipe(
+      Seq(row(Block.AcaciaPlanks, Block.AcaciaPlanks), row(Block.AcaciaPlanks, Block.AcaciaPlanks)),
+      Block.Furnace,
+      1,
+      "acacia crate -> furnace"
+    ),
+    craftRecipe(
+      Seq(row(Block.Coal), row(Block.Planks)),
+      Block.Torch,
+      4,
+      "coal over oak plank -> torches"
+    ),
+    craftRecipe(
+      Seq(row(Block.Coal), row(Block.BirchPlanks)),
+      Block.Torch,
+      4,
+      "coal over birch plank -> torches"
+    ),
+    craftRecipe(
+      Seq(row(Block.Coal), row(Block.PinePlanks)),
+      Block.Torch,
+      4,
+      "coal over pine plank -> torches"
+    ),
+    craftRecipe(
+      Seq(row(Block.Coal), row(Block.AcaciaPlanks)),
+      Block.Torch,
+      4,
+      "coal over acacia plank -> torches"
+    ),
+    craftRecipe(
+      Seq(row(Block.Dirt, Block.Dirt), row(Block.Dirt, Block.Dirt)),
+      Block.Grass,
+      1,
+      "dirt patch -> grass"
+    ),
     craftRecipe(Seq(row(Block.Grass), row(Block.Dirt)), Block.Dirt, 2, "turn grass to dirt"),
-    craftRecipe(Seq(row(Block.Snow, Block.Snow), row(Block.Snow, Block.Snow)), Block.Snow, 4, "packed snow"),
-    craftRecipe(Seq(row(Block.Cactus, Block.Cactus), row(Block.Cactus, Block.Cactus)), Block.Cactus, 4, "cactus bundle"),
-    craftRecipe(Seq(row(Block.Coal, Block.Coal), row(Block.Coal, Block.Coal)), Block.Coal, 4, "coal bundle"),
-    craftRecipe(Seq(row(Block.Copper, Block.Copper), row(Block.Copper, Block.Copper)), Block.Copper, 4, "copper pack"),
-    craftRecipe(Seq(row(Block.IronOre, Block.IronOre), row(Block.IronOre, Block.IronOre)), Block.IronOre, 4, "iron ore pack"),
-    craftRecipe(Seq(row(Block.GoldOre, Block.GoldOre), row(Block.GoldOre, Block.GoldOre)), Block.GoldOre, 4, "gold ore pack"),
-    craftRecipe(Seq(row(Block.Diamond, Block.Diamond), row(Block.Diamond, Block.Diamond)), Block.Diamond, 4, "diamond cluster"),
+    craftRecipe(
+      Seq(row(Block.Snow, Block.Snow), row(Block.Snow, Block.Snow)),
+      Block.Snow,
+      4,
+      "packed snow"
+    ),
+    craftRecipe(
+      Seq(row(Block.Cactus, Block.Cactus), row(Block.Cactus, Block.Cactus)),
+      Block.Cactus,
+      4,
+      "cactus bundle"
+    ),
+    craftRecipe(
+      Seq(row(Block.Coal, Block.Coal), row(Block.Coal, Block.Coal)),
+      Block.Coal,
+      4,
+      "coal bundle"
+    ),
+    craftRecipe(
+      Seq(row(Block.Copper, Block.Copper), row(Block.Copper, Block.Copper)),
+      Block.Copper,
+      4,
+      "copper pack"
+    ),
+    craftRecipe(
+      Seq(row(Block.IronOre, Block.IronOre), row(Block.IronOre, Block.IronOre)),
+      Block.IronOre,
+      4,
+      "iron ore pack"
+    ),
+    craftRecipe(
+      Seq(row(Block.GoldOre, Block.GoldOre), row(Block.GoldOre, Block.GoldOre)),
+      Block.GoldOre,
+      4,
+      "gold ore pack"
+    ),
+    craftRecipe(
+      Seq(row(Block.Diamond, Block.Diamond), row(Block.Diamond, Block.Diamond)),
+      Block.Diamond,
+      4,
+      "diamond cluster"
+    ),
     craftRecipe(Seq(row(Block.IronOre, Block.Coal)), Block.IronIngot, 1, "quick iron bloom"),
     craftRecipe(Seq(row(Block.GoldOre, Block.Coal)), Block.GoldIngot, 1, "quick gold bloom"),
-    craftRecipe(Seq(row(Block.IronIngot, Block.IronIngot), row(Block.IronIngot, Block.IronIngot)), Block.IronOre, 1, "iron blocky ore pack"),
-    craftRecipe(Seq(row(Block.GoldIngot, Block.GoldIngot), row(Block.GoldIngot, Block.GoldIngot)), Block.GoldOre, 1, "gold blocky ore pack"),
-    craftRecipe(Seq(row(Block.Brick, Block.Brick), row(Block.Brick, Block.Brick)), Block.Brick, 4, "brick stack"),
-    craftRecipe(Seq(row(Block.RainbowBlock, Block.Glass), row(Block.Glass, Block.RainbowBlock)), Block.RainbowBlock, 4, "rainbow glass mix"),
-    craftRecipe(Seq(row(Block.Leaves, Block.Leaves), row(Block.Leaves, Block.Leaves)), Block.Leaves, 4, "leaf bundle"),
-    craftRecipe(Seq(row(Block.BirchLeaves, Block.BirchLeaves), row(Block.BirchLeaves, Block.BirchLeaves)), Block.BirchLeaves, 4, "birch leaf bundle"),
-    craftRecipe(Seq(row(Block.PineLeaves, Block.PineLeaves), row(Block.PineLeaves, Block.PineLeaves)), Block.PineLeaves, 4, "pine leaf bundle"),
-    craftRecipe(Seq(row(Block.AcaciaLeaves, Block.AcaciaLeaves), row(Block.AcaciaLeaves, Block.AcaciaLeaves)), Block.AcaciaLeaves, 4, "acacia leaf bundle")
-  ).filterNot(r => r.label.contains("crate -> furnace") || r.label.contains("quick ") || r.label.contains("bloom"))
+    craftRecipe(
+      Seq(row(Block.IronIngot, Block.IronIngot), row(Block.IronIngot, Block.IronIngot)),
+      Block.IronOre,
+      1,
+      "iron blocky ore pack"
+    ),
+    craftRecipe(
+      Seq(row(Block.GoldIngot, Block.GoldIngot), row(Block.GoldIngot, Block.GoldIngot)),
+      Block.GoldOre,
+      1,
+      "gold blocky ore pack"
+    ),
+    craftRecipe(
+      Seq(row(Block.Brick, Block.Brick), row(Block.Brick, Block.Brick)),
+      Block.Brick,
+      4,
+      "brick stack"
+    ),
+    craftRecipe(
+      Seq(row(Block.RainbowBlock, Block.Glass), row(Block.Glass, Block.RainbowBlock)),
+      Block.RainbowBlock,
+      4,
+      "rainbow glass mix"
+    ),
+    craftRecipe(
+      Seq(row(Block.Leaves, Block.Leaves), row(Block.Leaves, Block.Leaves)),
+      Block.Leaves,
+      4,
+      "leaf bundle"
+    ),
+    craftRecipe(
+      Seq(row(Block.BirchLeaves, Block.BirchLeaves), row(Block.BirchLeaves, Block.BirchLeaves)),
+      Block.BirchLeaves,
+      4,
+      "birch leaf bundle"
+    ),
+    craftRecipe(
+      Seq(row(Block.PineLeaves, Block.PineLeaves), row(Block.PineLeaves, Block.PineLeaves)),
+      Block.PineLeaves,
+      4,
+      "pine leaf bundle"
+    ),
+    craftRecipe(
+      Seq(row(Block.AcaciaLeaves, Block.AcaciaLeaves), row(Block.AcaciaLeaves, Block.AcaciaLeaves)),
+      Block.AcaciaLeaves,
+      4,
+      "acacia leaf bundle"
+    )
+  ).filterNot(r =>
+    r.label.contains("crate -> furnace") || r.label.contains("quick ") || r.label.contains("bloom")
+  )
 
-  private val toolRecipes: Array[CraftRecipe] = ToolSystem.materials.flatMap { case (material,items) =>
-    val s=Block.Stick; val a=Block.Air
-    Vector(
-      craftRecipe(Seq(row(material,material,material),row(a,s,a),row(a,s,a)),items(0),1,"pickaxe: head over two sticks"),
-      craftRecipe(Seq(row(material,material),row(material,s),row(a,s)),items(1),1,"axe: three head pieces and two sticks"),
-      craftRecipe(Seq(row(material),row(s),row(s)),items(2),1,"shovel: head over two sticks"),
-      craftRecipe(Seq(row(material),row(material),row(s)),items(3),1,"sword: two blade pieces over a stick"))
+  private val toolRecipes: Array[CraftRecipe] = ToolSystem.materials.flatMap {
+    case (material, items) =>
+      val s = Block.Stick; val a = Block.Air
+      Vector(
+        craftRecipe(
+          Seq(row(material, material, material), row(a, s, a), row(a, s, a)),
+          items(0),
+          1,
+          "pickaxe: head over two sticks"
+        ),
+        craftRecipe(
+          Seq(row(material, material), row(material, s), row(a, s)),
+          items(1),
+          1,
+          "axe: three head pieces and two sticks"
+        ),
+        craftRecipe(
+          Seq(row(material), row(s), row(s)),
+          items(2),
+          1,
+          "shovel: head over two sticks"
+        ),
+        craftRecipe(
+          Seq(row(material), row(material), row(s)),
+          items(3),
+          1,
+          "sword: two blade pieces over a stick"
+        )
+      )
   }.toArray
   val craftingRecipes: Array[CraftRecipe] = basicRecipes ++ Array(
-    craftRecipe(Seq(row(Block.Planks),row(Block.Planks)),Block.Stick,4,"two planks -> four sticks"),
-    craftRecipe(Seq(row(Block.CoalLump),row(Block.Stick)),Block.Torch,4,"coal over stick -> four torches"),
-    craftRecipe(Seq(row(Block.Coal),row(Block.Stick)),Block.Torch,4,"coal over stick -> four torches")
+    craftRecipe(
+      Seq(row(Block.Planks), row(Block.Planks)),
+      Block.Stick,
+      4,
+      "two planks -> four sticks"
+    ),
+    craftRecipe(
+      Seq(row(Block.CoalLump), row(Block.Stick)),
+      Block.Torch,
+      4,
+      "coal over stick -> four torches"
+    ),
+    craftRecipe(
+      Seq(row(Block.Coal), row(Block.Stick)),
+      Block.Torch,
+      4,
+      "coal over stick -> four torches"
+    )
   ) ++ toolRecipes
 
-  def matches(recipe: CraftRecipe,shape: CraftShape): Boolean =
-    def same(cells: Vector[Block]): Boolean = cells.zip(shape.cells).forall { (wanted,actual) =>
-      wanted==actual || ((ToolSystem.isTool(recipe.output) || recipe.output==Block.Stick) && wanted==Block.Planks && ToolSystem.isPlanks(actual))
+  def matches(recipe: CraftRecipe, shape: CraftShape): Boolean =
+    def same(cells: Vector[Block]): Boolean = cells.zip(shape.cells).forall { (wanted, actual) =>
+      wanted == actual || ((ToolSystem.isTool(
+        recipe.output
+      ) || recipe.output == Block.Stick) && wanted == Block.Planks && ToolSystem.isPlanks(actual))
     }
-    recipe.width==shape.width && recipe.height==shape.height &&
-      (same(recipe.cells) || (ToolSystem.isTool(recipe.output) && same(recipe.cells.grouped(recipe.width).flatMap(_.reverse).toVector)))
+    recipe.width == shape.width && recipe.height == shape.height &&
+    (same(recipe.cells) || (ToolSystem.isTool(recipe.output) && same(
+      recipe.cells.grouped(recipe.width).flatMap(_.reverse).toVector
+    )))
 
   def normalizeCraftGrid(cells: Array[Block]): Option[CraftShape] =
     var minX = 3; var minY = 3; var maxX = -1; var maxY = -1
@@ -110,18 +371,22 @@ object InventoryModel:
 
   def craftingResult(cells: Array[Block]): Option[CraftRecipe] =
     normalizeCraftGrid(cells).flatMap { shape =>
-      craftingRecipes.find(r => matches(r,shape))
+      craftingRecipes.find(r => matches(r, shape))
     }
 
   def smeltResult(input: Block): Option[(Block, Int)] = input match
-    case Block.Sand => Some((Block.Glass, 1))
-    case Block.Clay => Some((Block.Brick, 1))
-    case Block.Stone => Some((Block.Brick, 2))
-    case Block.Wood | Block.BirchWood | Block.PineWood | Block.AcaciaWood => Some((Block.CoalLump, 1))
-    case Block.Copper => Some((Block.CopperIngot, 1))
+    case Block.Sand                                                       => Some((Block.Glass, 1))
+    case Block.Clay                                                       => Some((Block.Brick, 1))
+    case Block.Stone                                                      => Some((Block.Brick, 2))
+    case Block.Wood | Block.BirchWood | Block.PineWood | Block.AcaciaWood =>
+      Some((Block.CoalLump, 1))
+    case Block.Copper  => Some((Block.CopperIngot, 1))
     case Block.IronOre => Some((Block.IronIngot, 1))
     case Block.GoldOre => Some((Block.GoldIngot, 1))
-    case _ => None
+    case _             => None
 
   def fuelBurnTime(fuel: Block): Float =
-    if fuel==Block.Coal || fuel==Block.CoalLump then 8f else if fuel==Block.Stick then 0.5f else if ToolSystem.isPlanks(fuel) then 1.5f else 2f
+    if fuel == Block.Coal || fuel == Block.CoalLump then 8f
+    else if fuel == Block.Stick then 0.5f
+    else if ToolSystem.isPlanks(fuel) then 1.5f
+    else 2f

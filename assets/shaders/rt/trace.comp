@@ -6,16 +6,17 @@
 layout(local_size_x = 8, local_size_y = 8) in;
 
 layout(set = 0, binding = 0, std140) uniform Frame {
-    mat4 invProj;
-    mat4 invView;
-    mat4 prevProj;
-    mat4 prevView;
-    vec4 camera;      // xyz, daylight
-    vec4 prevCamera;  // xyz, rain
-    vec4 sunDir;      // xyz, time
-    vec4 params;      // near, far, full width, full height
-    vec4 params2;     // half width, half height, frame, haveHistory
-} frame;
+  mat4 invProj;
+  mat4 invView;
+  mat4 prevProj;
+  mat4 prevView;
+  vec4 camera;      // xyz, daylight
+  vec4 prevCamera;  // xyz, rain
+  vec4 sunDir;      // xyz, time
+  vec4 params;      // near, far, instance count, reserved
+  vec4 params2;     // half width, half height, frame, haveHistory
+}
+frame;
 
 layout(set = 0, binding = 1) uniform accelerationStructureEXT tlas;
 layout(set = 0, binding = 2) uniform sampler2D gbufferIn;
@@ -29,252 +30,271 @@ layout(set = 0, binding = 10, rgba16f) uniform image2D historyLightingWrite;
 layout(set = 0, binding = 11, r32f) uniform image2D historyDepthWrite;
 
 struct Face {
-    vec4 normalEmissive;
-    vec4 albedo;
+  vec4 normalEmissive;
+  vec4 albedo;
 };
 
-layout(buffer_reference, std430, buffer_reference_align = 16) buffer FaceBuf {
-    Face faces[];
-};
+layout(buffer_reference, std430, buffer_reference_align = 16) buffer FaceBuf { Face faces[]; };
 
-layout(set = 0, binding = 7, std430) buffer Infos {
-    uvec4 data[];
-};
+layout(set = 0, binding = 7, std430) buffer Infos { uvec4 data[]; };
 
 float sat(float x) { return clamp(x, 0.0, 1.0); }
 
 float linearDepth(float d) {
-    float n = frame.params.x;
-    float f = frame.params.y;
-    float z = d * 2.0 - 1.0;
-    return (2.0 * n * f) / max(f + n - z * (f - n), 0.00001);
+  float n = frame.params.x;
+  float f = frame.params.y;
+  float z = d * 2.0 - 1.0;
+  return (2.0 * n * f) / max(f + n - z * (f - n), 0.00001);
 }
 
 vec3 reconstructView(vec2 uv, float depth) {
-    vec4 clip = vec4(uv * 2.0 - 1.0, depth * 2.0 - 1.0, 1.0);
-    vec4 view = frame.invProj * clip;
-    return view.xyz / max(abs(view.w), 0.00001);
+  vec4 clip = vec4(uv * 2.0 - 1.0, depth * 2.0 - 1.0, 1.0);
+  vec4 view = frame.invProj * clip;
+  return view.xyz / max(abs(view.w), 0.00001);
 }
 
 vec3 worldFromView(vec3 viewPos) {
-    vec4 rel = frame.invView * vec4(viewPos, 1.0);
-    return vec3(rel.x + frame.camera.x, rel.y, rel.z + frame.camera.z);
+  vec4 rel = frame.invView * vec4(viewPos, 1.0);
+  return vec3(rel.x + frame.camera.x, rel.y, rel.z + frame.camera.z);
 }
 
 uint hashU(uint x) {
-    x ^= x >> 16;
-    x *= 0x7feb352du;
-    x ^= x >> 15;
-    x *= 0x846ca68bu;
-    x ^= x >> 16;
-    return x;
+  x ^= x >> 16;
+  x *= 0x7feb352du;
+  x ^= x >> 15;
+  x *= 0x846ca68bu;
+  x ^= x >> 16;
+  return x;
 }
 
 float hashF(uint x) { return float(hashU(x) & 0x00ffffffu) / float(0x01000000u); }
 
 float daylightAmount(vec3 sun) { return smoothstep(-0.15, 0.12, sun.y); }
-float nightAmount(vec3 sun) { return 1.0-smoothstep(-0.16, 0.01, sun.y); }
-float goldenHour(vec3 sun) { return exp(-pow((sun.y-0.035)*4.4,2.0)); }
+float nightAmount(vec3 sun) { return 1.0 - smoothstep(-0.16, 0.01, sun.y); }
+float goldenHour(vec3 sun) { return exp(-pow((sun.y - 0.035) * 4.4, 2.0)); }
 vec3 sunlightColor(vec3 sun) {
-    return mix(vec3(1.90,1.82,1.65),vec3(1.82,0.65,0.22),goldenHour(sun));
+  return mix(vec3(1.90, 1.82, 1.65), vec3(1.82, 0.65, 0.22), goldenHour(sun));
 }
-vec3 skyScattering(vec3 dir,vec3 sun,float storm) {
-    float day=daylightAmount(sun);
-    float gold=goldenHour(sun)*(1.0-storm);
-    float elev=sat(dir.y);
-    float horizonBand=pow(1.0-elev,3.0);
-    float towardSun=pow(sat(dot(dir,normalize(sun))),3.0);
-    vec3 zenith=mix(vec3(0.0015,0.006,0.018),vec3(0.075,0.23,0.57),day);
-    zenith=mix(zenith,vec3(0.16,0.12,0.28),gold*0.55);
-    vec3 horizon=mix(vec3(0.012,0.037,0.068),vec3(0.42,0.65,0.86),day);
-    vec3 sunset=mix(vec3(0.48,0.24,0.30),vec3(1.15,0.50,0.115),towardSun);
-    horizon=mix(horizon,sunset,gold*0.92);
-    vec3 sky=mix(zenith,horizon,horizonBand);
-    sky+=vec3(0.9,0.38,0.085)*towardSun*gold*pow(1.0-elev,1.6)*0.36;
-    vec3 stormSky=mix(vec3(0.003,0.008,0.016),vec3(0.085,0.115,0.15),day);
-    stormSky*=mix(0.65,1.25,horizonBand);
-    sky=mix(sky,stormSky,storm*0.93);
-    vec3 moon=-normalize(sun);
-    float md=sat(dot(dir,moon));
-    sky+=vec3(0.008,0.026,0.046)*(pow(md,8.0)+pow(md,96.0)*1.8)*nightAmount(sun)*(1.0-storm);
-    return mix(sky,horizon*vec3(0.22,0.27,0.32),sat(-dir.y*3.0));
+vec3 skyScattering(vec3 dir, vec3 sun, float storm) {
+  float day = daylightAmount(sun);
+  float gold = goldenHour(sun) * (1.0 - storm);
+  float elev = sat(dir.y);
+  float horizonBand = pow(1.0 - elev, 3.0);
+  float towardSun = pow(sat(dot(dir, normalize(sun))), 3.0);
+  vec3 zenith = mix(vec3(0.0015, 0.006, 0.018), vec3(0.075, 0.23, 0.57), day);
+  zenith = mix(zenith, vec3(0.16, 0.12, 0.28), gold * 0.55);
+  vec3 horizon = mix(vec3(0.012, 0.037, 0.068), vec3(0.42, 0.65, 0.86), day);
+  vec3 sunset = mix(vec3(0.48, 0.24, 0.30), vec3(1.15, 0.50, 0.115), towardSun);
+  horizon = mix(horizon, sunset, gold * 0.92);
+  vec3 sky = mix(zenith, horizon, horizonBand);
+  sky += vec3(0.9, 0.38, 0.085) * towardSun * gold * pow(1.0 - elev, 1.6) * 0.36;
+  vec3 stormSky = mix(vec3(0.003, 0.008, 0.016), vec3(0.085, 0.115, 0.15), day);
+  stormSky *= mix(0.65, 1.25, horizonBand);
+  sky = mix(sky, stormSky, storm * 0.93);
+  vec3 moon = -normalize(sun);
+  float md = sat(dot(dir, moon));
+  sky += vec3(0.008, 0.026, 0.046) * (pow(md, 8.0) + pow(md, 96.0) * 1.8) * nightAmount(sun) *
+         (1.0 - storm);
+  return mix(sky, horizon * vec3(0.22, 0.27, 0.32), sat(-dir.y * 3.0));
 }
 
 vec3 skyColor(vec3 rd) {
-    return skyScattering(normalize(rd),normalize(frame.sunDir.xyz),sat(frame.prevCamera.w));
+  return skyScattering(normalize(rd), normalize(frame.sunDir.xyz), sat(frame.prevCamera.w));
 }
 
 bool occluded(vec3 origin, vec3 dir, float dist) {
-    rayQueryEXT q;
-    rayQueryInitializeEXT(q, tlas, gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsOpaqueEXT,
-        0xFFu, origin, 0.04, dir, dist);
-    while (rayQueryProceedEXT(q)) {}
-    return rayQueryGetIntersectionTypeEXT(q, true) != gl_RayQueryCommittedIntersectionNoneEXT;
+  rayQueryEXT q;
+  rayQueryInitializeEXT(q, tlas, gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsOpaqueEXT, 0xFFu,
+                        origin, 0.04, dir, dist);
+  while (rayQueryProceedEXT(q)) {
+  }
+  return rayQueryGetIntersectionTypeEXT(q, true) != gl_RayQueryCommittedIntersectionNoneEXT;
 }
 
 // Closest hit. Returns false on a miss. albedo/normal/emissive are outputs.
-bool closestHit(vec3 origin, vec3 dir, float dist, out vec3 albedo, out vec3 normal, out float emissive, out vec3 hitPosition) {
-    rayQueryEXT q;
-    rayQueryInitializeEXT(q, tlas, gl_RayFlagsOpaqueEXT, 0xFFu, origin, 0.05, dir, dist);
-    while (rayQueryProceedEXT(q)) {}
-    if (rayQueryGetIntersectionTypeEXT(q, true) != gl_RayQueryCommittedIntersectionTriangleEXT) return false;
-    uint id = uint(rayQueryGetIntersectionInstanceCustomIndexEXT(q, true));
-    uint prim = uint(rayQueryGetIntersectionPrimitiveIndexEXT(q, true));
-    // Treat malformed/stale geometry records as misses rather than dereference
-    // a device address outside its face buffer and abort a GPU invocation.
-    if (id >= uint(frame.params.z)) return false;
-    uvec4 rec = data[id];
-    if (prim >= rec.z || (rec.x == 0u && rec.y == 0u)) return false;
-    uint64_t addr = uint64_t(rec.x) | (uint64_t(rec.y) << 32);
-    if ((addr & uint64_t(15)) != uint64_t(0)) return false;
-    Face face = FaceBuf(addr).faces[prim];
-    normal = face.normalEmissive.xyz;
-    if (any(isnan(normal)) || any(isinf(normal)) || dot(normal,normal)<0.01) normal=vec3(0.0,1.0,0.0);
-    if (dot(normal, dir) > 0.0) normal = -normal;
-    albedo = pow(max(face.albedo.rgb,vec3(0.0)),vec3(2.2));
-    emissive = face.normalEmissive.w;
-    hitPosition = origin + dir * rayQueryGetIntersectionTEXT(q,true);
-    return true;
+bool closestHit(vec3 origin, vec3 dir, float dist, out vec3 albedo, out vec3 normal,
+                out float emissive, out vec3 hitPosition) {
+  rayQueryEXT q;
+  rayQueryInitializeEXT(q, tlas, gl_RayFlagsOpaqueEXT, 0xFFu, origin, 0.05, dir, dist);
+  while (rayQueryProceedEXT(q)) {
+  }
+  if (rayQueryGetIntersectionTypeEXT(q, true) != gl_RayQueryCommittedIntersectionTriangleEXT)
+    return false;
+  uint id = uint(rayQueryGetIntersectionInstanceCustomIndexEXT(q, true));
+  uint prim = uint(rayQueryGetIntersectionPrimitiveIndexEXT(q, true));
+  // Treat malformed/stale geometry records as misses rather than dereference
+  // a device address outside its face buffer and abort a GPU invocation.
+  if (id >= uint(frame.params.z)) return false;
+  uvec4 rec = data[id];
+  if (prim >= rec.z || (rec.x == 0u && rec.y == 0u)) return false;
+  uint64_t addr = uint64_t(rec.x) | (uint64_t(rec.y) << 32);
+  if ((addr & uint64_t(15)) != uint64_t(0)) return false;
+  Face face = FaceBuf(addr).faces[prim];
+  normal = face.normalEmissive.xyz;
+  if (any(isnan(normal)) || any(isinf(normal)) || dot(normal, normal) < 0.01)
+    normal = vec3(0.0, 1.0, 0.0);
+  if (dot(normal, dir) > 0.0) normal = -normal;
+  albedo = pow(max(face.albedo.rgb, vec3(0.0)), vec3(2.2));
+  emissive = face.normalEmissive.w;
+  hitPosition = origin + dir * rayQueryGetIntersectionTEXT(q, true);
+  return true;
 }
 
 vec3 sunDirection() {
-    vec3 s = normalize(frame.sunDir.xyz);
-    return s.y > -0.02 ? s : -s;
+  vec3 s = normalize(frame.sunDir.xyz);
+  return s.y > -0.02 ? s : -s;
 }
 
 void main() {
-    ivec2 pix = ivec2(gl_GlobalInvocationID.xy);
-    int w = int(frame.params2.x);
-    int h = int(frame.params2.y);
-    if (pix.x >= w || pix.y >= h) return;
-    vec2 uv = (vec2(pix) + 0.5) / vec2(w, h);
+  ivec2 pix = ivec2(gl_GlobalInvocationID.xy);
+  int w = int(frame.params2.x);
+  int h = int(frame.params2.y);
+  if (pix.x >= w || pix.y >= h) return;
+  vec2 uv = (vec2(pix) + 0.5) / vec2(w, h);
 
-    vec4 g = texture(gbufferIn, uv);
-    float depth = g.a;
-    vec4 water = texture(waterIn, uv);
-    bool sky = depth > 0.99995;
-    vec3 sun = sunDirection();
-    vec3 celestial=normalize(frame.sunDir.xyz);
-    float day=daylightAmount(celestial);
-    float night=nightAmount(celestial);
-    float storm=sat(frame.prevCamera.w);
-    vec3 sunColor=mix(sunlightColor(celestial)*smoothstep(-0.055,0.1,celestial.y),vec3(0.026,0.065,0.12),night)*(1.0-storm*0.88);
+  vec4 g = texture(gbufferIn, uv);
+  float depth = g.a;
+  vec4 water = texture(waterIn, uv);
+  bool sky = depth > 0.99995;
+  vec3 sun = sunDirection();
+  vec3 celestial = normalize(frame.sunDir.xyz);
+  float day = daylightAmount(celestial);
+  float night = nightAmount(celestial);
+  float storm = sat(frame.prevCamera.w);
+  vec3 sunColor = mix(sunlightColor(celestial) * smoothstep(-0.055, 0.1, celestial.y),
+                      vec3(0.026, 0.065, 0.12), night) *
+                  (1.0 - storm * 0.88);
 
-    vec3 lighting = vec3(0.0);
-    float sunVis = 1.0;
-    vec3 reflection = vec3(0.0);
-    float reflWeight = 0.0;
-    vec3 volume = vec3(0.0);
-    float waterSun=1.0;
-    uint seed = hashU(uint(pix.x) * 1973u + uint(pix.y) * 9277u + uint(frame.params2.z) * 26699u);
+  vec3 lighting = vec3(0.0);
+  float sunVis = 1.0;
+  vec3 reflection = vec3(0.0);
+  float reflWeight = 0.0;
+  vec3 volume = vec3(0.0);
+  float waterSun = 1.0;
+  uint seed = hashU(uint(pix.x) * 1973u + uint(pix.y) * 9277u + uint(frame.params2.z) * 26699u);
 
-    if (!sky) {
-        vec3 view = reconstructView(uv, depth);
-        vec3 world = worldFromView(view);
-        vec3 viewN = normalize(g.rgb * 2.0 - 1.0);
-        vec3 worldN = normalize(mat3(frame.invView) * viewN);
-        vec3 origin = world + worldN * 0.025;
+  if (!sky) {
+    vec3 view = reconstructView(uv, depth);
+    vec3 world = worldFromView(view);
+    vec3 viewN = normalize(g.rgb * 2.0 - 1.0);
+    vec3 worldN = normalize(mat3(frame.invView) * viewN);
+    vec3 origin = world + worldN * 0.025;
 
-        float vis = 0.0;
-        vec3 tangent = normalize(abs(sun.y) < 0.95 ? cross(sun, vec3(0.0, 1.0, 0.0)) : cross(sun, vec3(1.0, 0.0, 0.0)));
-        vec3 bitangent = cross(sun, tangent);
-        for (int i = 0; i < 4; i++) {
-            float a = hashF(seed + uint(i) * 13u) * 6.2831853;
-            float r = sqrt(hashF(seed + uint(i) * 29u)) * 0.00465;
-            vec3 dir = normalize(sun + (tangent * cos(a) + bitangent * sin(a)) * r);
-            vis += occluded(origin, dir, 220.0) ? 0.0 : 1.0;
-        }
-        sunVis = vis * 0.25;
-
-        float ao = 0.0;
-        vec3 t2 = normalize(abs(worldN.y) < 0.95 ? cross(worldN, vec3(0.0, 1.0, 0.0)) : cross(worldN, vec3(1.0, 0.0, 0.0)));
-        vec3 b2 = cross(worldN, t2);
-        for (int i = 0; i < 4; i++) {
-            float u1 = hashF(seed + 100u + uint(i) * 17u);
-            float u2 = hashF(seed + 180u + uint(i) * 19u);
-            float r = sqrt(u1);
-            float phi = 6.2831853 * u2;
-            vec3 dir = normalize(t2 * (r * cos(phi)) + b2 * (r * sin(phi)) + worldN * sqrt(max(1.0 - u1, 0.0)));
-            ao += occluded(origin, dir, 18.0) ? 0.0 : 1.0;
-        }
-        ao *= 0.25;
-        vec3 skyAmb = skyColor(worldN) * ao * mix(0.35, 0.65, day);
-
-        vec3 gi = vec3(0.0);
-        float u1 = hashF(seed + 400u);
-        float u2 = hashF(seed + 500u);
-        float r = sqrt(u1);
-        float phi = 6.2831853 * u2;
-        vec3 giDir = normalize(t2 * (r * cos(phi)) + b2 * (r * sin(phi)) + worldN * sqrt(max(1.0 - u1, 0.0)));
-        vec3 hitAlbedo; vec3 hitN; float emit; vec3 hitPos;
-        if (closestHit(origin, giDir, 48.0, hitAlbedo, hitN, emit, hitPos)) {
-            float bounceVis = occluded(hitPos + hitN * 0.08, sun, 180.0) ? 0.15 : 1.0;
-            gi = hitAlbedo * (sunColor * sat(dot(hitN, sun)) * bounceVis + mix(vec3(0.004,0.012,0.026),vec3(0.16,0.25,0.40),day)) + hitAlbedo * emit;
-        }
-        lighting = skyAmb + gi * 0.65;
-
+    float vis = 0.0;
+    vec3 tangent = normalize(abs(sun.y) < 0.95 ? cross(sun, vec3(0.0, 1.0, 0.0))
+                                               : cross(sun, vec3(1.0, 0.0, 0.0)));
+    vec3 bitangent = cross(sun, tangent);
+    for (int i = 0; i < 4; i++) {
+      float a = hashF(seed + uint(i) * 13u) * 6.2831853;
+      float r = sqrt(hashF(seed + uint(i) * 29u)) * 0.00465;
+      vec3 dir = normalize(sun + (tangent * cos(a) + bitangent * sin(a)) * r);
+      vis += occluded(origin, dir, 220.0) ? 0.0 : 1.0;
     }
-    if (water.a > 0.001 && water.a < 0.99999) {
-        vec3 waterView=reconstructView(uv,water.a);
-        vec3 waterWorld=worldFromView(waterView);
-        vec3 waterN=normalize(mat3(frame.invView)*normalize(water.rgb*2.0-1.0));
-        vec3 incident=normalize(waterWorld-frame.camera.xyz);
-        bool immersed=dot(waterN,incident)>0.0;
-        if(immersed) waterN= -waterN;
-        vec3 reflDir=reflect(incident,waterN);
-        vec3 rAlb; vec3 rN; float rEmit; vec3 rPos;
-        waterSun=occluded(waterWorld+waterN*0.08,sun,220.0) ? 0.0 : 1.0;
-        if (closestHit(waterWorld+waterN*0.08,reflDir,160.0,rAlb,rN,rEmit,rPos)) {
-            float rv=occluded(rPos+rN*0.08,sun,180.0) ? 0.15 : 1.0;
-            reflection=rAlb*(sunColor*sat(dot(rN,sun))*rv+skyColor(rN)*0.45)+rAlb*rEmit;
-            if(immersed) {
-                vec3 a=exp(-vec3(0.25,0.085,0.04)*min(length(rPos-waterWorld),80.0));
-                reflection=reflection*a+vec3(0.003,0.035,0.055)*(0.08+0.92*day)*(1.0-a);
-            }
-            reflWeight=1.0;
-        } else {
-            reflection=skyColor(reflDir); reflWeight=0.0;
-        }
-    }
-    // Shafts must also exist against the sky. The water surface bounds a ray
-    // before the opaque bottom; opaque geometry and water use the same world ray.
-    float endDepth=water.a>0.001 ? water.a : depth;
-    vec3 endWorld=worldFromView(reconstructView(uv,sky && water.a<0.001 ? 0.9999 : endDepth));
-    vec3 rd=normalize(endWorld-frame.camera.xyz);
-    float endT=min(length(endWorld-frame.camera.xyz),120.0);
-    float acc=0.0;
-    for (int i=0;i<8;i++) {
-        float t=endT*(float(i)+hashF(seed+uint(i)*3u))/8.0;
-        vec3 p=frame.camera.xyz+rd*t;
-        float v=occluded(p,sun,200.0) ? 0.0 : 1.0;
-        acc+=v*exp(-max(p.y-46.0,0.0)*0.015);
-    }
-    float low=goldenHour(celestial);
-    float heading=pow(sat(dot(rd,sun)),3.0);
-    volume=sunColor*acc*mix(0.003,0.034,low)*heading*(endT/120.0);
+    sunVis = vis * 0.25;
 
-    vec4 resolved = vec4(lighting, sunVis);
-    if (frame.params2.w > 0.5 && !sky) {
-        vec3 worldNow = worldFromView(reconstructView(uv, depth));
-        vec4 eye = frame.prevView * vec4(worldNow.x - frame.prevCamera.x, worldNow.y, worldNow.z - frame.prevCamera.z, 1.0);
-        vec4 clip = frame.prevProj * eye;
-        vec2 prevUv = clip.xy / clip.w * 0.5 + 0.5;
-        if (prevUv.x > 0.0 && prevUv.y > 0.0 && prevUv.x < 1.0 && prevUv.y < 1.0 && clip.w > 0.0) {
-            ivec2 hp = ivec2(clamp(prevUv * vec2(float(w), float(h)), vec2(0.0), vec2(float(w - 1), float(h - 1))));
-            float prevD = imageLoad(historyDepth, hp).r;
-            float expectedDepth=clip.z/clip.w*0.5+0.5;
-            float lz = linearDepth(expectedDepth);
-            float lp = linearDepth(prevD);
-            if (abs(lz - lp) < max(0.25, lz * 0.015)) {
-                vec4 old = imageLoad(historyLighting, hp);
-                resolved = mix(old, resolved, 0.18);
-            }
-        }
+    float ao = 0.0;
+    vec3 t2 = normalize(abs(worldN.y) < 0.95 ? cross(worldN, vec3(0.0, 1.0, 0.0))
+                                             : cross(worldN, vec3(1.0, 0.0, 0.0)));
+    vec3 b2 = cross(worldN, t2);
+    for (int i = 0; i < 4; i++) {
+      float u1 = hashF(seed + 100u + uint(i) * 17u);
+      float u2 = hashF(seed + 180u + uint(i) * 19u);
+      float r = sqrt(u1);
+      float phi = 6.2831853 * u2;
+      vec3 dir =
+          normalize(t2 * (r * cos(phi)) + b2 * (r * sin(phi)) + worldN * sqrt(max(1.0 - u1, 0.0)));
+      ao += occluded(origin, dir, 18.0) ? 0.0 : 1.0;
     }
+    ao *= 0.25;
+    vec3 skyAmb = skyColor(worldN) * ao * mix(0.35, 0.65, day);
 
-    imageStore(lightingOut, pix, resolved);
-    imageStore(reflectionOut, pix, vec4(reflection, reflWeight));
-    imageStore(volumeOut, pix, vec4(volume, waterSun));
-    imageStore(historyLightingWrite, pix, resolved);
-    imageStore(historyDepthWrite, pix, vec4(depth));
+    vec3 gi = vec3(0.0);
+    float u1 = hashF(seed + 400u);
+    float u2 = hashF(seed + 500u);
+    float r = sqrt(u1);
+    float phi = 6.2831853 * u2;
+    vec3 giDir =
+        normalize(t2 * (r * cos(phi)) + b2 * (r * sin(phi)) + worldN * sqrt(max(1.0 - u1, 0.0)));
+    vec3 hitAlbedo;
+    vec3 hitN;
+    float emit;
+    vec3 hitPos;
+    if (closestHit(origin, giDir, 48.0, hitAlbedo, hitN, emit, hitPos)) {
+      float bounceVis = occluded(hitPos + hitN * 0.08, sun, 180.0) ? 0.15 : 1.0;
+      gi = hitAlbedo * (sunColor * sat(dot(hitN, sun)) * bounceVis +
+                        mix(vec3(0.004, 0.012, 0.026), vec3(0.16, 0.25, 0.40), day)) +
+           hitAlbedo * emit;
+    }
+    lighting = skyAmb + gi * 0.65;
+  }
+  if (water.a > 0.001 && water.a < 0.99999) {
+    vec3 waterView = reconstructView(uv, water.a);
+    vec3 waterWorld = worldFromView(waterView);
+    vec3 waterN = normalize(mat3(frame.invView) * normalize(water.rgb * 2.0 - 1.0));
+    vec3 incident = normalize(waterWorld - frame.camera.xyz);
+    bool immersed = dot(waterN, incident) > 0.0;
+    if (immersed) waterN = -waterN;
+    vec3 reflDir = reflect(incident, waterN);
+    vec3 rAlb;
+    vec3 rN;
+    float rEmit;
+    vec3 rPos;
+    waterSun = occluded(waterWorld + waterN * 0.08, sun, 220.0) ? 0.0 : 1.0;
+    if (closestHit(waterWorld + waterN * 0.08, reflDir, 160.0, rAlb, rN, rEmit, rPos)) {
+      float rv = occluded(rPos + rN * 0.08, sun, 180.0) ? 0.15 : 1.0;
+      reflection = rAlb * (sunColor * sat(dot(rN, sun)) * rv + skyColor(rN) * 0.45) + rAlb * rEmit;
+      if (immersed) {
+        vec3 a = exp(-vec3(0.25, 0.085, 0.04) * min(length(rPos - waterWorld), 80.0));
+        reflection = reflection * a + vec3(0.003, 0.035, 0.055) * (0.08 + 0.92 * day) * (1.0 - a);
+      }
+      reflWeight = 1.0;
+    } else {
+      reflection = skyColor(reflDir);
+      reflWeight = 0.0;
+    }
+  }
+  // Shafts must also exist against the sky. The water surface bounds a ray
+  // before the opaque bottom; opaque geometry and water use the same world ray.
+  float endDepth = water.a > 0.001 ? water.a : depth;
+  vec3 endWorld = worldFromView(reconstructView(uv, sky && water.a < 0.001 ? 0.9999 : endDepth));
+  vec3 rd = normalize(endWorld - frame.camera.xyz);
+  float endT = min(length(endWorld - frame.camera.xyz), 120.0);
+  float heading = pow(sat(dot(rd, sun)), 3.0);
+  float acc = 0.0;
+  if (heading > 0.0005)
+    for (int i = 0; i < 8; i++) {
+      float t = endT * (float(i) + hashF(seed + uint(i) * 3u)) / 8.0;
+      vec3 p = frame.camera.xyz + rd * t;
+      float v = occluded(p, sun, 200.0) ? 0.0 : 1.0;
+      acc += v * exp(-max(p.y - 46.0, 0.0) * 0.015);
+    }
+  float low = goldenHour(celestial);
+  volume = sunColor * acc * mix(0.003, 0.034, low) * heading * (endT / 120.0);
+
+  vec4 resolved = vec4(lighting, sunVis);
+  if (frame.params2.w > 0.5 && !sky) {
+    vec3 worldNow = worldFromView(reconstructView(uv, depth));
+    vec4 eye = frame.prevView * vec4(worldNow.x - frame.prevCamera.x, worldNow.y,
+                                     worldNow.z - frame.prevCamera.z, 1.0);
+    vec4 clip = frame.prevProj * eye;
+    vec2 prevUv = clip.xy / clip.w * 0.5 + 0.5;
+    if (prevUv.x > 0.0 && prevUv.y > 0.0 && prevUv.x < 1.0 && prevUv.y < 1.0 && clip.w > 0.0) {
+      ivec2 hp = ivec2(
+          clamp(prevUv * vec2(float(w), float(h)), vec2(0.0), vec2(float(w - 1), float(h - 1))));
+      float prevD = imageLoad(historyDepth, hp).r;
+      float expectedDepth = clip.z / clip.w * 0.5 + 0.5;
+      float lz = linearDepth(expectedDepth);
+      float lp = linearDepth(prevD);
+      if (abs(lz - lp) < max(0.25, lz * 0.015)) {
+        vec4 old = imageLoad(historyLighting, hp);
+        resolved = mix(old, resolved, 0.18);
+      }
+    }
+  }
+
+  imageStore(lightingOut, pix, resolved);
+  imageStore(reflectionOut, pix, vec4(reflection, reflWeight));
+  imageStore(volumeOut, pix, vec4(volume, waterSun));
+  imageStore(historyLightingWrite, pix, resolved);
+  imageStore(historyDepthWrite, pix, vec4(depth));
 }

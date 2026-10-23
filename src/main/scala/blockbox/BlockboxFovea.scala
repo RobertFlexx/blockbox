@@ -9,15 +9,18 @@ import org.lwjgl.opengl.GL20.*
 import org.lwjgl.opengl.GL21.*
 import org.lwjgl.opengl.GL30.*
 
-/** Optional reduced-resolution world rendering with a bounded sharpening resolve.
-  * Texture coordinates stay linear so edges, the crosshair and block picking agree.
-  * The historical class/settings names remain compatible with existing settings.
+/** Optional reduced-resolution world rendering with a bounded sharpening resolve. Texture
+  * coordinates stay linear so edges, the crosshair and block picking agree. The historical
+  * class/settings names remain compatible with existing settings.
   */
 final class BlockboxFovea:
   // Wired to the in-game settings toggle.
   var enabled = true
   // Reduced internal resolution before the sharpening resolve.
-  var internalScale = Option(System.getenv("BLOCKBOX_FOVEA_SCALE")).flatMap(v => scala.util.Try(v.trim.toFloat).toOption).filter(s => s > 0.3f && s <= 1f).getOrElse(0.85f)
+  var internalScale = Option(System.getenv("BLOCKBOX_FOVEA_SCALE"))
+    .flatMap(v => scala.util.Try(v.trim.toFloat).toOption)
+    .filter(s => s > 0.3f && s <= 1f)
+    .getOrElse(0.85f)
   private var colorTex = 0
   private var depthRbo = 0
   private var fbo = 0
@@ -50,8 +53,8 @@ final class BlockboxFovea:
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
     true
 
-  /** Bind the reduced-resolution color target (depth unused) so the shader pipeline's
-    * final composite can draw into it. Callers must later call upsampleToWindow.
+  /** Bind the reduced-resolution color target (depth unused) so the shader pipeline's final
+    * composite can draw into it. Callers must later call upsampleToWindow.
     */
   def bindTarget(w: Int, h: Int): Boolean =
     if !enabled || !ensureResources(w, h) then return false
@@ -86,7 +89,17 @@ final class BlockboxFovea:
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE)
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, iw, ih, 0, GL_RGBA, GL_UNSIGNED_BYTE, null: java.nio.ByteBuffer)
+    glTexImage2D(
+      GL_TEXTURE_2D,
+      0,
+      GL_RGBA8,
+      iw,
+      ih,
+      0,
+      GL_RGBA,
+      GL_UNSIGNED_BYTE,
+      null: java.nio.ByteBuffer
+    )
     depthRbo = glGenRenderbuffers()
     glBindRenderbuffer(GL_RENDERBUFFER, depthRbo)
     glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, iw, ih)

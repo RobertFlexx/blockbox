@@ -4,10 +4,10 @@ import scala.math.*
 
 /** Procedural 16x16 block art for every block a texture pack does not supply.
   *
-  * Materials are tileable value noise quantised onto small hand-picked palettes, which
-  * keeps the clean look of Minecraft-style pixel art instead of per-pixel static. Grass
-  * and leaves are grey masks that the mesher tints per biome. Ores are overlays drawn
-  * on top of whatever stone texture the active pack uses.
+  * Materials are tileable value noise quantised onto small hand-picked palettes, which keeps the
+  * clean look of Minecraft-style pixel art instead of per-pixel static. Grass and leaves are grey
+  * masks that the mesher tints per biome. Ores are overlays drawn on top of whatever stone texture
+  * the active pack uses.
   */
 object BlockboxTextures:
   type Pixel = (Int, Int, Int, Int)
@@ -16,7 +16,7 @@ object BlockboxTextures:
   private def hash(x: Int, y: Int, seed: Int): Float =
     var n = x * 374761393 + y * 668265263 + seed * 1442695041
     n = (n ^ (n >>> 13)) * 1274126177
-    ((n ^ (n >>> 16)) & 0xFFFF) / 65535f
+    ((n ^ (n >>> 16)) & 0xffff) / 65535f
 
   /** Value noise on a lattice of cellX x cellY pixels that wraps every 16 pixels. */
   private def noise(x: Int, y: Int, cellX: Int, cellY: Int, seed: Int): Float =
@@ -31,10 +31,17 @@ object BlockboxTextures:
     top + (bottom - top) * sy
 
   private def fbm(x: Int, y: Int, seed: Int): Float =
-    noise(x, y, 8, 8, seed) * 0.5f + noise(x, y, 4, 4, seed + 1) * 0.3f + noise(x, y, 2, 2, seed + 2) * 0.2f
+    noise(x, y, 8, 8, seed) * 0.5f + noise(x, y, 4, 4, seed + 1) * 0.3f + noise(
+      x,
+      y,
+      2,
+      2,
+      seed + 2
+    ) * 0.2f
 
   private def stretch(v: Float, contrast: Float): Float = (v - 0.5f) * contrast + 0.5f
-  private def rgb(hex: Int, alpha: Int = 255): Pixel = ((hex >> 16) & 255, (hex >> 8) & 255, hex & 255, alpha)
+  private def rgb(hex: Int, alpha: Int = 255): Pixel =
+    ((hex >> 16) & 255, (hex >> 8) & 255, hex & 255, alpha)
   private def gray(v: Int, alpha: Int = 255): Pixel = (v, v, v, alpha)
   private def pick(palette: Array[Int], t: Float): Int =
     palette((t.max(0f).min(0.9999f) * palette.length).toInt)
@@ -44,33 +51,67 @@ object BlockboxTextures:
     val vertical = face == FaceKind.Top || face == FaceKind.Bottom
     block match
       case Block.Stone => Some(stone(x, y))
-      case Block.Dirt => Some(dirt(x, y))
+      case Block.Dirt  => Some(dirt(x, y))
       case Block.Grass =>
         if face == FaceKind.Top then Some(grassTop(x, y))
         else if face == FaceKind.Bottom then Some(dirt(x, y))
         else Some(grassSide(x, y))
-      case Block.Sand => Some(sand(x, y))
-      case Block.Snow => Some(snow(x, y))
-      case Block.Clay => Some(clay(x, y))
-      case Block.Bedrock => Some(bedrock(x, y))
-      case Block.Brick => Some(brick(x, y))
-      case Block.Glass => Some(glass(x, y))
-      case Block.Planks => Some(planks(x, y, oakPlanks, 31))
-      case Block.BirchPlanks => Some(planks(x, y, birchPlanks, 32))
-      case Block.PinePlanks => Some(planks(x, y, sprucePlanks, 33))
+      case Block.Sand         => Some(sand(x, y))
+      case Block.Snow         => Some(snow(x, y))
+      case Block.Clay         => Some(clay(x, y))
+      case Block.Bedrock      => Some(bedrock(x, y))
+      case Block.Brick        => Some(brick(x, y))
+      case Block.Glass        => Some(glass(x, y))
+      case Block.Planks       => Some(planks(x, y, oakPlanks, 31))
+      case Block.BirchPlanks  => Some(planks(x, y, birchPlanks, 32))
+      case Block.PinePlanks   => Some(planks(x, y, sprucePlanks, 33))
       case Block.AcaciaPlanks => Some(planks(x, y, acaciaPlanks, 34))
-      case Block.Wood => Some(if vertical then logTop(x, y, oakPlanks, oakBark, 41) else oakLog(x, y))
-      case Block.BirchWood => Some(if vertical then logTop(x, y, birchPlanks, 0x4d4740, 42) else birchLog(x, y))
-      case Block.PineWood => Some(if vertical then logTop(x, y, sprucePlanks, spruceBark(1), 43) else spruceLog(x, y))
-      case Block.AcaciaWood => Some(if vertical then logTop(x, y, acaciaPlanks, acaciaBark(1), 44) else acaciaLog(x, y))
-      case Block.Leaves => Some(leaves(x, y, 51, holes = 0.26f, cell = 4))
-      case Block.BirchLeaves => Some(leaves(x, y, 52, holes = 0.22f, cell = 4))
-      case Block.PineLeaves => Some(needles(x, y))
+      case Block.Wood         =>
+        Some(if vertical then logTop(x, y, oakPlanks, oakBark, 41) else oakLog(x, y))
+      case Block.BirchWood =>
+        Some(if vertical then logTop(x, y, birchPlanks, 0x4d4740, 42) else birchLog(x, y))
+      case Block.PineWood =>
+        Some(if vertical then logTop(x, y, sprucePlanks, spruceBark(1), 43) else spruceLog(x, y))
+      case Block.AcaciaWood =>
+        Some(if vertical then logTop(x, y, acaciaPlanks, acaciaBark(1), 44) else acaciaLog(x, y))
+      case Block.Leaves       => Some(leaves(x, y, 51, holes = 0.26f, cell = 4))
+      case Block.BirchLeaves  => Some(leaves(x, y, 52, holes = 0.22f, cell = 4))
+      case Block.PineLeaves   => Some(needles(x, y))
       case Block.AcaciaLeaves => Some(leaves(x, y, 54, holes = 0.30f, cell = 2))
-      case Block.Cactus => Some(if vertical then cactusTop(x, y, face == FaceKind.Top) else cactusSide(x, y))
-      case Block.Furnace => Some(furnace(x, y, face, lit = false))
+      case Block.Cactus       =>
+        Some(if vertical then cactusTop(x, y, face == FaceKind.Top) else cactusSide(x, y))
+      case Block.Furnace    => Some(furnace(x, y, face, lit = false))
       case Block.FurnaceLit => Some(furnace(x, y, face, lit = true))
-      case _ => None
+      case Block.Reeds      => Some(reeds(x, y))
+      case Block.LilyPad    => Some(lilyPad(x, y))
+      case Block.LeafLitter => Some(leafLitter(x, y))
+      case _                => None
+
+  private def reeds(x: Int, y: Int): Pixel =
+    val stems = Array((3, 3), (7, 1), (11, 5), (14, 4))
+    stems.find { case (sx, top) =>
+      (x == sx && y >= top) || (y >= top && y <= top + 3 && abs(x - sx) <= 1) ||
+      (y >= 9 && y <= 12 && abs(x - sx) == 1 && (x < sx) == (y < 11))
+    } match
+      case Some((sx, top)) =>
+        if y <= top + 3 then rgb(if x == sx then 0x765335 else 0x5c402b)
+        else rgb(if x == sx then 0x78953d else 0x526d30)
+      case None => (0, 0, 0, 0)
+
+  private def lilyPad(x: Int, y: Int): Pixel =
+    val dx = x - 7.5f; val dy = y - 7.5f
+    if dx * dx + dy * dy > 49 || (x >= 8 && y >= 7 && y <= 8 + (x - 8) / 2) then (0, 0, 0, 0)
+    else if dx * dx + dy * dy > 37 then rgb(0x406d31)
+    else if x == 7 || y == 7 || (abs(x - y) < 1 && x < 8) then rgb(0x73914a)
+    else rgb(if noise(x, y, 4, 4, 191) > 0.52f then 0x527e36 else 0x487332)
+
+  private def leafLitter(x: Int, y: Int): Pixel =
+    val leaves = Array((3, 4), (10, 3), (7, 10), (13, 12), (2, 13))
+    leaves.zipWithIndex.find { case ((cx, cy), _) => abs(x - cx) + abs(y - cy) <= 2 } match
+      case Some(((cx, cy), i)) =>
+        val palette = Array(0xb6792e, 0x98602b, 0xc99a45, 0x97502c, 0x786035)
+        rgb(if x == cx && y >= cy then 0x704b29 else palette(i))
+      case None => (0, 0, 0, 0)
 
   def isOre(block: Block): Boolean =
     block == Block.Coal || block == Block.Copper || block == Block.IronOre || block == Block.GoldOre || block == Block.Diamond
@@ -82,7 +123,14 @@ object BlockboxTextures:
     val v = stretch(fbm(x, y, 11), 2.3f) + (hash(x, y, 12) - 0.5f) * 0.20f
     rgb(pick(stonePalette, v))
 
-  private final case class Ore(dark: Int, mid: Int, light: Int, accent: Int, seed: Int, density: Float)
+  private final case class Ore(
+      dark: Int,
+      mid: Int,
+      light: Int,
+      accent: Int,
+      seed: Int,
+      density: Float
+  )
   private val ores: Map[Block, Ore] = Map(
     Block.Coal -> Ore(0x1b1b1d, 0x2c2c30, 0x47474c, 0x2c2c30, 61, 0.95f),
     Block.Copper -> Ore(0x7a3a1a, 0xbf6430, 0xe59557, 0x4f9c84, 62, 0.82f),
@@ -90,7 +138,16 @@ object BlockboxTextures:
     Block.GoldOre -> Ore(0xa27410, 0xeec232, 0xfff09a, 0xeec232, 64, 0.70f),
     Block.Diamond -> Ore(0x168479, 0x48ddcb, 0xd3fff7, 0x48ddcb, 65, 0.62f)
   )
-  private val oreSpots = Array((1, 2, 0), (8, 1, 1), (12, 6, 2), (4, 7, 3), (9, 10, 0), (1, 12, 2), (5, 13, 1), (13, 13, 3))
+  private val oreSpots = Array(
+    (1, 2, 0),
+    (8, 1, 1),
+    (12, 6, 2),
+    (4, 7, 3),
+    (9, 10, 0),
+    (1, 12, 2),
+    (5, 13, 1),
+    (13, 13, 3)
+  )
   private val oreShapes = Array(
     Array((0, 0), (1, 0), (0, 1), (1, 1), (2, 1)),
     Array((1, 0), (0, 1), (1, 1), (2, 1), (1, 2)),
@@ -98,16 +155,19 @@ object BlockboxTextures:
     Array((1, 0), (2, 0), (0, 1), (1, 1), (1, 2), (2, 2))
   )
   private val oreMasks = scala.collection.concurrent.TrieMap.empty[Block, Array[Boolean]]
-  private def oreMask(block: Block, ore: Ore): Array[Boolean] = oreMasks.getOrElseUpdate(block, {
-    val mask = new Array[Boolean](Size * Size)
-    oreSpots.zipWithIndex.foreach { case ((sx, sy, shape), i) =>
-      if hash(i, 7, ore.seed) < ore.density then
-        oreShapes((shape + (hash(i, 9, ore.seed) * 4).toInt) % oreShapes.length).foreach { case (dx, dy) =>
-          mask(Math.floorMod(sy + dy, Size) * Size + Math.floorMod(sx + dx, Size)) = true
-        }
+  private def oreMask(block: Block, ore: Ore): Array[Boolean] = oreMasks.getOrElseUpdate(
+    block, {
+      val mask = new Array[Boolean](Size * Size)
+      oreSpots.zipWithIndex.foreach { case ((sx, sy, shape), i) =>
+        if hash(i, 7, ore.seed) < ore.density then
+          oreShapes((shape + (hash(i, 9, ore.seed) * 4).toInt) % oreShapes.length).foreach {
+            case (dx, dy) =>
+              mask(Math.floorMod(sy + dy, Size) * Size + Math.floorMod(sx + dx, Size)) = true
+          }
+      }
+      mask
     }
-    mask
-  })
+  )
 
   /** Ore pixels to paint over the pack's stone; None leaves the stone visible. */
   def oreOverlay(block: Block, x: Int, y: Int): Option[Pixel] =
@@ -132,14 +192,23 @@ object BlockboxTextures:
     else rgb(pick(dirtPalette, stretch(fbm(x, y, 21), 2.0f) + (hash(x, y, 22) - 0.5f) * 0.40f))
 
   def grassTop(x: Int, y: Int): Pixel =
-    val v = stretch(noise(x, y, 4, 4, 25) * 0.55f + noise(x, y, 2, 2, 26) * 0.45f, 2.2f) + (hash(x, y, 27) - 0.5f) * 0.45f
+    val v = stretch(noise(x, y, 4, 4, 25) * 0.55f + noise(x, y, 2, 2, 26) * 0.45f, 2.2f) + (hash(
+      x,
+      y,
+      27
+    ) - 0.5f) * 0.45f
     gray(pick(Array(0x9a, 0xac, 0xbd, 0xcd, 0xdc), v))
 
   /** Dirt with a grey fringe in the top rows; the atlas tints only the fringe band. */
   def grassSide(x: Int, y: Int): Pixel =
     val drip = 2 + (hash(x, 0, 28) * 2.4f).toInt + (if hash(x, 1, 28) > 0.82f then 1 else 0)
     if y < drip then
-      gray(pick(Array(0xa4, 0xb6, 0xc8, 0xd6), (hash(x, y, 29) + (if y == drip - 1 then -0.35f else 0f)).max(0f)))
+      gray(
+        pick(
+          Array(0xa4, 0xb6, 0xc8, 0xd6),
+          (hash(x, y, 29) + (if y == drip - 1 then -0.35f else 0f)).max(0f)
+        )
+      )
     else dirt(x, y)
 
   private val sandPalette = Array(0xcdb682, 0xd6c08c, 0xdec997, 0xe5d2a2, 0xebdaad)
@@ -155,7 +224,12 @@ object BlockboxTextures:
   private val clayPalette = Array(0x8a553a, 0x976043, 0xa36a4a, 0xae7453, 0xb87e5c)
   def clay(x: Int, y: Int): Pixel =
     val band = noise(x, y, 16, 4, 81) - 0.5f
-    rgb(pick(clayPalette, stretch(fbm(x, y, 82), 1.5f) + band * 0.45f + (hash(x, y, 83) - 0.5f) * 0.25f))
+    rgb(
+      pick(
+        clayPalette,
+        stretch(fbm(x, y, 82), 1.5f) + band * 0.45f + (hash(x, y, 83) - 0.5f) * 0.25f
+      )
+    )
 
   // ---- Built blocks -------------------------------------------------------------------
 
@@ -176,7 +250,8 @@ object BlockboxTextures:
   def glass(x: Int, y: Int): Pixel =
     val edge = x == 0 || y == 0 || x == 15 || y == 15
     val corner = (x == 0 || x == 15) && (y == 0 || y == 15)
-    val streak = (x + y == 5 && x >= 1 && x <= 4) || (x + y == 8 && x >= 2 && x <= 4) || (x + y == 22 && x >= 9 && x <= 13)
+    val streak =
+      (x + y == 5 && x >= 1 && x <= 4) || (x + y == 8 && x >= 2 && x <= 4) || (x + y == 22 && x >= 9 && x <= 13)
     if corner then rgb(0xb7cbd4, 235)
     else if edge then rgb(0xdbe9ef, 220)
     else if streak then rgb(0xf6fcff, 175)
@@ -195,7 +270,13 @@ object BlockboxTextures:
     if row == 3 then rgb(palette(0))
     else if x == joint then rgb(palette(1))
     else
-      var t = 0.52f + (hash(board, 2, seed) - 0.5f) * 0.32f + (noise(x, board * 4, 4, 4, seed) - 0.5f) * 0.42f
+      var t = 0.52f + (hash(board, 2, seed) - 0.5f) * 0.32f + (noise(
+        x,
+        board * 4,
+        4,
+        4,
+        seed
+      ) - 0.5f) * 0.42f
       if row == 0 then t += 0.10f
       if hash(x / 2, y, seed + 1) > 0.80f then t -= 0.28f
       rgb(pick(palette, t))
@@ -205,12 +286,23 @@ object BlockboxTextures:
   private val oakBark = 0x4b3520
   def oakLog(x: Int, y: Int): Pixel =
     val v = stretch(noise(x, y, 2, 8, 101) * 0.65f + noise(x, y, 1, 4, 102) * 0.35f, 2.4f)
-    rgb(pick(Array(0x3f2c1a, 0x4f3822, 0x5f452a, 0x6f5233, 0x7d5d3a), v + (hash(x, y, 103) - 0.5f) * 0.20f))
+    rgb(
+      pick(
+        Array(0x3f2c1a, 0x4f3822, 0x5f452a, 0x6f5233, 0x7d5d3a),
+        v + (hash(x, y, 103) - 0.5f) * 0.20f
+      )
+    )
 
   def birchLog(x: Int, y: Int): Pixel =
     val mark = hash(x / 3, y, 111) > 0.80f && hash(x, y / 2, 112) > 0.30f
     if mark then rgb(if hash(x, y, 113) > 0.5f then 0x37322d else 0x4f4943)
-    else rgb(pick(Array(0xc9c3b3, 0xd6d1c2, 0xe1ddd0, 0xebe8dd), stretch(noise(x, y, 4, 2, 114), 1.8f) + (hash(x, y, 115) - 0.5f) * 0.30f))
+    else
+      rgb(
+        pick(
+          Array(0xc9c3b3, 0xd6d1c2, 0xe1ddd0, 0xebe8dd),
+          stretch(noise(x, y, 4, 2, 114), 1.8f) + (hash(x, y, 115) - 0.5f) * 0.30f
+        )
+      )
 
   private def spruceBark(i: Int): Int = Array(0x2b1c0f, 0x3a2715, 0x48311b, 0x553a21)(i)
   def spruceLog(x: Int, y: Int): Pixel =
@@ -221,7 +313,14 @@ object BlockboxTextures:
   def acaciaLog(x: Int, y: Int): Pixel =
     val crack = hash(x, y / 3, 131) > 0.86f
     if crack then rgb(0x3f3932)
-    else rgb(acaciaBark(((stretch(noise(x, y, 2, 4, 132), 2.0f) + (hash(x, y, 133) - 0.5f) * 0.3f).max(0f).min(0.999f) * 4).toInt))
+    else
+      rgb(
+        acaciaBark(
+          ((stretch(noise(x, y, 2, 4, 132), 2.0f) + (hash(x, y, 133) - 0.5f) * 0.3f)
+            .max(0f)
+            .min(0.999f) * 4).toInt
+        )
+      )
 
   /** End grain: growth rings in the plank colours inside a one-pixel bark rim. */
   def logTop(x: Int, y: Int, palette: Array[Int], bark: Int, seed: Int): Pixel =
@@ -230,11 +329,14 @@ object BlockboxTextures:
       val dx = x - 7.5f; val dy = y - 7.5f
       val r = sqrt(dx * dx + dy * dy).toFloat + (noise(x, y, 4, 4, seed) - 0.5f) * 1.4f
       val ring = (r * 0.75f) % 1f
-      rgb(pick(palette, if ring < 0.28f then 0.22f else 0.70f + (hash(x, y, seed + 1) - 0.5f) * 0.25f))
+      rgb(
+        pick(palette, if ring < 0.28f then 0.22f else 0.70f + (hash(x, y, seed + 1) - 0.5f) * 0.25f)
+      )
 
   /** Grey leaf mask with see-through gaps; the mesher supplies the colour. */
   def leaves(x: Int, y: Int, seed: Int, holes: Float, cell: Int): Pixel =
-    val v = stretch(noise(x, y, cell, cell, seed) * 0.55f + noise(x, y, 2, 2, seed + 1) * 0.45f, 2.4f)
+    val v =
+      stretch(noise(x, y, cell, cell, seed) * 0.55f + noise(x, y, 2, 2, seed + 1) * 0.45f, 2.4f)
     val h = hash(x, y, seed + 2)
     if v < holes && h < 0.80f then (0, 0, 0, 0)
     else gray(pick(Array(0x5c, 0x78, 0x93, 0xad, 0xc6), v + (h - 0.5f) * 0.32f))
@@ -251,7 +353,13 @@ object BlockboxTextures:
     if spine then rgb(0xdbe5b0)
     else if rib then rgb(0x1f5a27)
     else if x == 0 || x == 15 then rgb(0x2a6c31)
-    else rgb(pick(Array(0x2c7333, 0x35853c, 0x3e9545, 0x4aa250), stretch(noise(x, y, 2, 8, 151), 1.8f) + (hash(x, y, 152) - 0.5f) * 0.3f))
+    else
+      rgb(
+        pick(
+          Array(0x2c7333, 0x35853c, 0x3e9545, 0x4aa250),
+          stretch(noise(x, y, 2, 8, 151), 1.8f) + (hash(x, y, 152) - 0.5f) * 0.3f
+        )
+      )
 
   def cactusTop(x: Int, y: Int, top: Boolean): Pixel =
     val edge = x == 0 || y == 0 || x == 15 || y == 15
@@ -276,7 +384,10 @@ object BlockboxTextures:
         else if slot then rgb(0x202022)
         else if mouth then
           if !lit then rgb(if y == 8 then 0x141415 else 0x1d1d1f)
-          else if y >= 11 then rgb(pick(Array(0xe0571b, 0xff9a26, 0xffd24a), hash(x, y, 162) * 0.6f + (y - 11) * 0.22f))
+          else if y >= 11 then
+            rgb(
+              pick(Array(0xe0571b, 0xff9a26, 0xffd24a), hash(x, y, 162) * 0.6f + (y - 11) * 0.22f)
+            )
           else rgb(if hash(x, y, 163) > 0.6f then 0x8a3612 else 0x5a220c)
         else if (y == 7 || y == 14) && x >= 3 && x <= 12 then rgb(0x9c9c9e)
         else stone(x, y)

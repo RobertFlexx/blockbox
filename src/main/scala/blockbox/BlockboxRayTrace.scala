@@ -2,21 +2,23 @@ package blockbox
 
 import org.lwjgl.BufferUtils
 import org.lwjgl.opengl.GL11.*
+import org.lwjgl.opengl.GL15.*
+import org.lwjgl.opengl.GL21.{
+  GL_PIXEL_UNPACK_BUFFER,
+  GL_PIXEL_UNPACK_BUFFER_BINDING,
+  GL_PIXEL_PACK_BUFFER,
+  GL_PIXEL_PACK_BUFFER_BINDING
+}
 import org.lwjgl.opengl.GL12
 import org.lwjgl.opengl.GL13.*
 import org.lwjgl.opengl.GL20.*
 import org.lwjgl.opengl.GL30.*
 import org.lwjgl.opengl.EXTMemoryObject as GLMem
-import org.lwjgl.opengl.EXTMemoryObjectFD as GLMemFd
-import org.lwjgl.opengl.EXTSemaphore as GLSem
-import org.lwjgl.opengl.EXTSemaphoreFD as GLSemFd
 import org.lwjgl.system.MemoryStack
 import org.lwjgl.system.MemoryUtil
 import org.lwjgl.vulkan.*
 import org.lwjgl.vulkan.KHRAccelerationStructure.*
 import org.lwjgl.vulkan.KHRDeferredHostOperations.*
-import org.lwjgl.vulkan.KHRExternalMemoryFd.*
-import org.lwjgl.vulkan.KHRExternalSemaphoreFd.*
 import org.lwjgl.vulkan.KHRRayQuery.*
 import org.lwjgl.vulkan.VK10.*
 import org.lwjgl.vulkan.VK11.*
@@ -31,10 +33,11 @@ import scala.collection.mutable
 
 /** Hardware ray tracing for the Ray Traced shader pack.
   *
-  * OpenGL cannot drive the RT cores, so this builds a Vulkan ray-query scene from the
-  * loaded chunks and traces sunlight, ambient occlusion, one bounce and reflections
-  * into images shared with the GL post passes. If the GPU or the interop extensions
-  * are missing, `ready` stays false and the pack falls back to its shadow maps.
+  * OpenGL cannot drive the RT cores, so this builds a Vulkan ray-query scene from the loaded chunks
+  * and traces sunlight, ambient occlusion, one bounce and reflections into private Vulkan images. A
+  * coherent, cached staging buffer transfers the reduced-resolution inputs/outputs explicitly
+  * between APIs. If hardware ray queries or a matching device are missing, the pack uses its shadow
+  * maps.
   */
 object BlockboxRayTrace:
   private var gpu: Device | Null = null
@@ -47,6 +50,7 @@ object BlockboxRayTrace:
   def ready: Boolean = gpu != null
   def status: String = message
   def frameReady: Boolean = frameOk && gpu != null
+  def pendingChunks: Int = if gpu == null then chunkList.length else gpu.pendingChunks
   def lightingTexture: Int = if gpu == null then 0 else gpu.lighting.glTex
   def reflectionTexture: Int = if gpu == null then 0 else gpu.reflection.glTex
   def volumeTexture: Int = if gpu == null then 0 else gpu.volume.glTex
@@ -63,23 +67,59 @@ object BlockboxRayTrace:
 
   /** Trace this frame. Returns false when the pack should use its shadow-map fallback. */
   def trace(
-      root: File, width: Int, height: Int,
-      camera: (Float, Float, Float), previousCamera: (Float, Float, Float),
-      sun: (Float, Float, Float), daylight: Float, rain: Float, time: Float,
-      near: Float, far: Float,
-      invProj: Array[Float], invView: Array[Float], prevProj: Array[Float], prevView: Array[Float],
-      depthTex: Int, normalTex: Int, waterNormalTex: Int, waterDepthTex: Int
+      root: File,
+      width: Int,
+      height: Int,
+      camera: (Float, Float, Float),
+      previousCamera: (Float, Float, Float),
+      sun: (Float, Float, Float),
+      daylight: Float,
+      rain: Float,
+      time: Float,
+      near: Float,
+      far: Float,
+      invProj: Array[Float],
+      invView: Array[Float],
+      prevProj: Array[Float],
+      prevView: Array[Float],
+      depthTex: Int,
+      normalTex: Int,
+      waterNormalTex: Int,
+      waterDepthTex: Int
   ): Boolean =
     frameOk = false
     if failed || width < 2 || height < 2 || depthTex == 0 || normalTex == 0 then return false
     try
-      val device = if gpu != null then gpu else
+      val device = if gpu != null then gpu
+      else
         val created = Device.open()
         gpu = created
         message = created.label
         System.err.println(s"Blockbox ray tracing: ${created.label}")
         created
-      val drew = device.trace(root, width, height, camera, previousCamera, sun, daylight, rain, time, near, far, invProj, invView, prevProj, prevView, depthTex, normalTex, waterNormalTex, waterDepthTex, chunkList, geometry)
+      val drew = device.trace(
+        root,
+        width,
+        height,
+        camera,
+        previousCamera,
+        sun,
+        daylight,
+        rain,
+        time,
+        near,
+        far,
+        invProj,
+        invView,
+        prevProj,
+        prevView,
+        depthTex,
+        normalTex,
+        waterNormalTex,
+        waterDepthTex,
+        chunkList,
+        geometry
+      )
       frameOk = drew
       drew
     catch
@@ -93,26 +133,69 @@ object BlockboxRayTrace:
         false
 
   def destroy(): Unit =
-    val current=gpu
-    gpu=null; frameOk=false
-    try
-      if current!=null then current.destroy(geometry.values)
-    catch case e: Exception => System.err.println("Blockbox ray cleanup: "+e.getMessage)
+    val current = gpu
+    gpu = null; frameOk = false
+    try if current != null then current.destroy(geometry.values)
+    catch case e: Exception => System.err.println("Blockbox ray cleanup: " + e.getMessage)
     finally
       geometry.clear()
-      chunkList=Array.empty
+      chunkList = Array.empty
 
-  private final class ChunkGeometry(val key: (Int, Int), var revision: Int, var border: Int, var triangles: Int, var as: Long, var asBuffer: Long, var asMemory: Long, var vertices: Long, var vertexMemory: Long, var faces: Long, var faceMemory: Long, var faceAddress: Long)
+  private final class ChunkGeometry(
+      val key: (Int, Int),
+      var revision: Int,
+      var border: Int,
+      var triangles: Int,
+      var as: Long,
+      var asBuffer: Long,
+      var asMemory: Long,
+      var vertices: Long,
+      var vertexMemory: Long,
+      var faces: Long,
+      var faceMemory: Long,
+      var faceAddress: Long
+  )
 
-  private final class SharedImage(val image: Long, val memory: Long, val view: Long, val glMemory: Int, val glTex: Int, val width: Int, val height: Int, val size: Long)
+  private final class RayImage(
+      val image: Long,
+      val memory: Long,
+      val view: Long,
+      val glTex: Int,
+      val width: Int,
+      val height: Int,
+      val size: Long
+  )
 
-  private final class Device(val instance: VkInstance, val physical: VkPhysicalDevice, val device: VkDevice, val queue: VkQueue, val family: Int, val label: String):
+  private final class FrameTransfer(
+      val buffer: Long,
+      val memory: Long,
+      val mapped: Long,
+      val stride: Long,
+      val inputStride: Long,
+      val inputs: Array[ByteBuffer],
+      val outputs: Array[ByteBuffer]
+  )
+
+  private final class Device(
+      val instance: VkInstance,
+      val physical: VkPhysicalDevice,
+      val device: VkDevice,
+      val queue: VkQueue,
+      val family: Int,
+      val label: String
+  ):
     private val memProps = VkPhysicalDeviceMemoryProperties.calloc()
     vkGetPhysicalDeviceMemoryProperties(physical, memProps)
     private val pool = createCommandPool()
     private val cmd = allocateCommand()
-    private val rayLoop = new HardwareRayLoop(device,queue,cmd,family)
+    private val rayLoop = new HardwareRayLoop(device, queue, cmd, family)
     def awaitFrame(): Unit = rayLoop.awaitFrame()
+    private var outputTransfer: FrameTransfer | Null = null
+    private val copyViewport = BufferUtils.createIntBuffer(4)
+    // Reuse the exact flags for sizing and recording. Different flags invalidate
+    // the queried allocation sizes and can corrupt unrelated GPU allocations.
+    private val blasBuildFlags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR
+    private val tlasBuildFlags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_BUILD_BIT_KHR
     private var sampler = 0L
     private var descriptorLayout = 0L
     private var descriptorPool = 0L
@@ -136,22 +219,22 @@ object BlockboxRayTrace:
     private var tlasBuffer = 0L
     private var tlasMemory = 0L
     private var tlasCapacity = 0
-    private var glToVk = 0L
-    private var vkToGl = 0L
-    private var glSignal = 0
-    private var glWait = 0
     private var copyProgram = 0
     private var copyFbo = 0
     private var frameIndex = 0
     private var haveHistory = false
+    private val emptyChunks = mutable.HashMap.empty[(Int, Int), (Int, Int)]
+    private var sceneInstances = Array.empty[ChunkGeometry]
+    private var sceneDirty = true
+    var pendingChunks = 0
     private var historyRead = 0
-    var gbuffer: SharedImage | Null = null
-    var water: SharedImage | Null = null
-    var lighting: SharedImage | Null = null
-    var reflection: SharedImage | Null = null
-    var volume: SharedImage | Null = null
-    private var historyColor = Array.empty[SharedImage]
-    private var historyDepth = Array.empty[SharedImage]
+    var gbuffer: RayImage | Null = null
+    var water: RayImage | Null = null
+    var lighting: RayImage | Null = null
+    var reflection: RayImage | Null = null
+    var volume: RayImage | Null = null
+    private var historyColor = Array.empty[RayImage]
+    private var historyDepth = Array.empty[RayImage]
     var halfW = 1
     var halfH = 1
     private var scratchAlign = 256
@@ -159,7 +242,11 @@ object BlockboxRayTrace:
     private def createCommandPool(): Long =
       val stack = MemoryStack.stackPush()
       try
-        val info = VkCommandPoolCreateInfo.calloc(stack).sType(VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO).flags(VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT).queueFamilyIndex(family)
+        val info = VkCommandPoolCreateInfo
+          .calloc(stack)
+          .sType(VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO)
+          .flags(VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT)
+          .queueFamilyIndex(family)
         val out = stack.mallocLong(1)
         check(vkCreateCommandPool(device, info, null, out), "command pool")
         out.get(0)
@@ -168,35 +255,75 @@ object BlockboxRayTrace:
     private def allocateCommand(): VkCommandBuffer =
       val stack = MemoryStack.stackPush()
       try
-        val info = VkCommandBufferAllocateInfo.calloc(stack).sType(VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO).commandPool(pool).level(VK_COMMAND_BUFFER_LEVEL_PRIMARY).commandBufferCount(1)
+        val info = VkCommandBufferAllocateInfo
+          .calloc(stack)
+          .sType(VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO)
+          .commandPool(pool)
+          .level(VK_COMMAND_BUFFER_LEVEL_PRIMARY)
+          .commandBufferCount(1)
         val out = stack.mallocPointer(1)
         check(vkAllocateCommandBuffers(device, info, out), "command buffer")
         new VkCommandBuffer(out.get(0), device)
       finally stack.close()
 
     def trace(
-        root: File, width: Int, height: Int,
-        camera: (Float, Float, Float), previousCamera: (Float, Float, Float),
-        sun: (Float, Float, Float), daylight: Float, rain: Float, time: Float,
-        near: Float, far: Float,
-        invProj: Array[Float], invView: Array[Float], prevProj: Array[Float], prevView: Array[Float],
-        depthTex: Int, normalTex: Int, waterNormalTex: Int, waterDepthTex: Int,
-        chunks: Array[Chunk], geometries: mutable.HashMap[(Int, Int), ChunkGeometry]
+        root: File,
+        width: Int,
+        height: Int,
+        camera: (Float, Float, Float),
+        previousCamera: (Float, Float, Float),
+        sun: (Float, Float, Float),
+        daylight: Float,
+        rain: Float,
+        time: Float,
+        near: Float,
+        far: Float,
+        invProj: Array[Float],
+        invView: Array[Float],
+        prevProj: Array[Float],
+        prevView: Array[Float],
+        depthTex: Int,
+        normalTex: Int,
+        waterNormalTex: Int,
+        waterDepthTex: Int,
+        chunks: Array[Chunk],
+        geometries: mutable.HashMap[(Int, Int), ChunkGeometry]
     ): Boolean =
       rayLoop.awaitFrame()
       ensurePipeline(root)
       val nextW = math.max(1, width / 2)
       val nextH = math.max(1, height / 2)
       if gbuffer == null || halfW != nextW || halfH != nextH then recreateTargets(nextW, nextH)
-      val moved = math.abs(camera._1 - previousCamera._1) + math.abs(camera._2 - previousCamera._2) + math.abs(camera._3 - previousCamera._3)
+      val moved = math.abs(camera._1 - previousCamera._1) + math.abs(
+        camera._2 - previousCamera._2
+      ) + math.abs(camera._3 - previousCamera._3)
       if moved > 48f then haveHistory = false
       rebuildGeometry(chunks, geometries)
-      val instances = geometries.values.filter(_.triangles > 0).toArray
+      if sceneDirty then
+        sceneInstances = geometries.valuesIterator
+          .filter(_.triangles > 0)
+          .toArray
+          .sortBy(g => (g.key._1, g.key._2))
+      val instances = sceneInstances
       if instances.isEmpty then
         haveHistory = false
         return false
       copyGBuffer(depthTex, normalTex, waterNormalTex, waterDepthTex)
-      recordAndSubmit(instances, camera, previousCamera, sun, daylight, rain, time, near, far, invProj, invView, prevProj, prevView)
+      recordAndSubmit(
+        instances,
+        camera,
+        previousCamera,
+        sun,
+        daylight,
+        rain,
+        time,
+        near,
+        far,
+        invProj,
+        invView,
+        prevProj,
+        prevView
+      )
       haveHistory = true
       frameIndex += 1
       true
@@ -208,17 +335,36 @@ object BlockboxRayTrace:
         sampler = createSampler(stack)
         descriptorLayout = createLayout(stack)
         pipelineLayout = createPipelineLayout(stack, descriptorLayout)
-        pipeline = createCompute(stack, pipelineLayout, readSpirv(new File(root, "assets/shaders/rt/trace.spv")))
+        pipeline = createCompute(
+          stack,
+          pipelineLayout,
+          readSpirv(new File(root, "assets/shaders/rt/trace.spv"))
+        )
         descriptorPool = createPool(stack)
         descriptorSet = allocateSet(stack, descriptorPool, descriptorLayout)
         val uboPair = createBuffer(65536, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, hostFlags, map = true)
         ubo = uboPair._1; uboMemory = uboPair._2; uboMapped = uboPair._3
-        val infoPair = createBuffer(360 * 16, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT, hostFlags, map = true)
+        val infoPair = createBuffer(
+          360 * 16,
+          VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+          hostFlags,
+          map = true
+        )
         infoBuffer = infoPair._1; infoMemory = infoPair._2; infoMapped = infoPair._3
-        val instPair = createBuffer(360 * 64, VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT, hostFlags, map = true)
+        val instPair = createBuffer(
+          360 * 64,
+          VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+          hostFlags,
+          map = true
+        )
         instanceBuffer = instPair._1; instanceMemory = instPair._2; instanceMapped = instPair._3
-        val props = VkPhysicalDeviceAccelerationStructurePropertiesKHR.calloc(stack).sType(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_PROPERTIES_KHR)
-        val props2 = VkPhysicalDeviceProperties2.calloc(stack).sType(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2).pNext(props.address())
+        val props = VkPhysicalDeviceAccelerationStructurePropertiesKHR
+          .calloc(stack)
+          .sType(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_PROPERTIES_KHR)
+        val props2 = VkPhysicalDeviceProperties2
+          .calloc(stack)
+          .sType(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2)
+          .pNext(props.address())
         vkGetPhysicalDeviceProperties2(physical, props2)
         scratchAlign = math.max(1, props.minAccelerationStructureScratchOffsetAlignment)
       finally stack.close()
@@ -230,25 +376,29 @@ object BlockboxRayTrace:
       halfW = w; halfH = h; haveHistory = false; historyRead = 0
       // Raw projected depth must survive the GL/Vulkan copy without FP16
       // rounding. Lighting/history radiance can remain half precision.
-      gbuffer = createShared(w, h, false, rgba32=true)
-      water = createShared(w, h, false, rgba32=true)
-      lighting = createShared(w, h, true)
-      reflection = createShared(w, h, true)
-      volume = createShared(w, h, true)
-      historyColor = Array(createShared(w, h, false, interop=false), createShared(w, h, false, interop=false))
-      historyDepth = Array(createShared(w, h, false, r32 = true, interop=false), createShared(w, h, false, r32 = true, interop=false))
+      gbuffer = createRayImage(w, h, false, rgba32 = true, glOutput = true)
+      water = createRayImage(w, h, false, rgba32 = true, glOutput = true)
+      // Every Vk image remains Vulkan-owned. Both directions use explicit
+      // coherent cached staging rows, avoiding cross-API image/semaphore hazards.
+      lighting = createRayImage(w, h, true, glOutput = true)
+      reflection = createRayImage(w, h, true, glOutput = true)
+      volume = createRayImage(w, h, true, glOutput = true)
+      outputTransfer = createFrameTransfer(w, h)
+      historyColor = Array(createRayImage(w, h, false), createRayImage(w, h, false))
+      historyDepth =
+        Array(createRayImage(w, h, false, r32 = true), createRayImage(w, h, false, r32 = true))
       if copyProgram == 0 then copyProgram = buildCopyProgram()
       if copyFbo == 0 then copyFbo = glGenFramebuffers()
-      if glSignal == 0 then
-        val pair = createSemaphorePair()
-        glToVk = pair._1; glSignal = pair._2
-        val back = createSemaphorePair()
-        vkToGl = back._1; glWait = back._2
 
-    private def copyGBuffer(depthTex: Int, normalTex: Int, waterNormalTex: Int, waterDepthTex: Int): Unit =
+    private def copyGBuffer(
+        depthTex: Int,
+        normalTex: Int,
+        waterNormalTex: Int,
+        waterDepthTex: Int
+    ): Unit =
       val previous = glGetInteger(GL_FRAMEBUFFER_BINDING)
       val previousProgram = glGetInteger(GL_CURRENT_PROGRAM)
-      val viewport = BufferUtils.createIntBuffer(4)
+      val viewport = copyViewport
       glGetIntegerv(GL_VIEWPORT, viewport)
       glMatrixMode(GL_PROJECTION); glPushMatrix(); glLoadIdentity()
       glOrtho(-1, 1, -1, 1, -1, 1)
@@ -273,7 +423,8 @@ object BlockboxRayTrace:
       bind("waterNTex", 2, if waterNormalTex != 0 then waterNormalTex else normalTex)
       bind("waterDTex", 3, if waterDepthTex != 0 then waterDepthTex else depthTex)
       val hasWater = glGetUniformLocation(copyProgram, "hasWater")
-      if hasWater >= 0 then glUniform1i(hasWater, if waterNormalTex != 0 && waterDepthTex != 0 then 1 else 0)
+      if hasWater >= 0 then
+        glUniform1i(hasWater, if waterNormalTex != 0 && waterDepthTex != 0 then 1 else 0)
       glActiveTexture(GL_TEXTURE0)
       glBegin(GL_QUADS)
       glTexCoord2f(0f, 0f); glVertex2f(-1f, -1f)
@@ -281,12 +432,14 @@ object BlockboxRayTrace:
       glTexCoord2f(1f, 1f); glVertex2f(1f, 1f)
       glTexCoord2f(0f, 1f); glVertex2f(-1f, 1f)
       glEnd()
-      val textures = BufferUtils.createIntBuffer(5)
-      textures.put(gbuffer.glTex).put(water.glTex).put(lighting.glTex).put(reflection.glTex).put(volume.glTex).flip()
-      val layouts = BufferUtils.createIntBuffer(5)
-      for _ <- 0 until 5 do layouts.put(GLSem.GL_LAYOUT_GENERAL_EXT)
-      layouts.flip()
-      GLSem.glSignalSemaphoreEXT(glSignal, emptyInts, textures, layouts)
+      val previousPack = glGetInteger(GL_PIXEL_PACK_BUFFER_BINDING)
+      glBindBuffer(GL_PIXEL_PACK_BUFFER, 0)
+      glActiveTexture(GL_TEXTURE0)
+      glBindTexture(GL_TEXTURE_2D, gbuffer.glTex)
+      glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_FLOAT, outputTransfer.inputs(0))
+      glBindTexture(GL_TEXTURE_2D, water.glTex)
+      glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_FLOAT, outputTransfer.inputs(1))
+      glBindBuffer(GL_PIXEL_PACK_BUFFER, previousPack)
       glFlush()
       glMatrixMode(GL_MODELVIEW); glPopMatrix()
       glMatrixMode(GL_PROJECTION); glPopMatrix()
@@ -298,28 +451,79 @@ object BlockboxRayTrace:
 
     private def recordAndSubmit(
         instances: Array[ChunkGeometry],
-        camera: (Float, Float, Float), previousCamera: (Float, Float, Float),
-        sun: (Float, Float, Float), daylight: Float, rain: Float, time: Float,
-        near: Float, far: Float,
-        invProj: Array[Float], invView: Array[Float], prevProj: Array[Float], prevView: Array[Float]
+        camera: (Float, Float, Float),
+        previousCamera: (Float, Float, Float),
+        sun: (Float, Float, Float),
+        daylight: Float,
+        rain: Float,
+        time: Float,
+        near: Float,
+        far: Float,
+        invProj: Array[Float],
+        invView: Array[Float],
+        prevProj: Array[Float],
+        prevView: Array[Float]
     ): Unit =
-      writeFrame(camera, previousCamera, sun, daylight, rain, time, near, far, invProj, invView, prevProj, prevView, instances.length)
-      writeInstances(instances)
-      rayLoop.begin(gbuffer.image,water.image,lighting.image,reflection.image,volume.image)
-      val stack=MemoryStack.stackPush()
+      writeFrame(
+        camera,
+        previousCamera,
+        sun,
+        daylight,
+        rain,
+        time,
+        near,
+        far,
+        invProj,
+        invView,
+        prevProj,
+        prevView,
+        instances.length
+      )
+      if sceneDirty then writeInstances(instances)
+      rayLoop.begin(
+        gbuffer.image,
+        water.image,
+        outputTransfer.buffer,
+        outputTransfer.inputStride,
+        halfW,
+        halfH
+      )
+      val stack = MemoryStack.stackPush()
       try
-        buildTlas(stack,instances)
-        updateDescriptors(stack,instances.length)
+        if sceneDirty then
+          buildTlas(stack, instances)
+          sceneDirty = false
+        updateDescriptors(stack, instances.length)
       finally stack.close()
-      rayLoop.dispatch(pipeline,pipelineLayout,descriptorSet,glToVk,vkToGl,halfW,halfH,
-        glWait,gbuffer.glTex,water.glTex,lighting.glTex,reflection.glTex,volume.glTex)
+      rayLoop.dispatch(
+        pipeline,
+        pipelineLayout,
+        descriptorSet,
+        halfW,
+        halfH,
+        outputTransfer.stride,
+        outputTransfer.inputStride * 2,
+        lighting.image,
+        reflection.image,
+        volume.image
+      )
+      uploadOutputs()
       historyRead ^= 1
 
     private def writeFrame(
-        camera: (Float, Float, Float), previousCamera: (Float, Float, Float),
-        sun: (Float, Float, Float), daylight: Float, rain: Float, time: Float,
-        near: Float, far: Float,
-        invProj: Array[Float], invView: Array[Float], prevProj: Array[Float], prevView: Array[Float],instanceCount: Int
+        camera: (Float, Float, Float),
+        previousCamera: (Float, Float, Float),
+        sun: (Float, Float, Float),
+        daylight: Float,
+        rain: Float,
+        time: Float,
+        near: Float,
+        far: Float,
+        invProj: Array[Float],
+        invView: Array[Float],
+        prevProj: Array[Float],
+        prevView: Array[Float],
+        instanceCount: Int
     ): Unit =
       val data = MemoryUtil.memByteBuffer(uboMapped, 512)
       data.clear()
@@ -330,9 +534,10 @@ object BlockboxRayTrace:
       put4(data, near, far, instanceCount.toFloat, 0f)
       put4(data, halfW.toFloat, halfH.toFloat, frameIndex.toFloat, if haveHistory then 1f else 0f)
 
-    private def putMat(data: ByteBuffer,m: Array[Float]): Unit = RayFrameLayout.matrix(data,m)
+    private def putMat(data: ByteBuffer, m: Array[Float]): Unit = RayFrameLayout.matrix(data, m)
 
-    private def put4(data: ByteBuffer,a: Float,b: Float,c: Float,d: Float): Unit = RayFrameLayout.vector(data,a,b,c,d)
+    private def put4(data: ByteBuffer, a: Float, b: Float, c: Float, d: Float): Unit =
+      RayFrameLayout.vector(data, a, b, c, d)
 
     private def writeInstances(instances: Array[ChunkGeometry]): Unit =
       val infos = MemoryUtil.memByteBuffer(infoMapped, math.max(instances.length, 1) * 16)
@@ -369,37 +574,108 @@ object BlockboxRayTrace:
           tlas = 0L
         tlasCapacity = math.max(instances.length, 8)
         val sizes = tlasSizes(stack, tlasCapacity)
-        val storage = createBuffer(sizes.accelerationStructureSize, VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, map = false)
+        val storage = createBuffer(
+          sizes.accelerationStructureSize,
+          VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+          VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+          map = false
+        )
         tlasBuffer = storage._1; tlasMemory = storage._2
         ensureScratch(sizes.buildScratchSize)
-        val info = VkAccelerationStructureCreateInfoKHR.calloc(stack).sType(VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR).buffer(tlasBuffer).size(sizes.accelerationStructureSize).`type`(VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR)
+        val info = VkAccelerationStructureCreateInfoKHR
+          .calloc(stack)
+          .sType(VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR)
+          .buffer(tlasBuffer)
+          .size(sizes.accelerationStructureSize)
+          .`type`(VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR)
         val out = stack.mallocLong(1)
-        check(vkCreateAccelerationStructureKHR(device, info, null, out), "top-level acceleration structure")
+        check(
+          vkCreateAccelerationStructureKHR(device, info, null, out),
+          "top-level acceleration structure"
+        )
         tlas = out.get(0)
       else ensureScratch(tlasSizes(stack, instances.length).buildScratchSize)
       val geometry = VkAccelerationStructureGeometryKHR.calloc(1, stack)
-      geometry.get(0).sType(VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR).geometryType(VK_GEOMETRY_TYPE_INSTANCES_KHR).flags(VK_GEOMETRY_OPAQUE_BIT_KHR)
-      geometry.get(0).geometry().instances().sType(VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR).arrayOfPointers(false).data().deviceAddress(bufferAddress(instanceBuffer))
+      geometry
+        .get(0)
+        .sType(VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR)
+        .geometryType(VK_GEOMETRY_TYPE_INSTANCES_KHR)
+        .flags(VK_GEOMETRY_OPAQUE_BIT_KHR)
+      geometry
+        .get(0)
+        .geometry()
+        .instances()
+        .sType(VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR)
+        .arrayOfPointers(false)
+        .data()
+        .deviceAddress(bufferAddress(instanceBuffer))
       val build = VkAccelerationStructureBuildGeometryInfoKHR.calloc(1, stack)
-      build.get(0).sType(VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR).`type`(VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR).flags(VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_BUILD_BIT_KHR).mode(VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR).dstAccelerationStructure(tlas).geometryCount(1).pGeometries(geometry).scratchData().deviceAddress(scratchAddress)
+      build
+        .get(0)
+        .sType(VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR)
+        .`type`(VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR)
+        .flags(tlasBuildFlags)
+        .mode(VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR)
+        .dstAccelerationStructure(tlas)
+        .geometryCount(1)
+        .pGeometries(geometry)
+        .scratchData()
+        .deviceAddress(scratchAddress)
       val range = VkAccelerationStructureBuildRangeInfoKHR.calloc(1, stack)
-      range.get(0).primitiveCount(instances.length).primitiveOffset(0).firstVertex(0).transformOffset(0)
+      range
+        .get(0)
+        .primitiveCount(instances.length)
+        .primitiveOffset(0)
+        .firstVertex(0)
+        .transformOffset(0)
       val pp = stack.mallocPointer(1)
       pp.put(range.address()).flip()
       vkCmdBuildAccelerationStructuresKHR(cmd, build, pp)
 
-    private def tlasSizes(stack: MemoryStack, count: Int): VkAccelerationStructureBuildSizesInfoKHR =
+    private def tlasSizes(
+        stack: MemoryStack,
+        count: Int
+    ): VkAccelerationStructureBuildSizesInfoKHR =
       val geometry = VkAccelerationStructureGeometryKHR.calloc(1, stack)
-      geometry.get(0).sType(VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR).geometryType(VK_GEOMETRY_TYPE_INSTANCES_KHR)
-      geometry.get(0).geometry().instances().sType(VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR).arrayOfPointers(false)
-      val build = VkAccelerationStructureBuildGeometryInfoKHR.calloc(stack).sType(VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR).`type`(VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR).pGeometries(geometry).geometryCount(1)
-      val sizes = VkAccelerationStructureBuildSizesInfoKHR.calloc(stack).sType(VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR)
-      vkGetAccelerationStructureBuildSizesKHR(device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, build, stack.ints(math.max(count, 1)), sizes)
+      geometry
+        .get(0)
+        .sType(VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR)
+        .geometryType(VK_GEOMETRY_TYPE_INSTANCES_KHR)
+        .flags(VK_GEOMETRY_OPAQUE_BIT_KHR)
+      geometry
+        .get(0)
+        .geometry()
+        .instances()
+        .sType(VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR)
+        .arrayOfPointers(false)
+      val build = VkAccelerationStructureBuildGeometryInfoKHR
+        .calloc(stack)
+        .sType(VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR)
+        .`type`(VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR)
+        .flags(tlasBuildFlags)
+        .mode(VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR)
+        .pGeometries(geometry)
+        .geometryCount(1)
+      val sizes = VkAccelerationStructureBuildSizesInfoKHR
+        .calloc(stack)
+        .sType(VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR)
+      vkGetAccelerationStructureBuildSizesKHR(
+        device,
+        VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
+        build,
+        stack.ints(math.max(count, 1)),
+        sizes
+      )
       sizes
 
-    private def rebuildGeometry(chunks: Array[Chunk], geometries: mutable.HashMap[(Int, Int), ChunkGeometry]): Unit =
+    private def rebuildGeometry(
+        chunks: Array[Chunk],
+        geometries: mutable.HashMap[(Int, Int), ChunkGeometry]
+    ): Unit =
       val byKey = chunks.iterator.map(c => (c.cx, c.cz) -> c).toMap
       val live = mutable.HashSet.empty[(Int, Int)]
+      var builds = 0
+      pendingChunks = 0
       var i = 0
       while i < chunks.length do
         val chunk = chunks(i)
@@ -407,15 +683,27 @@ object BlockboxRayTrace:
         live += key
         val border = borderStamp(chunk, byKey)
         val existing = geometries.get(key)
-        if existing.forall(g => g.revision != chunk.geometryRevision || g.border != border) then
-          existing.foreach(destroyGeometry)
-          val built = buildChunk(chunk, byKey, border)
-          if built != null then geometries(key) = built else geometries.remove(key)
+        val stamp = (chunk.geometryRevision, border)
+        if existing.forall(g => g.revision != stamp._1 || g.border != stamp._2) && !emptyChunks
+            .get(key)
+            .contains(stamp)
+        then
+          // Do not freeze a frame building hundreds of BLASes after travel or
+          // changing packs. Near chunks arrive first; raster shadows cover misses.
+          if builds < 2 then
+            val built = buildChunk(chunk, byKey, border)
+            existing.foreach(destroyGeometry)
+            if built != null then
+              geometries(key) = built; emptyChunks.remove(key)
+            else
+              geometries.remove(key); emptyChunks(key) = stamp
+            sceneDirty = true; builds += 1
+          else pendingChunks += 1
         i += 1
-      val stale = geometries.keys.filterNot(live.contains).toArray
-      stale.foreach { key =>
-        geometries.remove(key).foreach(destroyGeometry)
+      geometries.keysIterator.filterNot(live.contains).toArray.foreach { key =>
+        geometries.remove(key).foreach(destroyGeometry); sceneDirty = true
       }
+      emptyChunks.keysIterator.filterNot(live.contains).toArray.foreach(emptyChunks.remove)
 
     private def borderStamp(chunk: Chunk, byKey: Map[(Int, Int), Chunk]): Int =
       var stamp = 1
@@ -423,7 +711,10 @@ object BlockboxRayTrace:
       while dz <= 1 do
         var dx = -1
         while dx <= 1 do
-          if dx != 0 || dz != 0 then byKey.get((chunk.cx + dx, chunk.cz + dz)).foreach(n => stamp = stamp * 31 + n.geometryRevision)
+          if dx != 0 || dz != 0 then
+            byKey
+              .get((chunk.cx + dx, chunk.cz + dz))
+              .foreach(n => stamp = stamp * 31 + n.geometryRevision)
           dx += 1
         dz += 1
       stamp
@@ -434,23 +725,70 @@ object BlockboxRayTrace:
       proved = true
       val verts = Array(0f, 0f, 0f, 1f, 0f, 0f, 0f, 1f, 0f)
       val idx = Array(0, 1, 2)
-      val vb = createBuffer(verts.length * 4, VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT, hostFlags, map = true)
-      val ib = createBuffer(idx.length * 4, VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT, hostFlags, map = true)
-      MemoryUtil.memByteBuffer(vb._3, verts.length * 4).order(java.nio.ByteOrder.LITTLE_ENDIAN).asFloatBuffer.put(verts)
-      MemoryUtil.memByteBuffer(ib._3, idx.length * 4).order(java.nio.ByteOrder.LITTLE_ENDIAN).asIntBuffer.put(idx)
+      val vb = createBuffer(
+        verts.length * 4,
+        VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+        hostFlags,
+        map = true
+      )
+      val ib = createBuffer(
+        idx.length * 4,
+        VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+        hostFlags,
+        map = true
+      )
+      MemoryUtil
+        .memByteBuffer(vb._3, verts.length * 4)
+        .order(java.nio.ByteOrder.LITTLE_ENDIAN)
+        .asFloatBuffer
+        .put(verts)
+      MemoryUtil
+        .memByteBuffer(ib._3, idx.length * 4)
+        .order(java.nio.ByteOrder.LITTLE_ENDIAN)
+        .asIntBuffer
+        .put(idx)
       val stack = MemoryStack.stackPush()
       try
         val geometry = triangleGeometry(stack, bufferAddress(vb._1), bufferAddress(ib._1), 3, 1)
         val sizes = blasSizes(stack, geometry, 1)
         ensureScratch(sizes.buildScratchSize)
-        val storage = createBuffer(sizes.accelerationStructureSize, VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, map = false)
-        val info = VkAccelerationStructureCreateInfoKHR.calloc(stack).sType(VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR).buffer(storage._1).size(sizes.accelerationStructureSize).`type`(VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR)
+        val storage = createBuffer(
+          sizes.accelerationStructureSize,
+          VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+          VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+          map = false
+        )
+        val info = VkAccelerationStructureCreateInfoKHR
+          .calloc(stack)
+          .sType(VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR)
+          .buffer(storage._1)
+          .size(sizes.accelerationStructureSize)
+          .`type`(VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR)
         val out = stack.mallocLong(1)
         check(vkCreateAccelerationStructureKHR(device, info, null, out), "probe as")
         check(vkResetCommandBuffer(cmd, 0), "probe reset")
-        check(vkBeginCommandBuffer(cmd, VkCommandBufferBeginInfo.calloc(stack).sType(VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO).flags(VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT)), "probe begin")
+        check(
+          vkBeginCommandBuffer(
+            cmd,
+            VkCommandBufferBeginInfo
+              .calloc(stack)
+              .sType(VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO)
+              .flags(VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT)
+          ),
+          "probe begin"
+        )
         val build = VkAccelerationStructureBuildGeometryInfoKHR.calloc(1, stack)
-        build.get(0).sType(VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR).`type`(VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR).flags(VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR).mode(VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR).dstAccelerationStructure(out.get(0)).geometryCount(1).pGeometries(geometry).scratchData().deviceAddress(scratchAddress)
+        build
+          .get(0)
+          .sType(VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR)
+          .`type`(VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR)
+          .flags(blasBuildFlags)
+          .mode(VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR)
+          .dstAccelerationStructure(out.get(0))
+          .geometryCount(1)
+          .pGeometries(geometry)
+          .scratchData()
+          .deviceAddress(scratchAddress)
         val range = VkAccelerationStructureBuildRangeInfoKHR.calloc(1, stack)
         range.get(0).primitiveCount(1)
         val pp = stack.mallocPointer(1)
@@ -459,34 +797,51 @@ object BlockboxRayTrace:
         check(vkEndCommandBuffer(cmd), "probe end")
         val commands = stack.mallocPointer(1)
         commands.put(cmd).flip()
-        check(vkQueueSubmit(queue, VkSubmitInfo.calloc(stack).sType(VK_STRUCTURE_TYPE_SUBMIT_INFO).pCommandBuffers(commands), 0L), "probe submit")
+        check(
+          vkQueueSubmit(
+            queue,
+            VkSubmitInfo
+              .calloc(stack)
+              .sType(VK_STRUCTURE_TYPE_SUBMIT_INFO)
+              .pCommandBuffers(commands),
+            0L
+          ),
+          "probe submit"
+        )
         check(vkQueueWaitIdle(queue), "probe idle")
         vkDestroyAccelerationStructureKHR(device, out.get(0), null)
         vkDestroyBuffer(device, storage._1, null)
         vkFreeMemory(device, storage._2, null)
         ()
       finally
-        vkUnmapMemory(device, vb._2); vkDestroyBuffer(device, vb._1, null); vkFreeMemory(device, vb._2, null)
-        vkUnmapMemory(device, ib._2); vkDestroyBuffer(device, ib._1, null); vkFreeMemory(device, ib._2, null)
+        vkUnmapMemory(device, vb._2); vkDestroyBuffer(device, vb._1, null);
+        vkFreeMemory(device, vb._2, null)
+        vkUnmapMemory(device, ib._2); vkDestroyBuffer(device, ib._1, null);
+        vkFreeMemory(device, ib._2, null)
         stack.close()
 
-    private def buildChunk(chunk: Chunk, byKey: Map[(Int, Int), Chunk], border: Int): ChunkGeometry | Null =
+    private def buildChunk(
+        chunk: Chunk,
+        byKey: Map[(Int, Int), Chunk],
+        border: Int
+    ): ChunkGeometry | Null =
       proveBuilder()
       val extracted = extract(chunk, byKey)
       if extracted == null then return null
-      // Builds past about 4096 triangles reset this GPU, so keep the top of the
-      // column (the scan is bottom-up) where the camera actually looks.
-      val total = extracted._3
-      val triangles = math.min(total, 3500)
-      val start = total - triangles
-      val vertices = extracted._1.slice(start * 9, total * 9)
-      val faces = extracted._2.slice(start * 8, total * 8)
+      // Retain the complete extracted mesh. Correctly matched size/build flags
+      // remove the old 3,500-triangle workaround, which clipped whole columns.
+      val triangles = extracted._3
+      val vertices = extracted._1
+      val faces = extracted._2
       val vertexCount = triangles * 3
       if vertices.length != vertexCount * 3 || faces.length != triangles * 8 then
-        throw IllegalStateException(s"geometry size mismatch: ${vertices.length} floats, ${faces.length} face floats, $triangles triangles")
+        throw IllegalStateException(
+          s"geometry size mismatch: ${vertices.length} floats, ${faces.length} face floats, $triangles triangles"
+        )
       var finite = 0
       while finite < vertices.length do
-        if !vertices(finite).isFinite then throw IllegalStateException("non-finite ray-trace vertex")
+        if !vertices(finite).isFinite then
+          throw IllegalStateException("non-finite ray-trace vertex")
         finite += 1
       val indices = new Array[Int](vertexCount)
       var n = 0
@@ -496,42 +851,98 @@ object BlockboxRayTrace:
       val vertexBytes = vertices.length * 4
       val indexBytes = indices.length * 4
       val faceBytes = faces.length * 4
-      val inputUsage = VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT
+      val inputUsage =
+        VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT
       val vertexBuf = createBuffer(vertexBytes, inputUsage, hostFlags, map = true)
       val indexBuf = createBuffer(indexBytes, inputUsage, hostFlags, map = true)
-      val faceBuf = createBuffer(faceBytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT, hostFlags, map = true)
-      MemoryUtil.memByteBuffer(vertexBuf._3, vertexBytes).order(java.nio.ByteOrder.LITTLE_ENDIAN).asFloatBuffer.put(vertices)
-      MemoryUtil.memByteBuffer(indexBuf._3, indexBytes).order(java.nio.ByteOrder.LITTLE_ENDIAN).asIntBuffer.put(indices)
-      MemoryUtil.memByteBuffer(faceBuf._3, faceBytes).order(java.nio.ByteOrder.LITTLE_ENDIAN).asFloatBuffer.put(faces)
+      val faceBuf = createBuffer(
+        faceBytes,
+        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+        hostFlags,
+        map = true
+      )
+      MemoryUtil
+        .memByteBuffer(vertexBuf._3, vertexBytes)
+        .order(java.nio.ByteOrder.LITTLE_ENDIAN)
+        .asFloatBuffer
+        .put(vertices)
+      MemoryUtil
+        .memByteBuffer(indexBuf._3, indexBytes)
+        .order(java.nio.ByteOrder.LITTLE_ENDIAN)
+        .asIntBuffer
+        .put(indices)
+      MemoryUtil
+        .memByteBuffer(faceBuf._3, faceBytes)
+        .order(java.nio.ByteOrder.LITTLE_ENDIAN)
+        .asFloatBuffer
+        .put(faces)
       val vertexAddress = bufferAddress(vertexBuf._1)
       val indexAddress = bufferAddress(indexBuf._1)
       val faceAddress = bufferAddress(faceBuf._1)
-      if vertexAddress == 0L || indexAddress == 0L || faceAddress == 0L then throw IllegalStateException("buffer device address is unavailable")
+      if vertexAddress == 0L || indexAddress == 0L || faceAddress == 0L then
+        throw IllegalStateException("buffer device address is unavailable")
       val stack = MemoryStack.stackPush()
       try
         val geometry = triangleGeometry(stack, vertexAddress, indexAddress, vertexCount, triangles)
         val sizes = blasSizes(stack, geometry, triangles)
-        if sizes.accelerationStructureSize <= 0 then throw IllegalStateException(s"acceleration structure size for $triangles triangles is 0")
+        if sizes.accelerationStructureSize <= 0 then
+          throw IllegalStateException(s"acceleration structure size for $triangles triangles is 0")
         ensureScratch(sizes.buildScratchSize)
-        val storage = createBuffer(sizes.accelerationStructureSize, VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, map = false)
-        val info = VkAccelerationStructureCreateInfoKHR.calloc(stack).sType(VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR).buffer(storage._1).size(sizes.accelerationStructureSize).`type`(VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR)
+        val storage = createBuffer(
+          sizes.accelerationStructureSize,
+          VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+          VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+          map = false
+        )
+        val info = VkAccelerationStructureCreateInfoKHR
+          .calloc(stack)
+          .sType(VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR)
+          .buffer(storage._1)
+          .size(sizes.accelerationStructureSize)
+          .`type`(VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR)
         val out = stack.mallocLong(1)
-        check(vkCreateAccelerationStructureKHR(device, info, null, out), "bottom-level acceleration structure")
+        check(
+          vkCreateAccelerationStructureKHR(device, info, null, out),
+          "bottom-level acceleration structure"
+        )
         val as = out.get(0)
         val buildCmd = allocateCommand()
-        val begin = VkCommandBufferBeginInfo.calloc(stack).sType(VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO).flags(VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT)
+        val begin = VkCommandBufferBeginInfo
+          .calloc(stack)
+          .sType(VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO)
+          .flags(VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT)
         check(vkBeginCommandBuffer(buildCmd, begin), "begin blas")
         val build = VkAccelerationStructureBuildGeometryInfoKHR.calloc(1, stack)
-        build.get(0).sType(VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR).`type`(VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR).flags(VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR).mode(VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR).dstAccelerationStructure(as).geometryCount(1).pGeometries(geometry).scratchData().deviceAddress(scratchAddress)
+        build
+          .get(0)
+          .sType(VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR)
+          .`type`(VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR)
+          .flags(blasBuildFlags)
+          .mode(VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR)
+          .dstAccelerationStructure(as)
+          .geometryCount(1)
+          .pGeometries(geometry)
+          .scratchData()
+          .deviceAddress(scratchAddress)
         val range = VkAccelerationStructureBuildRangeInfoKHR.calloc(1, stack)
         range.get(0).primitiveCount(triangles).primitiveOffset(0).firstVertex(0).transformOffset(0)
         val pp = stack.mallocPointer(1)
         pp.put(range.address()).flip()
         vkCmdBuildAccelerationStructuresKHR(buildCmd, build, pp)
         check(vkEndCommandBuffer(buildCmd), "end blas")
-        check(vkQueueSubmit(queue, VkSubmitInfo.calloc(stack).sType(VK_STRUCTURE_TYPE_SUBMIT_INFO).pCommandBuffers({
-          val p = stack.mallocPointer(1); p.put(buildCmd).flip(); p
-        }), 0L), "submit blas")
+        check(
+          vkQueueSubmit(
+            queue,
+            VkSubmitInfo
+              .calloc(stack)
+              .sType(VK_STRUCTURE_TYPE_SUBMIT_INFO)
+              .pCommandBuffers({
+                val p = stack.mallocPointer(1); p.put(buildCmd).flip(); p
+              }),
+            0L
+          ),
+          "submit blas"
+        )
         check(vkQueueWaitIdle(queue), s"blas idle ($triangles triangles)")
         vkUnmapMemory(device, indexBuf._2)
         vkDestroyBuffer(device, indexBuf._1, null)
@@ -540,7 +951,20 @@ object BlockboxRayTrace:
         vkUnmapMemory(device, vertexBuf._2)
         vkDestroyBuffer(device, vertexBuf._1, null)
         vkFreeMemory(device, vertexBuf._2, null)
-        new ChunkGeometry((chunk.cx, chunk.cz), chunk.geometryRevision, border, triangles, as, storage._1, storage._2, 0L, 0L, faceBuf._1, faceBuf._2, faceAddress)
+        new ChunkGeometry(
+          (chunk.cx, chunk.cz),
+          chunk.geometryRevision,
+          border,
+          triangles,
+          as,
+          storage._1,
+          storage._2,
+          0L,
+          0L,
+          faceBuf._1,
+          faceBuf._2,
+          faceAddress
+        )
       finally stack.close()
 
     private def emptyInts: java.nio.IntBuffer =
@@ -548,14 +972,30 @@ object BlockboxRayTrace:
       buffers.limit(0)
       buffers
 
-    private def copyBuffer(stack: MemoryStack, src: Long, dst: Long, offset: Long, size: Long): Unit =
+    private def copyBuffer(
+        stack: MemoryStack,
+        src: Long,
+        dst: Long,
+        offset: Long,
+        size: Long
+    ): Unit =
       val region = VkBufferCopy.calloc(1, stack)
       region.srcOffset(offset).dstOffset(0).size(size)
       vkCmdCopyBuffer(cmd, src, dst, region)
 
-    private def triangleGeometry(stack: MemoryStack, vertexAddress: Long, indexAddress: Long, vertexCount: Int, triangles: Int): VkAccelerationStructureGeometryKHR.Buffer =
+    private def triangleGeometry(
+        stack: MemoryStack,
+        vertexAddress: Long,
+        indexAddress: Long,
+        vertexCount: Int,
+        triangles: Int
+    ): VkAccelerationStructureGeometryKHR.Buffer =
       val geometry = VkAccelerationStructureGeometryKHR.calloc(1, stack)
-      geometry.get(0).sType(VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR).geometryType(VK_GEOMETRY_TYPE_TRIANGLES_KHR).flags(VK_GEOMETRY_OPAQUE_BIT_KHR)
+      geometry
+        .get(0)
+        .sType(VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR)
+        .geometryType(VK_GEOMETRY_TYPE_TRIANGLES_KHR)
+        .flags(VK_GEOMETRY_OPAQUE_BIT_KHR)
       val tris = geometry.get(0).geometry().triangles()
       tris.sType(VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR)
       tris.vertexFormat(VK_FORMAT_R32G32B32_SFLOAT)
@@ -566,13 +1006,37 @@ object BlockboxRayTrace:
       tris.indexData().deviceAddress(indexAddress)
       geometry
 
-    private def blasSizes(stack: MemoryStack, geometry: VkAccelerationStructureGeometryKHR.Buffer, triangles: Int): VkAccelerationStructureBuildSizesInfoKHR =
-      val build = VkAccelerationStructureBuildGeometryInfoKHR.calloc(stack).sType(VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR).`type`(VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR).pGeometries(geometry).geometryCount(1)
-      val sizes = VkAccelerationStructureBuildSizesInfoKHR.calloc(stack).sType(VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR)
-      vkGetAccelerationStructureBuildSizesKHR(device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, build, stack.ints(triangles), sizes)
+    private def blasSizes(
+        stack: MemoryStack,
+        geometry: VkAccelerationStructureGeometryKHR.Buffer,
+        triangles: Int
+    ): VkAccelerationStructureBuildSizesInfoKHR =
+      // Sizing must use the same build flags as the actual command. FAST_TRACE
+      // can need more storage than the default build, even for a small mesh.
+      val build = VkAccelerationStructureBuildGeometryInfoKHR
+        .calloc(stack)
+        .sType(VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR)
+        .`type`(VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR)
+        .flags(blasBuildFlags)
+        .mode(VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR)
+        .pGeometries(geometry)
+        .geometryCount(1)
+      val sizes = VkAccelerationStructureBuildSizesInfoKHR
+        .calloc(stack)
+        .sType(VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR)
+      vkGetAccelerationStructureBuildSizesKHR(
+        device,
+        VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
+        build,
+        stack.ints(triangles),
+        sizes
+      )
       sizes
 
-    private def extract(chunk: Chunk, byKey: Map[(Int, Int), Chunk]): (Array[Float], Array[Float], Int) | Null =
+    private def extract(
+        chunk: Chunk,
+        byKey: Map[(Int, Int), Chunk]
+    ): (Array[Float], Array[Float], Int) | Null =
       val cs = Terrain.chunkSize
       val height = Terrain.worldHeight
       val blocks = chunk.blocks
@@ -630,7 +1094,21 @@ object BlockboxRayTrace:
         lx += 1
       if triangles == 0 then null else (verts.toArray, faces.toArray, triangles)
 
-    private def emitQuad(verts: Grow, faces: Grow, wx: Int, y: Int, wz: Int, nx: Int, ny: Int, nz: Int, ar: Float, ag: Float, ab: Float, emit: Float, corners: Array[(Int, Int, Int)]): Unit =
+    private def emitQuad(
+        verts: Grow,
+        faces: Grow,
+        wx: Int,
+        y: Int,
+        wz: Int,
+        nx: Int,
+        ny: Int,
+        nz: Int,
+        ar: Float,
+        ag: Float,
+        ab: Float,
+        emit: Float,
+        corners: Array[(Int, Int, Int)]
+    ): Unit =
       val order = Array(0, 1, 2, 0, 2, 3)
       var t = 0
       while t < 2 do
@@ -651,15 +1129,22 @@ object BlockboxRayTrace:
     private def ensureScratch(needed: Long): Unit =
       val align = math.max(scratchAlign, 1)
       val size = 16L * 1024L * 1024L
-      if needed > size then throw IllegalStateException(s"scratch request $needed exceeds the fixed buffer")
+      if needed > size then
+        throw IllegalStateException(s"scratch request $needed exceeds the fixed buffer")
       if scratch != 0L then return
-      val created = createBuffer(size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, map = false)
+      val created = createBuffer(
+        size,
+        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+        map = false
+      )
       scratch = created._1
       scratchMemory = created._2
       scratchSize = size
       val base = bufferAddress(scratch)
       scratchAddress = (base + align - 1L) / align * align
-      if scratchAddress + needed > base + size then throw IllegalStateException("aligned scratch does not fit")
+      if scratchAddress + needed > base + size then
+        throw IllegalStateException("aligned scratch does not fit")
 
     private def updateDescriptors(stack: MemoryStack, instanceCount: Int): Unit =
       val writes = VkWriteDescriptorSet.calloc(12, stack)
@@ -668,13 +1153,35 @@ object BlockboxRayTrace:
         info.get(0).imageView(view).imageLayout(VK_IMAGE_LAYOUT_GENERAL)
         if sampled then info.get(0).sampler(sampler)
         val w = writes.get(binding)
-        w.sType(VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET).dstSet(descriptorSet).dstBinding(binding).descriptorCount(1).pImageInfo(info)
-        w.descriptorType(if sampled then VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER else VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)
+        w.sType(VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET)
+          .dstSet(descriptorSet)
+          .dstBinding(binding)
+          .descriptorCount(1)
+          .pImageInfo(info)
+        w.descriptorType(if sampled then VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER
+        else VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)
       val uboInfo = VkDescriptorBufferInfo.calloc(1, stack)
       uboInfo.get(0).buffer(ubo).offset(0).range(512)
-      writes.get(0).sType(VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET).dstSet(descriptorSet).dstBinding(0).descriptorCount(1).descriptorType(VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER).pBufferInfo(uboInfo)
-      val asInfo = VkWriteDescriptorSetAccelerationStructureKHR.calloc(stack).sType(VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR).pAccelerationStructures(stack.longs(tlas))
-      writes.get(1).sType(VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET).pNext(asInfo.address()).dstSet(descriptorSet).dstBinding(1).descriptorCount(1).descriptorType(VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR)
+      writes
+        .get(0)
+        .sType(VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET)
+        .dstSet(descriptorSet)
+        .dstBinding(0)
+        .descriptorCount(1)
+        .descriptorType(VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER)
+        .pBufferInfo(uboInfo)
+      val asInfo = VkWriteDescriptorSetAccelerationStructureKHR
+        .calloc(stack)
+        .sType(VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR)
+        .pAccelerationStructures(stack.longs(tlas))
+      writes
+        .get(1)
+        .sType(VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET)
+        .pNext(asInfo.address())
+        .dstSet(descriptorSet)
+        .dstBinding(1)
+        .descriptorCount(1)
+        .descriptorType(VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR)
       image(2, gbuffer.view, sampled = true)
       image(3, water.view, sampled = true)
       image(4, lighting.view, sampled = false)
@@ -682,7 +1189,14 @@ object BlockboxRayTrace:
       image(6, volume.view, sampled = false)
       val infoInfo = VkDescriptorBufferInfo.calloc(1, stack)
       infoInfo.get(0).buffer(infoBuffer).offset(0).range(math.max(instanceCount, 1) * 16)
-      writes.get(7).sType(VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET).dstSet(descriptorSet).dstBinding(7).descriptorCount(1).descriptorType(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER).pBufferInfo(infoInfo)
+      writes
+        .get(7)
+        .sType(VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET)
+        .dstSet(descriptorSet)
+        .dstBinding(7)
+        .descriptorCount(1)
+        .descriptorType(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER)
+        .pBufferInfo(infoInfo)
       val read = historyRead
       val write = read ^ 1
       image(8, historyColor(read).view, sampled = false)
@@ -691,9 +1205,19 @@ object BlockboxRayTrace:
       image(11, historyDepth(write).view, sampled = false)
       vkUpdateDescriptorSets(device, writes, null)
 
-    private def barrier(stack: MemoryStack, srcStage: Int, dstStage: Int, srcAccess: Int, dstAccess: Int): Unit =
+    private def barrier(
+        stack: MemoryStack,
+        srcStage: Int,
+        dstStage: Int,
+        srcAccess: Int,
+        dstAccess: Int
+    ): Unit =
       val memory = VkMemoryBarrier.calloc(1, stack)
-      memory.get(0).sType(VK_STRUCTURE_TYPE_MEMORY_BARRIER).srcAccessMask(srcAccess).dstAccessMask(dstAccess)
+      memory
+        .get(0)
+        .sType(VK_STRUCTURE_TYPE_MEMORY_BARRIER)
+        .srcAccessMask(srcAccess)
+        .dstAccessMask(dstAccess)
       vkCmdPipelineBarrier(cmd, srcStage, dstStage, 0, memory, null, null)
 
     def destroyGeometry(g: ChunkGeometry): Unit =
@@ -706,8 +1230,8 @@ object BlockboxRayTrace:
       if g.faceMemory != 0L then vkFreeMemory(device, g.faceMemory, null)
 
     def destroy(geometries: Iterable[ChunkGeometry]): Unit =
-      val idle=vkDeviceWaitIdle(device)
-      if idle!=VK_ERROR_DEVICE_LOST then check(idle,"idle ray device for teardown")
+      val idle = vkDeviceWaitIdle(device)
+      if idle != VK_ERROR_DEVICE_LOST then check(idle, "idle ray device for teardown")
       rayLoop.closeAfterDeviceIdle()
       glFinish()
       geometries.foreach(destroyGeometry)
@@ -725,10 +1249,6 @@ object BlockboxRayTrace:
       destroyMapped(ubo, uboMemory)
       destroyMapped(infoBuffer, infoMemory)
       destroyMapped(instanceBuffer, instanceMemory)
-      if glSignal != 0 then GLSem.glDeleteSemaphoresEXT(glSignal)
-      if glWait != 0 then GLSem.glDeleteSemaphoresEXT(glWait)
-      if glToVk != 0L then vkDestroySemaphore(device, glToVk, null)
-      if vkToGl != 0L then vkDestroySemaphore(device, vkToGl, null)
       if copyProgram != 0 then glDeleteProgram(copyProgram)
       if copyFbo != 0 then glDeleteFramebuffers(copyFbo)
       vkDestroyCommandPool(device, pool, null)
@@ -737,16 +1257,20 @@ object BlockboxRayTrace:
       memProps.free()
 
     private def destroyTargets(): Unit =
+      if outputTransfer != null then
+        vkUnmapMemory(device, outputTransfer.memory)
+        vkDestroyBuffer(device, outputTransfer.buffer, null)
+        vkFreeMemory(device, outputTransfer.memory, null)
+        outputTransfer = null
       Array(gbuffer, water, lighting, reflection, volume).foreach(freeShared)
       historyColor.foreach(freeShared)
       historyDepth.foreach(freeShared)
       gbuffer = null; water = null; lighting = null; reflection = null; volume = null
       historyColor = Array.empty; historyDepth = Array.empty
 
-    private def freeShared(image: SharedImage | Null): Unit =
+    private def freeShared(image: RayImage | Null): Unit =
       if image == null then return
       if image.glTex != 0 then glDeleteTextures(image.glTex)
-      if image.glMemory != 0 then GLMem.glDeleteMemoryObjectsEXT(image.glMemory)
       if image.view != 0L then vkDestroyImageView(device, image.view, null)
       if image.image != 0L then vkDestroyImage(device, image.image, null)
       if image.memory != 0L then vkFreeMemory(device, image.memory, null)
@@ -760,18 +1284,46 @@ object BlockboxRayTrace:
     private def hostFlags: Int =
       VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
 
-    private def createBuffer(size: Long, usage: Int, properties: Int, map: Boolean): (Long, Long, Long) =
+    private def createBuffer(
+        size: Long,
+        usage: Int,
+        properties: Int,
+        map: Boolean
+    ): (Long, Long, Long) =
       val stack = MemoryStack.stackPush()
       try
-        val info = VkBufferCreateInfo.calloc(stack).sType(VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO).size(math.max(size, 256L)).usage(usage).sharingMode(VK_SHARING_MODE_EXCLUSIVE)
+        val info = VkBufferCreateInfo
+          .calloc(stack)
+          .sType(VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO)
+          .size(math.max(size, 256L))
+          .usage(usage)
+          .sharingMode(VK_SHARING_MODE_EXCLUSIVE)
         val out = stack.mallocLong(1)
         check(vkCreateBuffer(device, info, null, out), "buffer")
         val buffer = out.get(0)
         val req = VkMemoryRequirements.calloc(stack)
         vkGetBufferMemoryRequirements(device, buffer, req)
-        val flags = VkMemoryAllocateFlagsInfo.calloc(stack).sType(VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO)
-        if (usage & VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT) != 0 then flags.flags(VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT)
-        val alloc = VkMemoryAllocateInfo.calloc(stack).sType(VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO).pNext(flags.address()).allocationSize(req.size).memoryTypeIndex(memoryType(req.memoryTypeBits, properties))
+        val flags = VkMemoryAllocateFlagsInfo
+          .calloc(stack)
+          .sType(VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO)
+        if (usage & VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT) != 0 then
+          flags.flags(VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT)
+        val alloc = VkMemoryAllocateInfo
+          .calloc(stack)
+          .sType(VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO)
+          .pNext(flags.address())
+          .allocationSize(req.size)
+          .memoryTypeIndex(
+            memoryType(
+              req.memoryTypeBits,
+              if (properties & VK_MEMORY_PROPERTY_HOST_CACHED_BIT) != 0 && findMemory(
+                  req.memoryTypeBits,
+                  properties
+                ) < 0
+              then properties & ~VK_MEMORY_PROPERTY_HOST_CACHED_BIT
+              else properties
+            )
+          )
         val mem = stack.mallocLong(1)
         check(vkAllocateMemory(device, alloc, null, mem), "buffer memory")
         check(vkBindBufferMemory(device, buffer, mem.get(0), 0), "bind buffer")
@@ -783,41 +1335,58 @@ object BlockboxRayTrace:
         (buffer, mem.get(0), mapped)
       finally stack.close()
 
-    private def createShared(width: Int, height: Int, linear: Boolean, r32: Boolean = false, interop: Boolean = true, rgba32: Boolean = false): SharedImage =
+    private def createRayImage(
+        width: Int,
+        height: Int,
+        linear: Boolean,
+        r32: Boolean = false,
+        rgba32: Boolean = false,
+        glOutput: Boolean = false
+    ): RayImage =
       val stack = MemoryStack.stackPush()
       try
-        val external = VkExternalMemoryImageCreateInfo.calloc(stack).sType(VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO).handleTypes(VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT)
-        val format = if r32 then VK_FORMAT_R32_SFLOAT else if rgba32 then VK_FORMAT_R32G32B32A32_SFLOAT else VK_FORMAT_R16G16B16A16_SFLOAT
-        val info = VkImageCreateInfo.calloc(stack).sType(VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO).pNext(external.address()).imageType(VK_IMAGE_TYPE_2D).format(format).mipLevels(1).arrayLayers(1).samples(VK_SAMPLE_COUNT_1_BIT).tiling(VK_IMAGE_TILING_OPTIMAL).usage(VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT).sharingMode(VK_SHARING_MODE_EXCLUSIVE).initialLayout(VK_IMAGE_LAYOUT_UNDEFINED)
-        if !interop then info.pNext(0L)
+        val format = if r32 then VK_FORMAT_R32_SFLOAT
+        else if rgba32 then VK_FORMAT_R32G32B32A32_SFLOAT
+        else VK_FORMAT_R16G16B16A16_SFLOAT
+        val info = VkImageCreateInfo
+          .calloc(stack)
+          .sType(VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO)
+          .imageType(VK_IMAGE_TYPE_2D)
+          .format(format)
+          .mipLevels(1)
+          .arrayLayers(1)
+          .samples(VK_SAMPLE_COUNT_1_BIT)
+          .tiling(VK_IMAGE_TILING_OPTIMAL)
+          .usage(
+            VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT
+          )
+          .sharingMode(VK_SHARING_MODE_EXCLUSIVE)
+          .initialLayout(VK_IMAGE_LAYOUT_UNDEFINED)
         info.extent().width(width).height(height).depth(1)
         val out = stack.mallocLong(1)
-        check(vkCreateImage(device, info, null, out), "shared image")
+        check(vkCreateImage(device, info, null, out), "ray image")
         val image = out.get(0)
         val req = VkMemoryRequirements.calloc(stack)
         vkGetImageMemoryRequirements(device, image, req)
-        val dedicated = VkMemoryDedicatedAllocateInfo.calloc(stack).sType(VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO).image(image)
-        val exported = VkExportMemoryAllocateInfo.calloc(stack).sType(VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO).pNext(dedicated.address()).handleTypes(VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT)
-        val alloc = VkMemoryAllocateInfo.calloc(stack).sType(VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO).pNext(exported.address()).allocationSize(req.size).memoryTypeIndex(memoryType(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT))
-        if !interop then alloc.pNext(dedicated.address())
+        val dedicated = VkMemoryDedicatedAllocateInfo
+          .calloc(stack)
+          .sType(VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO)
+          .image(image)
+        val alloc = VkMemoryAllocateInfo
+          .calloc(stack)
+          .sType(VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO)
+          .pNext(dedicated.address())
+          .allocationSize(req.size)
+          .memoryTypeIndex(memoryType(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT))
         val mem = stack.mallocLong(1)
-        check(vkAllocateMemory(device, alloc, null, mem), "shared image memory")
-        check(vkBindImageMemory(device, image, mem.get(0), 0), "bind shared image")
-        transitionImage(stack, image, interop)
-        var glMemory=0
-        var tex=0
-        if interop then
-          val fdInfo = VkMemoryGetFdInfoKHR.calloc(stack).sType(VK_STRUCTURE_TYPE_MEMORY_GET_FD_INFO_KHR).memory(mem.get(0)).handleType(VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT)
-          val fds = stack.mallocInt(1)
-          check(vkGetMemoryFdKHR(device, fdInfo, fds), "export image fd")
-          glMemory = GLMem.glCreateMemoryObjectsEXT()
-          GLMem.glMemoryObjectParameteriEXT(glMemory, GLMem.GL_DEDICATED_MEMORY_OBJECT_EXT, GL_TRUE)
-          GLMemFd.glImportMemoryFdEXT(glMemory, req.size, GLMemFd.GL_HANDLE_TYPE_OPAQUE_FD_EXT, fds.get(0))
-          tex = glGenTextures()
-          glBindTexture(GL_TEXTURE_2D, tex)
-          glTexParameteri(GL_TEXTURE_2D, GLMem.GL_TEXTURE_TILING_EXT, GLMem.GL_OPTIMAL_TILING_EXT)
+        check(vkAllocateMemory(device, alloc, null, mem), "ray image memory")
+        check(vkBindImageMemory(device, image, mem.get(0), 0), "bind ray image")
+        transitionImage(stack, image)
+        var tex = 0
+        if glOutput then
+          tex = glGenTextures(); glBindTexture(GL_TEXTURE_2D, tex)
           val glFormat = if r32 then GL_R32F else if rgba32 then GL_RGBA32F else GL_RGBA16F
-          GLMem.glTexStorageMem2DEXT(GL_TEXTURE_2D, 1, glFormat, width, height, glMemory, 0L)
+          glTexImage2D(GL_TEXTURE_2D, 0, glFormat, width, height, 0, GL_RGBA, GL_FLOAT, 0L)
           val filter = if linear then GL_LINEAR else GL_NEAREST
           glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, filter)
           glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filter)
@@ -825,46 +1394,120 @@ object BlockboxRayTrace:
           glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL12.GL_CLAMP_TO_EDGE)
           glTexParameteri(GL_TEXTURE_2D, GL12.GL_TEXTURE_MAX_LEVEL, 0)
           glBindTexture(GL_TEXTURE_2D, 0)
-        val viewInfo = VkImageViewCreateInfo.calloc(stack).sType(VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO).image(image).viewType(VK_IMAGE_VIEW_TYPE_2D).format(format)
-        viewInfo.subresourceRange().aspectMask(VK_IMAGE_ASPECT_COLOR_BIT).levelCount(1).layerCount(1)
+        val viewInfo = VkImageViewCreateInfo
+          .calloc(stack)
+          .sType(VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO)
+          .image(image)
+          .viewType(VK_IMAGE_VIEW_TYPE_2D)
+          .format(format)
+        viewInfo
+          .subresourceRange()
+          .aspectMask(VK_IMAGE_ASPECT_COLOR_BIT)
+          .levelCount(1)
+          .layerCount(1)
         val viewOut = stack.mallocLong(1)
         check(vkCreateImageView(device, viewInfo, null, viewOut), "image view")
-        new SharedImage(image, mem.get(0), viewOut.get(0), glMemory, tex, width, height, req.size)
+        new RayImage(image, mem.get(0), viewOut.get(0), tex, width, height, req.size)
       finally stack.close()
 
-    private def transitionImage(stack: MemoryStack, image: Long, interop: Boolean): Unit =
+    private def createFrameTransfer(width: Int, height: Int): FrameTransfer =
+      val stride = (width.toLong * height * 8L + 255L) & ~255L
+      val inputStride = (width.toLong * height * 16L + 255L) & ~255L
+      val pair = createBuffer(
+        inputStride * 2 + stride * 3,
+        VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+        hostFlags | VK_MEMORY_PROPERTY_HOST_CACHED_BIT,
+        map = true
+      )
+      val inputs = Array.tabulate(2)(i =>
+        MemoryUtil.memByteBuffer(pair._3 + inputStride * i, width * height * 16)
+      )
+      val outputs = Array.tabulate(3)(i =>
+        MemoryUtil.memByteBuffer(pair._3 + inputStride * 2 + stride * i, width * height * 8)
+      )
+      new FrameTransfer(pair._1, pair._2, pair._3, stride, inputStride, inputs, outputs)
+
+    private def uploadOutputs(): Unit =
+      val previousBuffer = glGetInteger(GL_PIXEL_UNPACK_BUFFER_BINDING)
+      glActiveTexture(GL_TEXTURE0)
+      val previousTexture = glGetInteger(GL_TEXTURE_BINDING_2D)
+      glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0)
+      var i = 0
+      while i < 3 do
+        val image = if i == 0 then lighting else if i == 1 then reflection else volume
+        glBindTexture(GL_TEXTURE_2D, image.glTex)
+        glTexSubImage2D(
+          GL_TEXTURE_2D,
+          0,
+          0,
+          0,
+          halfW,
+          halfH,
+          GL_RGBA,
+          GL_HALF_FLOAT,
+          outputTransfer.outputs(i)
+        )
+        i += 1
+      glBindBuffer(GL_PIXEL_UNPACK_BUFFER, previousBuffer)
+      glBindTexture(GL_TEXTURE_2D, previousTexture)
+
+    private def transitionImage(stack: MemoryStack, image: Long): Unit =
       check(vkResetCommandBuffer(cmd, 0), "reset transition")
-      val begin = VkCommandBufferBeginInfo.calloc(stack).sType(VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO).flags(VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT)
+      val begin = VkCommandBufferBeginInfo
+        .calloc(stack)
+        .sType(VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO)
+        .flags(VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT)
       check(vkBeginCommandBuffer(cmd, begin), "begin transition")
       val barrier = VkImageMemoryBarrier.calloc(1, stack)
-      barrier.get(0).sType(VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER).oldLayout(VK_IMAGE_LAYOUT_UNDEFINED).newLayout(VK_IMAGE_LAYOUT_GENERAL).srcQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED).dstQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED).image(image).srcAccessMask(0).dstAccessMask(VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT)
-      if interop then
-        barrier.get(0).srcQueueFamilyIndex(family).dstQueueFamilyIndex(VK_QUEUE_FAMILY_EXTERNAL).dstAccessMask(0)
-      barrier.get(0).subresourceRange().aspectMask(VK_IMAGE_ASPECT_COLOR_BIT).levelCount(1).layerCount(1)
-      vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, if interop then VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT else VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, null, null, barrier)
+      barrier
+        .get(0)
+        .sType(VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER)
+        .oldLayout(VK_IMAGE_LAYOUT_UNDEFINED)
+        .newLayout(VK_IMAGE_LAYOUT_GENERAL)
+        .srcQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED)
+        .dstQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED)
+        .image(image)
+        .srcAccessMask(0)
+        .dstAccessMask(VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT)
+      barrier
+        .get(0)
+        .subresourceRange()
+        .aspectMask(VK_IMAGE_ASPECT_COLOR_BIT)
+        .levelCount(1)
+        .layerCount(1)
+      vkCmdPipelineBarrier(
+        cmd,
+        VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        0,
+        null,
+        null,
+        barrier
+      )
       check(vkEndCommandBuffer(cmd), "end transition")
       val commands = stack.mallocPointer(1)
       commands.put(cmd).flip()
-      check(vkQueueSubmit(queue, VkSubmitInfo.calloc(stack).sType(VK_STRUCTURE_TYPE_SUBMIT_INFO).pCommandBuffers(commands), 0L), "submit transition")
+      check(
+        vkQueueSubmit(
+          queue,
+          VkSubmitInfo.calloc(stack).sType(VK_STRUCTURE_TYPE_SUBMIT_INFO).pCommandBuffers(commands),
+          0L
+        ),
+        "submit transition"
+      )
       check(vkQueueWaitIdle(queue), "transition idle")
 
-    private def createSemaphorePair(): (Long, Int) =
-      val stack = MemoryStack.stackPush()
-      try
-        val exp = VkExportSemaphoreCreateInfo.calloc(stack).sType(VK_STRUCTURE_TYPE_EXPORT_SEMAPHORE_CREATE_INFO).handleTypes(VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT)
-        val info = VkSemaphoreCreateInfo.calloc(stack).sType(VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO).pNext(exp.address())
-        val out = stack.mallocLong(1)
-        check(vkCreateSemaphore(device, info, null, out), "semaphore")
-        val fdInfo = VkSemaphoreGetFdInfoKHR.calloc(stack).sType(VK_STRUCTURE_TYPE_SEMAPHORE_GET_FD_INFO_KHR).semaphore(out.get(0)).handleType(VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT)
-        val fds = stack.mallocInt(1)
-        check(vkGetSemaphoreFdKHR(device, fdInfo, fds), "export semaphore")
-        val glSem = GLSem.glGenSemaphoresEXT()
-        GLSemFd.glImportSemaphoreFdEXT(glSem, GLSemFd.GL_HANDLE_TYPE_OPAQUE_FD_EXT, fds.get(0))
-        (out.get(0), glSem)
-      finally stack.close()
-
     private def createSampler(stack: MemoryStack): Long =
-      val info = VkSamplerCreateInfo.calloc(stack).sType(VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO).magFilter(VK_FILTER_NEAREST).minFilter(VK_FILTER_NEAREST).mipmapMode(VK_SAMPLER_MIPMAP_MODE_NEAREST).addressModeU(VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE).addressModeV(VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE).addressModeW(VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE).maxLod(0f)
+      val info = VkSamplerCreateInfo
+        .calloc(stack)
+        .sType(VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO)
+        .magFilter(VK_FILTER_NEAREST)
+        .minFilter(VK_FILTER_NEAREST)
+        .mipmapMode(VK_SAMPLER_MIPMAP_MODE_NEAREST)
+        .addressModeU(VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE)
+        .addressModeV(VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE)
+        .addressModeW(VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE)
+        .maxLod(0f)
       val out = stack.mallocLong(1)
       check(vkCreateSampler(device, info, null, out), "sampler")
       out.get(0)
@@ -872,7 +1515,12 @@ object BlockboxRayTrace:
     private def createLayout(stack: MemoryStack): Long =
       val bindings = VkDescriptorSetLayoutBinding.calloc(12, stack)
       def bind(i: Int, kind: Int): Unit =
-        bindings.get(i).binding(i).descriptorType(kind).descriptorCount(1).stageFlags(VK_SHADER_STAGE_COMPUTE_BIT)
+        bindings
+          .get(i)
+          .binding(i)
+          .descriptorType(kind)
+          .descriptorCount(1)
+          .stageFlags(VK_SHADER_STAGE_COMPUTE_BIT)
       bind(0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER)
       bind(1, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR)
       bind(2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
@@ -885,13 +1533,19 @@ object BlockboxRayTrace:
       bind(9, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)
       bind(10, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)
       bind(11, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)
-      val info = VkDescriptorSetLayoutCreateInfo.calloc(stack).sType(VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO).pBindings(bindings)
+      val info = VkDescriptorSetLayoutCreateInfo
+        .calloc(stack)
+        .sType(VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO)
+        .pBindings(bindings)
       val out = stack.mallocLong(1)
       check(vkCreateDescriptorSetLayout(device, info, null, out), "descriptor layout")
       out.get(0)
 
     private def createPipelineLayout(stack: MemoryStack, layout: Long): Long =
-      val info = VkPipelineLayoutCreateInfo.calloc(stack).sType(VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO).pSetLayouts(stack.longs(layout))
+      val info = VkPipelineLayoutCreateInfo
+        .calloc(stack)
+        .sType(VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO)
+        .pSetLayouts(stack.longs(layout))
       val out = stack.mallocLong(1)
       check(vkCreatePipelineLayout(device, info, null, out), "pipeline layout")
       out.get(0)
@@ -903,22 +1557,39 @@ object BlockboxRayTrace:
       sizes.get(2).`type`(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER).descriptorCount(4)
       sizes.get(3).`type`(VK_DESCRIPTOR_TYPE_STORAGE_IMAGE).descriptorCount(16)
       sizes.get(4).`type`(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER).descriptorCount(4)
-      val info = VkDescriptorPoolCreateInfo.calloc(stack).sType(VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO).flags(VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT).maxSets(4).pPoolSizes(sizes)
+      val info = VkDescriptorPoolCreateInfo
+        .calloc(stack)
+        .sType(VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO)
+        .flags(VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT)
+        .maxSets(4)
+        .pPoolSizes(sizes)
       val out = stack.mallocLong(1)
       check(vkCreateDescriptorPool(device, info, null, out), "descriptor pool")
       out.get(0)
 
     private def allocateSet(stack: MemoryStack, pool: Long, layout: Long): Long =
-      val info = VkDescriptorSetAllocateInfo.calloc(stack).sType(VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO).descriptorPool(pool).pSetLayouts(stack.longs(layout))
+      val info = VkDescriptorSetAllocateInfo
+        .calloc(stack)
+        .sType(VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO)
+        .descriptorPool(pool)
+        .pSetLayouts(stack.longs(layout))
       val out = stack.mallocLong(1)
       check(vkAllocateDescriptorSets(device, info, out), "descriptor set")
       out.get(0)
 
     private def createCompute(stack: MemoryStack, layout: Long, spirv: ByteBuffer): Long =
-      val moduleInfo = VkShaderModuleCreateInfo.calloc(stack).sType(VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO).pCode(spirv)
+      val moduleInfo = VkShaderModuleCreateInfo
+        .calloc(stack)
+        .sType(VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO)
+        .pCode(spirv)
       val moduleOut = stack.mallocLong(1)
       check(vkCreateShaderModule(device, moduleInfo, null, moduleOut), "shader module")
-      val stage = VkPipelineShaderStageCreateInfo.calloc(stack).sType(VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO).stage(VK_SHADER_STAGE_COMPUTE_BIT).module(moduleOut.get(0)).pName(stack.UTF8("main"))
+      val stage = VkPipelineShaderStageCreateInfo
+        .calloc(stack)
+        .sType(VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO)
+        .stage(VK_SHADER_STAGE_COMPUTE_BIT)
+        .module(moduleOut.get(0))
+        .pName(stack.UTF8("main"))
       val info = VkComputePipelineCreateInfo.calloc(1, stack)
       info.get(0).sType(VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO).stage(stage).layout(layout)
       val out = stack.mallocLong(1)
@@ -937,20 +1608,27 @@ object BlockboxRayTrace:
     private def bufferAddress(buffer: Long): Long =
       val stack = MemoryStack.stackPush()
       try
-        val info = VkBufferDeviceAddressInfo.calloc(stack).sType(VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO).buffer(buffer)
+        val info = VkBufferDeviceAddressInfo
+          .calloc(stack)
+          .sType(VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO)
+          .buffer(buffer)
         vkGetBufferDeviceAddress(device, info)
       finally stack.close()
 
     private def deviceAddressOfAcceleration(as: Long): Long =
       val stack = MemoryStack.stackPush()
       try
-        val info = VkAccelerationStructureDeviceAddressInfoKHR.calloc(stack).sType(VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR).accelerationStructure(as)
+        val info = VkAccelerationStructureDeviceAddressInfoKHR
+          .calloc(stack)
+          .sType(VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR)
+          .accelerationStructure(as)
         vkGetAccelerationStructureDeviceAddressKHR(device, info)
       finally stack.close()
 
     private def memoryType(mask: Int, properties: Int): Int =
       val found = findMemory(mask, properties)
-      if found < 0 then throw IllegalStateException(s"no Vulkan memory type for properties $properties")
+      if found < 0 then
+        throw IllegalStateException(s"no Vulkan memory type for properties $properties")
       found
 
     private def findMemory(mask: Int, properties: Int): Int =
@@ -968,10 +1646,15 @@ object BlockboxRayTrace:
 
     private def buildCopyProgram(): Int =
       val vs = glCreateShader(GL_VERTEX_SHADER)
-      glShaderSource(vs, "#version 120\nvarying vec2 vUv;\nvoid main(){gl_Position=gl_Vertex;vUv=gl_MultiTexCoord0.xy;}\n")
+      glShaderSource(
+        vs,
+        "#version 120\nvarying vec2 vUv;\nvoid main(){gl_Position=gl_Vertex;vUv=gl_MultiTexCoord0.xy;}\n"
+      )
       glCompileShader(vs)
       val fs = glCreateShader(GL_FRAGMENT_SHADER)
-      glShaderSource(fs, """#version 120
+      glShaderSource(
+        fs,
+        """#version 120
         |uniform sampler2D depthTex;
         |uniform sampler2D normalTex;
         |uniform sampler2D waterNTex;
@@ -987,12 +1670,15 @@ object BlockboxRayTrace:
         |  float wd = texture2D(waterDTex, vUv).r;
         |  gl_FragData[1] = vec4(water.rgb, water.a > 0.5 ? wd : 0.0);
         |}
-        |""".stripMargin)
+        |""".stripMargin
+      )
       glCompileShader(fs)
-      if glGetShaderi(fs, GL_COMPILE_STATUS) == 0 then throw IllegalStateException("ray-tracing copy shader: " + glGetShaderInfoLog(fs, 4096))
+      if glGetShaderi(fs, GL_COMPILE_STATUS) == 0 then
+        throw IllegalStateException("ray-tracing copy shader: " + glGetShaderInfoLog(fs, 4096))
       val program = glCreateProgram()
       glAttachShader(program, vs); glAttachShader(program, fs); glLinkProgram(program)
-      if glGetProgrami(program, GL_LINK_STATUS) == 0 then throw IllegalStateException("ray-tracing copy link: " + glGetProgramInfoLog(program, 4096))
+      if glGetProgrami(program, GL_LINK_STATUS) == 0 then
+        throw IllegalStateException("ray-tracing copy link: " + glGetProgramInfoLog(program, 4096))
       glDeleteShader(vs); glDeleteShader(fs)
       program
 
@@ -1018,13 +1704,20 @@ object BlockboxRayTrace:
 
   private def openDevice(): Device =
     val caps = org.lwjgl.opengl.GL.getCapabilities
-    if !caps.GL_EXT_memory_object_fd || !caps.GL_EXT_semaphore_fd then throw IllegalStateException("this OpenGL context has no memory/semaphore interop")
+    if !caps.GL_EXT_memory_object then
+      throw IllegalStateException("this OpenGL context cannot identify its graphics device")
     val glUuid = BufferUtils.createByteBuffer(16)
     GLMem.glGetUnsignedBytevEXT(GLMem.GL_DEVICE_UUID_EXT, glUuid)
     val stack = MemoryStack.stackPush()
     try
-      val app = VkApplicationInfo.calloc(stack).sType(VK_STRUCTURE_TYPE_APPLICATION_INFO).apiVersion(VK_API_VERSION_1_2)
-      val instanceInfo = VkInstanceCreateInfo.calloc(stack).sType(VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO).pApplicationInfo(app)
+      val app = VkApplicationInfo
+        .calloc(stack)
+        .sType(VK_STRUCTURE_TYPE_APPLICATION_INFO)
+        .apiVersion(VK_API_VERSION_1_2)
+      val instanceInfo = VkInstanceCreateInfo
+        .calloc(stack)
+        .sType(VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO)
+        .pApplicationInfo(app)
       val instanceOut = stack.mallocPointer(1)
       check(vkCreateInstance(instanceInfo, null, instanceOut), "instance")
       val instance = new VkInstance(instanceOut.get(0), instanceInfo)
@@ -1038,8 +1731,13 @@ object BlockboxRayTrace:
       var i = 0
       while i < n && chosen == null do
         val physical = new VkPhysicalDevice(devices.get(i), instance)
-        val id = VkPhysicalDeviceIDProperties.calloc(stack).sType(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES)
-        val props2 = VkPhysicalDeviceProperties2.calloc(stack).sType(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2).pNext(id.address())
+        val id = VkPhysicalDeviceIDProperties
+          .calloc(stack)
+          .sType(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES)
+        val props2 = VkPhysicalDeviceProperties2
+          .calloc(stack)
+          .sType(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2)
+          .pNext(id.address())
         vkGetPhysicalDeviceProperties2(physical, props2)
         val uuid = id.deviceUUID()
         var same = true
@@ -1054,12 +1752,24 @@ object BlockboxRayTrace:
       if chosen == null then
         vkDestroyInstance(instance, null)
         throw IllegalStateException("no Vulkan device matches this OpenGL context")
-      val ray = VkPhysicalDeviceRayQueryFeaturesKHR.calloc(stack).sType(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR)
-      val accel = VkPhysicalDeviceAccelerationStructureFeaturesKHR.calloc(stack).sType(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR).pNext(ray.address())
-      val address = VkPhysicalDeviceBufferDeviceAddressFeatures.calloc(stack).sType(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES).pNext(accel.address())
-      val features = VkPhysicalDeviceFeatures2.calloc(stack).sType(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2).pNext(address.address())
+      val ray = VkPhysicalDeviceRayQueryFeaturesKHR
+        .calloc(stack)
+        .sType(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR)
+      val accel = VkPhysicalDeviceAccelerationStructureFeaturesKHR
+        .calloc(stack)
+        .sType(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR)
+        .pNext(ray.address())
+      val address = VkPhysicalDeviceBufferDeviceAddressFeatures
+        .calloc(stack)
+        .sType(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES)
+        .pNext(accel.address())
+      val features = VkPhysicalDeviceFeatures2
+        .calloc(stack)
+        .sType(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2)
+        .pNext(address.address())
       vkGetPhysicalDeviceFeatures2(chosen, features)
-      if !ray.rayQuery || !accel.accelerationStructure || !address.bufferDeviceAddress || !features.features.shaderInt64 then
+      if !ray.rayQuery || !accel.accelerationStructure || !address.bufferDeviceAddress || !features.features.shaderInt64
+      then
         vkDestroyInstance(instance, null)
         throw IllegalStateException(s"$name does not expose ray queries")
       var family = -1
@@ -1070,28 +1780,44 @@ object BlockboxRayTrace:
       var q = 0
       while q < qCount.get(0) && family < 0 do
         val flags = queues.get(q).queueFlags
-        if (flags & VK_QUEUE_GRAPHICS_BIT) != 0 && (flags & VK_QUEUE_COMPUTE_BIT) != 0 then family = q
+        if (flags & VK_QUEUE_GRAPHICS_BIT) != 0 && (flags & VK_QUEUE_COMPUTE_BIT) != 0 then
+          family = q
         q += 1
       if family < 0 then
         vkDestroyInstance(instance, null)
         throw IllegalStateException("no graphics+compute queue")
-      ray.rayQuery(true); accel.accelerationStructure(true); address.bufferDeviceAddress(true); features.features.shaderInt64(true)
+      ray.rayQuery(true); accel.accelerationStructure(true); address.bufferDeviceAddress(true);
+      features.features.shaderInt64(true)
       val queueInfo = VkDeviceQueueCreateInfo.calloc(1, stack)
-      queueInfo.get(0).sType(VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO).queueFamilyIndex(family).pQueuePriorities(stack.floats(1f))
-      val extensions = stack.mallocPointer(5)
+      queueInfo
+        .get(0)
+        .sType(VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO)
+        .queueFamilyIndex(family)
+        .pQueuePriorities(stack.floats(1f))
+      val extensions = stack.mallocPointer(3)
       extensions.put(stack.UTF8(VK_KHR_RAY_QUERY_EXTENSION_NAME))
       extensions.put(stack.UTF8(VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME))
       extensions.put(stack.UTF8(VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME))
-      extensions.put(stack.UTF8(VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME))
-      extensions.put(stack.UTF8(VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME))
       extensions.flip()
-      val deviceInfo = VkDeviceCreateInfo.calloc(stack).sType(VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO).pNext(features.address()).pQueueCreateInfos(queueInfo).ppEnabledExtensionNames(extensions)
+      val deviceInfo = VkDeviceCreateInfo
+        .calloc(stack)
+        .sType(VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO)
+        .pNext(features.address())
+        .pQueueCreateInfos(queueInfo)
+        .ppEnabledExtensionNames(extensions)
       val deviceOut = stack.mallocPointer(1)
       check(vkCreateDevice(chosen, deviceInfo, null, deviceOut), "device")
       val device = new VkDevice(deviceOut.get(0), chosen, deviceInfo)
       val queueOut = stack.mallocPointer(1)
       vkGetDeviceQueue(device, family, 0, queueOut)
-      new Device(instance, chosen, device, new VkQueue(queueOut.get(0), device), family, s"$name, hardware ray queries")
+      new Device(
+        instance,
+        chosen,
+        device,
+        new VkQueue(queueOut.get(0), device),
+        family,
+        s"$name, hardware ray queries"
+      )
     finally stack.close()
 
   // Device.open is the public constructor path; keep Vulkan types out of the caller's class init.

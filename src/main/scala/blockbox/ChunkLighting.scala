@@ -2,11 +2,11 @@ package blockbox
 
 /** Worker-side sky light for chunk meshing.
   *
-  * The mesher copies a chunk and its eight neighbours into one dense array (x and z in
-  * -16..31 local coordinates). Sky light starts at 15 above every column, falls straight
-  * down without loss, is dimmed one level per foliage or water block, and then floods
-  * sideways and downward one level per step, so overhangs, cave mouths and tree canopies
-  * get soft Minecraft-style shadow instead of a binary "is the column open" test.
+  * The mesher copies a chunk and its eight neighbours into one dense array (x and z in -16..31
+  * local coordinates). Sky light starts at 15 above every column, falls straight down without loss,
+  * is dimmed one level per foliage or water block, and then floods sideways and downward one level
+  * per step, so overhangs, cave mouths and tree canopies get soft Minecraft-style shadow instead of
+  * a binary "is the column open" test.
   */
 private[blockbox] object ChunkLighting:
   val span: Int = Terrain.chunkSize * 3
@@ -20,8 +20,8 @@ private[blockbox] object ChunkLighting:
 
   val scratch: ThreadLocal[Scratch] = ThreadLocal.withInitial(() => Scratch())
 
-  /** Fills `s.sky` from `s.blocks`. `cost(id)` is 0 for clear blocks, 15 for opaque ones
-    * and the per-block dimming for everything in between.
+  /** Fills `s.sky` from `s.blocks`. `cost(id)` is 0 for clear blocks, 15 for opaque ones and the
+    * per-block dimming for everything in between.
     */
   def floodSky(s: Scratch, cost: Array[Int], height: Int): Unit =
     val region = s.blocks
@@ -36,7 +36,7 @@ private[blockbox] object ChunkLighting:
       var y = height - 1
       var i = y * layer + column
       while y >= 0 && level > 0 do
-        val c = cost(region(i) & 0xFF)
+        val c = cost(region(i) & 0xff)
         level = if c >= 15 then 0 else math.max(0, level - c)
         if level < 15 && top < 0 then top = y
         sky(i) = level.toByte
@@ -92,12 +92,13 @@ private[blockbox] object ChunkLighting:
             case 4 => if y > 0 then i - layer else -1
             case _ => if y < height - 1 then i + layer else -1
           if j >= 0 then
-            val c = cost(region(j) & 0xFF)
+            val c = cost(region(j) & 0xff)
             if c < 15 then
               val next = level - math.max(1, c)
               if next > sky(j) then
                 sky(j) = next.toByte
-                if tail == queue.length then queue = java.util.Arrays.copyOf(queue, queue.length * 2)
+                if tail == queue.length then
+                  queue = java.util.Arrays.copyOf(queue, queue.length * 2)
                 queue(tail) = j
                 tail += 1
           direction += 1

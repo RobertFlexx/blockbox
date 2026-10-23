@@ -13,15 +13,14 @@ enum TorchMount(val id: Int, val support: (Int, Int, Int)):
 
 object TorchMount:
   private val all = values
-  def fromId(id: Int): TorchMount = if id>=0 && id<all.length then all(id) else TorchMount.Floor
+  def fromId(id: Int): TorchMount = if id >= 0 && id < all.length then all(id) else TorchMount.Floor
 
   def fromNormal(normal: (Int, Int, Int)): Option[TorchMount] = normal match
-    case (0, 1, 0) => Some(TorchMount.Floor)
+    case (0, 1, 0)  => Some(TorchMount.Floor)
     case (-1, 0, 0) => Some(TorchMount.EastWall)
-    case (1, 0, 0) => Some(TorchMount.WestWall)
+    case (1, 0, 0)  => Some(TorchMount.WestWall)
     case (0, 0, -1) => Some(TorchMount.SouthWall)
-    case (0, 0, 1) => Some(TorchMount.NorthWall)
-    case _ => None
+    case (0, 0, 1)  => Some(TorchMount.NorthWall)
+    case _          => None
 
   def canSupport(block: Block): Boolean = block.solid && !block.cutout && block != Block.Cactus
-

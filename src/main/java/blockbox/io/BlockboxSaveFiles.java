@@ -38,10 +38,13 @@ public final class BlockboxSaveFiles {
       if (Character.isWhitespace(ch)) {
         pendingSpace = out.length() > 0;
       } else {
-        if (pendingSpace && out.length() < MAX_WORLD_NAME_LENGTH) out.append(' ');
+        if (pendingSpace && out.length() < MAX_WORLD_NAME_LENGTH)
+          out.append(' ');
         pendingSpace = false;
-        if (Character.isLetterOrDigit(ch) || ch == '_' || ch == '-' || ch == '(' || ch == ')') out.append(ch);
-        else out.append('_');
+        if (Character.isLetterOrDigit(ch) || ch == '_' || ch == '-' || ch == '(' || ch == ')')
+          out.append(ch);
+        else
+          out.append('_');
       }
     }
     String clean = out.toString().trim();
@@ -91,12 +94,14 @@ public final class BlockboxSaveFiles {
       int maxBase = Math.max(1, MAX_WORLD_NAME_LENGTH - suffix.length());
       candidate = base.substring(0, Math.min(base.length(), maxBase)).trim() + suffix;
       n++;
-      if (n < 0) throw new IOException("too many worlds named like: " + base);
+      if (n < 0)
+        throw new IOException("too many worlds named like: " + base);
     }
     return candidate;
   }
 
-  public static PreparedWorld prepareWorldForSave(Path worldsRoot, String worldName) throws IOException {
+  public static PreparedWorld prepareWorldForSave(Path worldsRoot, String worldName)
+      throws IOException {
     Path root = BlockboxFiles.ensureDirectory(worldsRoot);
     Path world = worldDirectory(root, worldName);
     Path chunks = chunksDirectory(world);
@@ -108,13 +113,15 @@ public final class BlockboxSaveFiles {
   public static PreparedWorld prepareWorldForSave(Path worldDirectory) throws IOException {
     Objects.requireNonNull(worldDirectory, "worldDirectory");
     Path world = BlockboxFiles.ensureDirectory(worldDirectory);
-    Path root = world.getParent() == null ? Path.of(".").toAbsolutePath().normalize() : world.getParent().toAbsolutePath().normalize();
+    Path root = world.getParent() == null ? Path.of(".").toAbsolutePath().normalize()
+                                          : world.getParent().toAbsolutePath().normalize();
     Path chunks = chunksDirectory(world);
     BlockboxFiles.ensureDirectory(chunks);
     return new PreparedWorld(root, world, chunks, worldDataFile(world));
   }
 
-  public static void writeWorldDataAtomic(Path worldDirectory, DataWriter writer) throws IOException {
+  public static void writeWorldDataAtomic(Path worldDirectory, DataWriter writer)
+      throws IOException {
     Objects.requireNonNull(writer, "writer");
     PreparedWorld prepared = prepareWorldForSave(worldDirectory);
     writeDataAtomic(prepared.worldDataFile(), writer);
@@ -123,43 +130,53 @@ public final class BlockboxSaveFiles {
   public static void readWorldData(Path worldDirectory, DataReader reader) throws IOException {
     Objects.requireNonNull(reader, "reader");
     Path file = worldDataFile(worldDirectory.toAbsolutePath().normalize());
-    if (!Files.isRegularFile(file)) throw new IOException("missing world data: " + file);
-    try (DataInputStream in = new DataInputStream(new BufferedInputStream(Files.newInputStream(file)))) {
+    if (!Files.isRegularFile(file))
+      throw new IOException("missing world data: " + file);
+    try (DataInputStream in =
+             new DataInputStream(new BufferedInputStream(Files.newInputStream(file)))) {
       reader.read(in);
     }
   }
 
-  public static void writeChunkDataAtomic(Path chunksDirectory, int chunkX, int chunkZ, DataWriter writer) throws IOException {
+  public static void writeChunkDataAtomic(
+      Path chunksDirectory, int chunkX, int chunkZ, DataWriter writer) throws IOException {
     Objects.requireNonNull(writer, "writer");
     Path dir = BlockboxFiles.ensureDirectory(chunksDirectory);
     writeDataAtomic(chunkFile(dir, chunkX, chunkZ), writer);
   }
 
   /** Write a pre-serialized world snapshot. Intended for the asynchronous save queue. */
-  public static void writeWorldBytesAtomic(Path worldDirectory, byte[] data, boolean syncParent) throws IOException {
+  public static void writeWorldBytesAtomic(Path worldDirectory, byte[] data, boolean syncParent)
+      throws IOException {
     PreparedWorld prepared = prepareWorldForSave(worldDirectory);
     BlockboxFiles.writeBytesAtomic(prepared.worldDataFile(), data, syncParent);
   }
 
   /** Write a pre-serialized chunk snapshot without touching live game state. */
-  public static void writeChunkBytesAtomic(Path chunksDirectory, int chunkX, int chunkZ, byte[] data, boolean syncParent) throws IOException {
+  public static void writeChunkBytesAtomic(Path chunksDirectory, int chunkX, int chunkZ,
+      byte[] data, boolean syncParent) throws IOException {
     Path dir = BlockboxFiles.ensureDirectory(chunksDirectory);
     BlockboxFiles.writeBytesAtomic(chunkFile(dir, chunkX, chunkZ), data, syncParent);
   }
 
   /** One durability barrier for a complete batch, instead of one per chunk. */
   public static void syncPreparedWorld(PreparedWorld prepared) {
-    if (prepared == null) return;
+    if (prepared == null)
+      return;
     BlockboxFiles.syncDirectory(prepared.chunksDirectory());
     BlockboxFiles.syncDirectory(prepared.worldDirectory());
   }
 
-  public static boolean readChunkDataIfPresent(Path chunksDirectory, int chunkX, int chunkZ, DataReader reader) throws IOException {
+  public static boolean readChunkDataIfPresent(
+      Path chunksDirectory, int chunkX, int chunkZ, DataReader reader) throws IOException {
     Objects.requireNonNull(reader, "reader");
     Path file = chunkFile(chunksDirectory.toAbsolutePath().normalize(), chunkX, chunkZ);
-    if (!Files.exists(file)) return false;
-    if (!Files.isRegularFile(file)) throw new IOException("chunk data is not a regular file: " + file);
-    try (DataInputStream in = new DataInputStream(new BufferedInputStream(Files.newInputStream(file)))) {
+    if (!Files.exists(file))
+      return false;
+    if (!Files.isRegularFile(file))
+      throw new IOException("chunk data is not a regular file: " + file);
+    try (DataInputStream in =
+             new DataInputStream(new BufferedInputStream(Files.newInputStream(file)))) {
       reader.read(in);
     }
     return true;
@@ -168,7 +185,8 @@ public final class BlockboxSaveFiles {
   public static List<WorldSave> listWorldSaves(Path worldsRoot) throws IOException {
     Objects.requireNonNull(worldsRoot, "worldsRoot");
     Path root = worldsRoot.toAbsolutePath().normalize();
-    if (!Files.isDirectory(root)) return List.of();
+    if (!Files.isDirectory(root))
+      return List.of();
     List<WorldSave> saves = new ArrayList<>();
     try (var stream = Files.list(root)) {
       stream.forEach(path -> {
@@ -176,13 +194,16 @@ public final class BlockboxSaveFiles {
           Path normalized = path.toAbsolutePath().normalize();
           Path worldData = worldDataFile(normalized);
           if (Files.isDirectory(normalized) && Files.isRegularFile(worldData)) {
-            saves.add(new WorldSave(normalized, worldData, Files.getLastModifiedTime(worldData).toMillis()));
+            saves.add(new WorldSave(
+                normalized, worldData, Files.getLastModifiedTime(worldData).toMillis()));
           }
         } catch (IOException ignored) {
         }
       });
     }
-    saves.sort(Comparator.comparingLong(WorldSave::lastModifiedMillis).reversed().thenComparing(save -> save.name().toLowerCase(java.util.Locale.ROOT)));
+    saves.sort(Comparator.comparingLong(WorldSave::lastModifiedMillis)
+            .reversed()
+            .thenComparing(save -> save.name().toLowerCase(java.util.Locale.ROOT)));
     return Collections.unmodifiableList(saves);
   }
 
@@ -209,13 +230,15 @@ public final class BlockboxSaveFiles {
 
   private static String safeWorldDirectoryName(String worldName) {
     String raw = worldName == null ? "" : worldName.trim();
-    if (raw.isEmpty() || raw.indexOf('\0') >= 0 || raw.indexOf('/') >= 0 || raw.indexOf('\\') >= 0 || ".".equals(raw) || "..".equals(raw) || Path.of(raw).isAbsolute()) {
+    if (raw.isEmpty() || raw.indexOf('\0') >= 0 || raw.indexOf('/') >= 0 || raw.indexOf('\\') >= 0
+        || ".".equals(raw) || "..".equals(raw) || Path.of(raw).isAbsolute()) {
       return sanitizeWorldName(raw);
     }
     return raw;
   }
 
-  public record PreparedWorld(Path worldsRoot, Path worldDirectory, Path chunksDirectory, Path worldDataFile) {}
+  public record PreparedWorld(
+      Path worldsRoot, Path worldDirectory, Path chunksDirectory, Path worldDataFile) {}
 
   public record WorldSave(Path directory, Path worldDataFile, long lastModifiedMillis) {
     public String name() {
@@ -224,6 +247,12 @@ public final class BlockboxSaveFiles {
     }
   }
 
-  @FunctionalInterface public interface DataWriter { void write(DataOutputStream out) throws IOException; }
-  @FunctionalInterface public interface DataReader { void read(DataInputStream in) throws IOException; }
+  @FunctionalInterface
+  public interface DataWriter {
+    void write(DataOutputStream out) throws IOException;
+  }
+  @FunctionalInterface
+  public interface DataReader {
+    void read(DataInputStream in) throws IOException;
+  }
 }

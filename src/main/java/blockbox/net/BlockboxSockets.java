@@ -31,7 +31,8 @@ public final class BlockboxSockets {
       bound = true;
       return server;
     } finally {
-      if (!bound) closeQuietly(server);
+      if (!bound)
+        closeQuietly(server);
     }
   }
 
@@ -47,11 +48,13 @@ public final class BlockboxSockets {
       connected = true;
       return socket;
     } finally {
-      if (!connected) closeQuietly(socket);
+      if (!connected)
+        closeQuietly(socket);
     }
   }
 
-  public static Socket connectTcp(String host, int port, int connectTimeoutMillis, int readTimeoutMillis) throws IOException {
+  public static Socket connectTcp(
+      String host, int port, int connectTimeoutMillis, int readTimeoutMillis) throws IOException {
     validateTimeout(readTimeoutMillis, "readTimeoutMillis");
     Socket socket = connectTcp(host, port, connectTimeoutMillis);
     socket.setSoTimeout(readTimeoutMillis);
@@ -71,16 +74,20 @@ public final class BlockboxSockets {
 
   public static BufferedReader utf8Reader(Socket socket) throws IOException {
     Objects.requireNonNull(socket, "socket");
-    return new BufferedReader(new InputStreamReader(socket.getInputStream(), StandardCharsets.UTF_8));
+    return new BufferedReader(
+        new InputStreamReader(socket.getInputStream(), StandardCharsets.UTF_8));
   }
 
   public static PrintWriter utf8Writer(Socket socket) throws IOException {
     Objects.requireNonNull(socket, "socket");
-    return new PrintWriter(new BufferedWriter(new OutputStreamWriter(socket.getOutputStream(), StandardCharsets.UTF_8)), false);
+    return new PrintWriter(new BufferedWriter(new OutputStreamWriter(
+                               socket.getOutputStream(), StandardCharsets.UTF_8)),
+        false);
   }
 
   public static boolean sendLine(PrintWriter writer, String line) {
-    if (writer == null || line == null) return false;
+    if (writer == null || line == null)
+      return false;
     writer.println(line);
     // PrintWriter.checkError() flushes before checking the underlying stream.
     // Keeping autoFlush disabled avoids flushing the socket twice per packet.
@@ -100,12 +107,14 @@ public final class BlockboxSockets {
   }
 
   public static void closeAllQuietly(Closeable... closeables) {
-    if (closeables == null) return;
+    if (closeables == null)
+      return;
     for (Closeable closeable : closeables) closeQuietly(closeable);
   }
 
   public static void closeQuietly(Closeable closeable) {
-    if (closeable == null) return;
+    if (closeable == null)
+      return;
     try {
       closeable.close();
     } catch (Exception ignored) {
@@ -113,7 +122,8 @@ public final class BlockboxSockets {
   }
 
   public static void closeQuietly(Socket socket) {
-    if (socket == null) return;
+    if (socket == null)
+      return;
     try {
       socket.close();
     } catch (Exception ignored) {
@@ -121,7 +131,8 @@ public final class BlockboxSockets {
   }
 
   public static void closeQuietly(ServerSocket socket) {
-    if (socket == null) return;
+    if (socket == null)
+      return;
     try {
       socket.close();
     } catch (Exception ignored) {
@@ -129,25 +140,31 @@ public final class BlockboxSockets {
   }
 
   public static String remoteAddress(Socket socket) {
-    if (socket == null || socket.getRemoteSocketAddress() == null) return "unknown";
+    if (socket == null || socket.getRemoteSocketAddress() == null)
+      return "unknown";
     return socket.getRemoteSocketAddress().toString();
   }
 
   private static void validateHost(String host) {
-    if (host == null || host.trim().isEmpty()) throw new IllegalArgumentException("host is required");
-    if (host.indexOf('\0') >= 0) throw new IllegalArgumentException("host contains NUL");
+    if (host == null || host.trim().isEmpty())
+      throw new IllegalArgumentException("host is required");
+    if (host.indexOf('\0') >= 0)
+      throw new IllegalArgumentException("host contains NUL");
   }
 
   private static void validatePort(int port) {
-    if (port < 1 || port > 65535) throw new IllegalArgumentException("port out of range: " + port);
+    if (port < 1 || port > 65535)
+      throw new IllegalArgumentException("port out of range: " + port);
   }
 
   private static void validateBindPort(int port) {
-    if (port < 0 || port > 65535) throw new IllegalArgumentException("port out of range: " + port);
+    if (port < 0 || port > 65535)
+      throw new IllegalArgumentException("port out of range: " + port);
   }
 
   private static void validateTimeout(int timeoutMillis, String name) {
-    if (timeoutMillis < 0) throw new IllegalArgumentException(name + " must be non-negative");
+    if (timeoutMillis < 0)
+      throw new IllegalArgumentException(name + " must be non-negative");
   }
 
   private static void trySetTrafficClass(Socket socket, int value) {

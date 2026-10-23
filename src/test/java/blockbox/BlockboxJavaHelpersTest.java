@@ -9,6 +9,7 @@ import blockbox.render.ViewFrustum;
 import blockbox.render.ShaderSources;
 import blockbox.render.RayFrameLayout;
 import blockbox.ai.VoxelNavigation;
+import blockbox.ai.AiWorkBudget;
 
 import java.io.BufferedReader;
 import java.io.IOException;
@@ -30,6 +31,7 @@ public final class BlockboxJavaHelpersTest {
     testShaderSources();
     testRayLayout();
     testNavigation();
+    testAiBudget();
     System.out.println("BlockboxJavaHelpersTest: OK");
   }
 
@@ -38,8 +40,11 @@ public final class BlockboxJavaHelpersTest {
     try {
       Path child = BlockboxFiles.safeChild(root, "worlds/save-1/index.txt");
       check(child.startsWith(root.toAbsolutePath().normalize()), "safe child stays under root");
-      expectIOException(() -> BlockboxFiles.safeChild(root, "../escape.txt"), "safeChild rejects parent escape");
-      expectIOException(() -> BlockboxFiles.safeChild(root, "/tmp/escape.txt"), "safeChild rejects absolute path");
+      expectIOException(
+          () -> BlockboxFiles.safeChild(root, "../escape.txt"), "safeChild rejects parent escape");
+      expectIOException(()
+                            -> BlockboxFiles.safeChild(root, "/tmp/escape.txt"),
+          "safeChild rejects absolute path");
 
       Path text = child;
       BlockboxFiles.writeTextAtomic(text, "hello");
@@ -51,8 +56,11 @@ public final class BlockboxJavaHelpersTest {
       BlockboxFiles.writeTextAtomic(nested, "copy me");
       Path dst = root.resolve("dst");
       BlockboxFiles.copyRecursive(src, dst);
-      check("copy me".equals(BlockboxFiles.readText(dst.resolve("a/b.txt"), 32)), "recursive copy preserves file contents");
-      expectIOException(() -> BlockboxFiles.copyRecursive(src, src.resolve("inside")), "copyRecursive rejects target inside source");
+      check("copy me".equals(BlockboxFiles.readText(dst.resolve("a/b.txt"), 32)),
+          "recursive copy preserves file contents");
+      expectIOException(()
+                            -> BlockboxFiles.copyRecursive(src, src.resolve("inside")),
+          "copyRecursive rejects target inside source");
 
       String hash1 = BlockboxFiles.sha256Tree(src);
       String hash2 = BlockboxFiles.sha256Tree(src);
@@ -63,10 +71,14 @@ public final class BlockboxJavaHelpersTest {
   }
 
   private static void testNet() throws Exception {
-    check(BlockboxNet.parseHello(BlockboxNet.packet("HELO|3|Legacy|vanilla")).badProtocol, "old world generation protocol rejected");
-    check(!BlockboxNet.parseHello(BlockboxNet.packet(BlockboxNet.helo("Player","vanilla"))).badProtocol, "current handshake accepted");
+    check(BlockboxNet.parseHello(BlockboxNet.packet("HELO|3|Legacy|vanilla")).badProtocol,
+        "old world generation protocol rejected");
+    check(!BlockboxNet.parseHello(BlockboxNet.packet(BlockboxNet.helo("Player", "vanilla")))
+              .badProtocol,
+        "current handshake accepted");
     String escaped = BlockboxNet.escape("a|b%c\n");
-    check("a|b%c ".equals(BlockboxNet.unescape(escaped)), "escape/unescape round trip for protocol separators");
+    check("a|b%c ".equals(BlockboxNet.unescape(escaped)),
+        "escape/unescape round trip for protocol separators");
 
     String pos = BlockboxNet.pos("Bad Name!", 1.25f, 2f, 3f, 90f, -10f, 99, 8);
     BlockboxNet.Packet packet = BlockboxNet.packet(pos);
@@ -74,34 +86,77 @@ public final class BlockboxJavaHelpersTest {
     check("BadName".equals(parsed.name), "position parser sanitizes player name");
     check(parsed.color == 3, "position parser normalizes color");
 
-    BlockboxNet.BlockPacket block = BlockboxNet.parseBlock(BlockboxNet.packet(BlockboxNet.block(1, 2, 3, 4, 8)), 64);
-    check(block.x == 1 && block.y == 2 && block.z == 3 && block.blockId == 4 && block.waterLevel == 8, "block parser accepts water level");
-    BlockboxNet.BlockPacket torch = BlockboxNet.parseBlock(BlockboxNet.packet(BlockboxNet.block(1, 2, 3, 34, 0, 0, 4)), 64);
+    BlockboxNet.BlockPacket block =
+        BlockboxNet.parseBlock(BlockboxNet.packet(BlockboxNet.block(1, 2, 3, 4, 8)), 64);
+    check(
+        block.x == 1 && block.y == 2 && block.z == 3 && block.blockId == 4 && block.waterLevel == 8,
+        "block parser accepts water level");
+    BlockboxNet.BlockPacket torch =
+        BlockboxNet.parseBlock(BlockboxNet.packet(BlockboxNet.block(1, 2, 3, 34, 0, 0, 4)), 64);
     check(torch.torchMount == 4, "block parser preserves torch attachment");
-    expectIllegalArgument(() -> BlockboxNet.parseBlock(BlockboxNet.packet("BLOC|1|2|3|34|0|0|5"), 64), "invalid torch attachment rejected");
-    expectIllegalArgument(() -> BlockboxNet.parseBlock(BlockboxNet.packet("BLOC|30000001|2|3|1"), 64), "block coordinates outside world bounds rejected");
-    expectIllegalArgument(() -> BlockboxNet.parseBlock(BlockboxNet.packet("BLOC|1|2|3|-1"), 64), "negative block ID rejected");
-    check(BlockboxNet.blockChecksum(0,1,2,3,34,0,0,1) != BlockboxNet.blockChecksum(0,1,2,3,34,0,0,2), "snapshot checksum includes torch attachment");
-    expectIllegalArgument(() -> BlockboxNet.parseBlock(BlockboxNet.packet(BlockboxNet.block(1, 64, 3, 4)), 64), "block parser bounds y");
+    expectIllegalArgument(
+        ()
+            -> BlockboxNet.parseBlock(BlockboxNet.packet("BLOC|1|2|3|34|0|0|5"), 64),
+        "invalid torch attachment rejected");
+    expectIllegalArgument(
+        ()
+            -> BlockboxNet.parseBlock(BlockboxNet.packet("BLOC|30000001|2|3|1"), 64),
+        "block coordinates outside world bounds rejected");
+    expectIllegalArgument(()
+                              -> BlockboxNet.parseBlock(BlockboxNet.packet("BLOC|1|2|3|-1"), 64),
+        "negative block ID rejected");
+    check(BlockboxNet.blockChecksum(0, 1, 2, 3, 34, 0, 0, 1)
+            != BlockboxNet.blockChecksum(0, 1, 2, 3, 34, 0, 0, 2),
+        "snapshot checksum includes torch attachment");
+    expectIllegalArgument(
+        ()
+            -> BlockboxNet.parseBlock(BlockboxNet.packet(BlockboxNet.block(1, 64, 3, 4)), 64),
+        "block parser bounds y");
     expectIllegalArgument(() -> BlockboxNet.packet("bad|packet"), "packet rejects bad type");
 
-    String line = BlockboxNet.readProtocolLine(new BufferedReader(new StringReader("PING\r\nNEXT\n")));
+    String line =
+        BlockboxNet.readProtocolLine(new BufferedReader(new StringReader("PING\r\nNEXT\n")));
     check("PING".equals(line), "bounded protocol reader handles CRLF");
-    expectIOException(() -> BlockboxNet.readProtocolLine(new BufferedReader(new StringReader("A".repeat(BlockboxNet.MAX_LINE_LENGTH + 1) + "\n"))), "bounded protocol reader rejects long line");
-    expectIOException(() -> BlockboxNet.readProtocolLine(new BufferedReader(new StringReader("\r".repeat(BlockboxNet.MAX_LINE_LENGTH+2)+"\n"))), "carriage returns cannot bypass line budget");
-    expectIllegalArgument(() -> BlockboxNet.parsePosition(BlockboxNet.packet("POS|Player|1e30|60|0|0|0|0"),10), "position rejects coordinates outside world bounds");
-    var environment = BlockboxNet.parseEnvironment(BlockboxNet.packet("ENV|150|-1|0.5|0.7|0.8|-0.2|1"));
-    check(environment.time() == 150 && environment.rain() == 0.5f && environment.timeOverride() == -1, "environment packet round trip");
-    expectIllegalArgument(() -> BlockboxNet.parseEnvironment(BlockboxNet.packet("ENV|NaN|-1|0|0|0|0|0")), "environment rejects NaN");
-    expectIllegalArgument(() -> BlockboxNet.parseEnvironment(BlockboxNet.packet("ENV|150|-1|2|0|0|0|0")), "environment rejects out of range rain");
-    expectIllegalArgument(() -> BlockboxNet.parseEnvironment(BlockboxNet.packet("ENV|150|-1|0|0|0|0")), "environment rejects truncated state");
+    expectIOException(()
+                          -> BlockboxNet.readProtocolLine(new BufferedReader(new StringReader(
+                              "A".repeat(BlockboxNet.MAX_LINE_LENGTH + 1) + "\n"))),
+        "bounded protocol reader rejects long line");
+    expectIOException(()
+                          -> BlockboxNet.readProtocolLine(new BufferedReader(new StringReader(
+                              "\r".repeat(BlockboxNet.MAX_LINE_LENGTH + 2) + "\n"))),
+        "carriage returns cannot bypass line budget");
+    expectIllegalArgument(
+        ()
+            -> BlockboxNet.parsePosition(BlockboxNet.packet("POS|Player|1e30|60|0|0|0|0"), 10),
+        "position rejects coordinates outside world bounds");
+    var environment =
+        BlockboxNet.parseEnvironment(BlockboxNet.packet("ENV|150|-1|0.5|0.7|0.8|-0.2|1"));
+    check(
+        environment.time() == 150 && environment.rain() == 0.5f && environment.timeOverride() == -1,
+        "environment packet round trip");
+    expectIllegalArgument(
+        ()
+            -> BlockboxNet.parseEnvironment(BlockboxNet.packet("ENV|NaN|-1|0|0|0|0|0")),
+        "environment rejects NaN");
+    expectIllegalArgument(
+        ()
+            -> BlockboxNet.parseEnvironment(BlockboxNet.packet("ENV|150|-1|2|0|0|0|0")),
+        "environment rejects out of range rain");
+    expectIllegalArgument(
+        ()
+            -> BlockboxNet.parseEnvironment(BlockboxNet.packet("ENV|150|-1|0|0|0|0")),
+        "environment rejects truncated state");
   }
 
   private static void testPacketBudget() throws Exception {
-    expectIllegalArgument(()->new PacketBudget(Double.POSITIVE_INFINITY,2,0),"non-finite packet rate rejected");
-    expectIllegalArgument(()->new PacketBudget(10,Double.POSITIVE_INFINITY,0),"non-finite packet capacity rejected");
-    PacketBudget wrap=new PacketBudget(10,1,Long.MAX_VALUE-100_000_000L);
-    check(wrap.allow(Long.MAX_VALUE-100_000_000L) && wrap.allow(Long.MIN_VALUE+100_000_000L),"nanoTime wrap preserves refill");
+    expectIllegalArgument(
+        () -> new PacketBudget(Double.POSITIVE_INFINITY, 2, 0), "non-finite packet rate rejected");
+    expectIllegalArgument(()
+                              -> new PacketBudget(10, Double.POSITIVE_INFINITY, 0),
+        "non-finite packet capacity rejected");
+    PacketBudget wrap = new PacketBudget(10, 1, Long.MAX_VALUE - 100_000_000L);
+    check(wrap.allow(Long.MAX_VALUE - 100_000_000L) && wrap.allow(Long.MIN_VALUE + 100_000_000L),
+        "nanoTime wrap preserves refill");
     PacketBudget budget = new PacketBudget(10, 2, 1_000_000_000L);
     check(budget.allow(1_000_000_000L) && budget.allow(1_000_000_000L), "packet burst allowed");
     check(!budget.allow(1_000_000_000L), "packet burst bounded");
@@ -112,59 +167,91 @@ public final class BlockboxJavaHelpersTest {
 
   private static void testFrustum() throws Exception {
     ViewFrustum frustum = new ViewFrustum();
-    float[] identity = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
-    expectIllegalArgument(()->frustum.update(new float[3],identity),"truncated frustum matrix rejected");
-    float[] bad=identity.clone(); bad[0]=Float.NaN;
-    expectIllegalArgument(()->frustum.update(bad,identity),"NaN frustum matrix rejected");
-    expectIllegalArgument(()->frustum.intersects(2,0,0,1,1,1),"inverted bounds rejected");
+    float[] identity = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+    expectIllegalArgument(
+        () -> frustum.update(new float[3], identity), "truncated frustum matrix rejected");
+    float[] bad = identity.clone();
+    bad[0] = Float.NaN;
+    expectIllegalArgument(() -> frustum.update(bad, identity), "NaN frustum matrix rejected");
+    expectIllegalArgument(() -> frustum.intersects(2, 0, 0, 1, 1, 1), "inverted bounds rejected");
     frustum.update(identity, identity);
-    check(frustum.intersects(-1,-1,-1,1,1,1), "frustum includes its boundary");
-    check(!frustum.intersects(2,2,2,3,3,3), "frustum rejects outside bounds");
-    for (float aspect : new float[]{1, 16f/9, 32f/9}) {
-      float f = (float)(1 / Math.tan(Math.toRadians(70) / 2));
+    check(frustum.intersects(-1, -1, -1, 1, 1, 1), "frustum includes its boundary");
+    check(!frustum.intersects(2, 2, 2, 3, 3, 3), "frustum rejects outside bounds");
+    for (float aspect : new float[] {1, 16f / 9, 32f / 9}) {
+      float f = (float) (1 / Math.tan(Math.toRadians(70) / 2));
       float near = 0.25f, far = 1200;
-      float[] projection = {f/aspect,0,0,0, 0,f,0,0, 0,0,(far+near)/(near-far),-1, 0,0,2*far*near/(near-far),0};
+      float[] projection = {f / aspect, 0, 0, 0, 0, f, 0, 0, 0, 0, (far + near) / (near - far), -1,
+          0, 0, 2 * far * near / (near - far), 0};
       for (int yaw = 0; yaw < 360; yaw += 45) {
         double angle = Math.toRadians(yaw);
-        float c = (float)Math.cos(angle), s = (float)Math.sin(angle);
+        float c = (float) Math.cos(angle), s = (float) Math.sin(angle);
         // R_x(90) R_y(yaw) T_y(-300), matching the game's camera matrix.
-        float[] view = {c,s,0,0, 0,0,1,0, s,-c,0,0, 0,0,-300,1};
-        frustum.update(projection,view);
+        float[] view = {c, s, 0, 0, 0, 0, 1, 0, s, -c, 0, 0, 0, 0, -300, 1};
+        frustum.update(projection, view);
         for (int x = -64; x <= 64; x += 16) {
           for (int z = -64; z <= 64; z += 16) {
-            check(frustum.intersects(x,0,z,x+16,128,z+16), "aerial view retains ground in every yaw/aspect");
+            check(frustum.intersects(x, 0, z, x + 16, 128, z + 16),
+                "aerial view retains ground in every yaw/aspect");
           }
         }
       }
       frustum.update(projection, identity);
-      check(frustum.intersects(-1,-1,-20,1,1,-18), "forward terrain visible");
-      check(!frustum.intersects(-1,-1,18,1,1,20), "terrain behind horizontal camera culled");
+      check(frustum.intersects(-1, -1, -20, 1, 1, -18), "forward terrain visible");
+      check(!frustum.intersects(-1, -1, 18, 1, 1, 20), "terrain behind horizontal camera culled");
     }
   }
 
   private static void testRayLayout() throws Exception {
-    check(RayFrameLayout.groups(1)==1 && RayFrameLayout.groups(8)==1 && RayFrameLayout.groups(9)==2,"GPU dispatch covers partial workgroups");
-    expectIllegalArgument(()->RayFrameLayout.groups(Integer.MAX_VALUE),"oversized GPU target rejected before integer overflow");
-    var data=java.nio.ByteBuffer.allocateDirect(80);
-    float[] matrix={1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
-    RayFrameLayout.matrix(data,matrix); RayFrameLayout.vector(data,1,2,3,4);
-    check(data.position()==80 && data.getFloat(64)==1 && data.getFloat(76)==4,"native frame layout preserves matrices and vector alignment");
-    data.clear(); matrix[3]=Float.NaN;
-    expectIllegalArgument(()->RayFrameLayout.matrix(data,matrix),"non-finite GPU matrix rejected");
-    check(data.position()==0,"failed frame validation writes no partial matrix");
+    check(RayFrameLayout.groups(1) == 1 && RayFrameLayout.groups(8) == 1
+            && RayFrameLayout.groups(9) == 2,
+        "GPU dispatch covers partial workgroups");
+    expectIllegalArgument(()
+                              -> RayFrameLayout.groups(Integer.MAX_VALUE),
+        "oversized GPU target rejected before integer overflow");
+    var data = java.nio.ByteBuffer.allocateDirect(80);
+    float[] matrix = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+    RayFrameLayout.matrix(data, matrix);
+    RayFrameLayout.vector(data, 1, 2, 3, 4);
+    check(data.position() == 80 && data.getFloat(64) == 1 && data.getFloat(76) == 4,
+        "native frame layout preserves matrices and vector alignment");
+    data.clear();
+    matrix[3] = Float.NaN;
+    expectIllegalArgument(
+        () -> RayFrameLayout.matrix(data, matrix), "non-finite GPU matrix rejected");
+    check(data.position() == 0, "failed frame validation writes no partial matrix");
   }
 
   private static void testNavigation() {
-    VoxelNavigation.Cells wall=(x,y,z)->y==0 || (z==-3 && Math.abs(x)<=2 && y>=1 && y<=3) ? VoxelNavigation.SOLID : 0;
-    var route=VoxelNavigation.find(wall,0,1,0,0,1,-7,16,768);
-    check(!route.isEmpty() && route.getLast().z()==-7,"zombies find a route around a tall wall");
-    check(route.stream().anyMatch(p->Math.abs(p.x())>=3),"route goes around the obstruction");
-    VoxelNavigation.Cells cliff=(x,y,z)->y==0 && x<3 ? VoxelNavigation.SOLID : 0;
-    var safe=VoxelNavigation.find(cliff,0,1,0,8,1,0,12,256);
-    check(safe.stream().allMatch(p->p.x()<3),"unreachable target cannot route the actor into a cliff");
-    VoxelNavigation.Cells stairs=(x,y,z)->y==0 || (x==2 && y==1) ? VoxelNavigation.SOLID : 0;
-    check(VoxelNavigation.find(stairs,0,1,0,4,1,0,8,128).stream().anyMatch(p->p.y()==2),"route climbs a one-block step");
-    check(VoxelNavigation.find(wall,0,1,0,0,1,-7,16,1).size()<=1,"path search honors its work budget");
+    VoxelNavigation.Cells wall = (x, y, z)
+        -> y == 0 || (z == -3 && Math.abs(x) <= 2 && y >= 1 && y <= 3) ? VoxelNavigation.SOLID : 0;
+    var route = VoxelNavigation.find(wall, 0, 1, 0, 0, 1, -7, 16, 768);
+    check(!route.isEmpty() && route.getLast().z() == -7, "zombies find a route around a tall wall");
+    check(route.stream().anyMatch(p -> Math.abs(p.x()) >= 3), "route goes around the obstruction");
+    VoxelNavigation.Cells cliff = (x, y, z) -> y == 0 && x < 3 ? VoxelNavigation.SOLID : 0;
+    var safe = VoxelNavigation.find(cliff, 0, 1, 0, 8, 1, 0, 12, 256);
+    check(safe.stream().allMatch(p -> p.x() < 3),
+        "unreachable target cannot route the actor into a cliff");
+    VoxelNavigation.Cells stairs =
+        (x, y, z) -> y == 0 || (x == 2 && y == 1) ? VoxelNavigation.SOLID : 0;
+    check(VoxelNavigation.find(stairs, 0, 1, 0, 4, 1, 0, 8, 128).stream().anyMatch(p -> p.y() == 2),
+        "route climbs a one-block step");
+    check(VoxelNavigation.find(wall, 0, 1, 0, 0, 1, -7, 16, 1).size() <= 1,
+        "path search honors its work budget");
+  }
+
+  private static void testAiBudget() throws Exception {
+    AiWorkBudget budget = new AiWorkBudget(48, 3);
+    check(budget.tryAcquire() && budget.tryAcquire() && budget.tryAcquire() && !budget.tryAcquire(),
+        "AI planning cannot exceed its burst");
+    budget.advance(1f / 48);
+    check(budget.tryAcquire() && !budget.tryAcquire(), "planning replenishes over simulation time");
+    budget.advance(60);
+    int searches = 0;
+    while (budget.tryAcquire()) searches++;
+    check(searches == 3, "a frame stall cannot accumulate an unbounded AI backlog");
+    expectIllegalArgument(() -> budget.advance(Float.NaN), "nonfinite AI time rejected");
+    expectIllegalArgument(
+        () -> new AiWorkBudget(Double.POSITIVE_INFINITY, 1), "nonfinite AI rate rejected");
   }
 
   private static void testShaderSources() throws Exception {
@@ -174,18 +261,24 @@ public final class BlockboxJavaHelpersTest {
       Files.writeString(shaders.resolve("shared.glsl"), "vec3 tint = vec3(1);\n");
       Path entry = root.resolve("shaders/main.fsh");
       Files.writeString(entry, "#version 120\n#include \"/lib/shared.glsl\"\nvoid main() {}\n");
-      check(ShaderSources.read(entry, shaders.getParent()).contains("vec3 tint"), "root-relative shader include expands");
+      check(ShaderSources.read(entry, shaders.getParent()).contains("vec3 tint"),
+          "root-relative shader include expands");
       Files.writeString(root.resolve("outside.glsl"), "private data");
       Files.writeString(entry, "#include \"../outside.glsl\"\n");
-      expectIOException(() -> ShaderSources.read(entry, shaders.getParent()), "shader traversal rejected");
+      expectIOException(
+          () -> ShaderSources.read(entry, shaders.getParent()), "shader traversal rejected");
       Path link = shaders.resolve("link.glsl");
       Files.createSymbolicLink(link, root.resolve("outside.glsl"));
       Files.writeString(entry, "#include \"lib/link.glsl\"\n");
-      expectIOException(() -> ShaderSources.read(entry, shaders.getParent()), "shader symlink escape rejected");
+      expectIOException(
+          () -> ShaderSources.read(entry, shaders.getParent()), "shader symlink escape rejected");
       Files.writeString(entry, "#include \"main.fsh\"\n");
-      expectIOException(() -> ShaderSources.read(entry, shaders.getParent()), "recursive shader include rejected");
-      Files.writeString(entry, "x".repeat(1024*1024+1));
-      expectIOException(() -> ShaderSources.read(entry, shaders.getParent()), "oversized shader source rejected");
+      expectIOException(()
+                            -> ShaderSources.read(entry, shaders.getParent()),
+          "recursive shader include rejected");
+      Files.writeString(entry, "x".repeat(1024 * 1024 + 1));
+      expectIOException(
+          () -> ShaderSources.read(entry, shaders.getParent()), "oversized shader source rejected");
     } finally {
       BlockboxFiles.deleteRecursive(root);
     }
@@ -194,14 +287,22 @@ public final class BlockboxJavaHelpersTest {
   private static void testSaveFiles() throws Exception {
     Path root = Files.createTempDirectory("blockbox-saves-test");
     try {
-      check("New World".equals(BlockboxSaveFiles.sanitizeWorldName("   ")), "save name sanitizer has fallback");
-      check("World (2)".equals(BlockboxSaveFiles.sanitizeWorldName("World (2)")), "save name sanitizer preserves numbered names");
-      check("World_One".equals(BlockboxSaveFiles.sanitizeWorldName("World/One")), "save name sanitizer removes path separators");
-      check("manual.world".equals(BlockboxSaveFiles.worldDirectory(root, "manual.world").getFileName().toString()), "worldDirectory preserves safe existing names");
+      check("New World".equals(BlockboxSaveFiles.sanitizeWorldName("   ")),
+          "save name sanitizer has fallback");
+      check("World (2)".equals(BlockboxSaveFiles.sanitizeWorldName("World (2)")),
+          "save name sanitizer preserves numbered names");
+      check("World_One".equals(BlockboxSaveFiles.sanitizeWorldName("World/One")),
+          "save name sanitizer removes path separators");
+      check("manual.world".equals(
+                BlockboxSaveFiles.worldDirectory(root, "manual.world").getFileName().toString()),
+          "worldDirectory preserves safe existing names");
 
-      BlockboxSaveFiles.PreparedWorld prepared = BlockboxSaveFiles.prepareWorldForSave(root, "World One");
-      check(Files.isDirectory(prepared.worldDirectory()), "prepareWorldForSave creates world directory");
-      check(Files.isDirectory(prepared.chunksDirectory()), "prepareWorldForSave creates chunks directory");
+      BlockboxSaveFiles.PreparedWorld prepared =
+          BlockboxSaveFiles.prepareWorldForSave(root, "World One");
+      check(Files.isDirectory(prepared.worldDirectory()),
+          "prepareWorldForSave creates world directory");
+      check(Files.isDirectory(prepared.chunksDirectory()),
+          "prepareWorldForSave creates chunks directory");
 
       BlockboxSaveFiles.writeWorldDataAtomic(prepared.worldDirectory(), out -> {
         out.writeLong(1234L);
@@ -212,15 +313,17 @@ public final class BlockboxJavaHelpersTest {
         check("metadata".equals(in.readUTF()), "world data UTF round trip");
       });
 
-      BlockboxSaveFiles.writeChunkDataAtomic(prepared.chunksDirectory(), -4, 7, out -> {
-        out.writeInt(99);
-      });
-      boolean loaded = BlockboxSaveFiles.readChunkDataIfPresent(prepared.chunksDirectory(), -4, 7, in -> check(in.readInt() == 99, "chunk data round trip"));
+      BlockboxSaveFiles.writeChunkDataAtomic(
+          prepared.chunksDirectory(), -4, 7, out -> { out.writeInt(99); });
+      boolean loaded = BlockboxSaveFiles.readChunkDataIfPresent(prepared.chunksDirectory(), -4, 7,
+          in -> check(in.readInt() == 99, "chunk data round trip"));
       check(loaded, "readChunkDataIfPresent reports existing chunk");
-      boolean missing = BlockboxSaveFiles.readChunkDataIfPresent(prepared.chunksDirectory(), 100, 100, in -> {});
+      boolean missing =
+          BlockboxSaveFiles.readChunkDataIfPresent(prepared.chunksDirectory(), 100, 100, in -> {});
       check(!missing, "readChunkDataIfPresent reports missing chunk");
 
-      check("World One (2)".equals(BlockboxSaveFiles.uniqueWorldName(root, "World One")), "uniqueWorldName appends numbered suffix");
+      check("World One (2)".equals(BlockboxSaveFiles.uniqueWorldName(root, "World One")),
+          "uniqueWorldName appends numbered suffix");
       check(BlockboxSaveFiles.listWorldSaves(root).size() == 1, "listWorldSaves finds valid world");
       BlockboxSaveFiles.writeWorldIndex(root);
       String index = BlockboxFiles.readText(root.resolve(BlockboxSaveFiles.INDEX_FILE), 1024);
@@ -231,9 +334,12 @@ public final class BlockboxJavaHelpersTest {
   }
 
   private static void testSockets() throws Exception {
-    expectIllegalArgument(() -> BlockboxSockets.bindIpv4Server(-1), "server bind rejects invalid port");
-    expectIllegalArgument(() -> BlockboxSockets.connectTcp("", 25565, 1), "connect rejects blank host");
-    expectIllegalArgument(() -> BlockboxSockets.connectTcp("localhost", 70000, 1), "connect rejects invalid port");
+    expectIllegalArgument(
+        () -> BlockboxSockets.bindIpv4Server(-1), "server bind rejects invalid port");
+    expectIllegalArgument(
+        () -> BlockboxSockets.connectTcp("", 25565, 1), "connect rejects blank host");
+    expectIllegalArgument(
+        () -> BlockboxSockets.connectTcp("localhost", 70000, 1), "connect rejects invalid port");
     Thread thread = BlockboxSockets.daemonThread("", () -> {});
     check(thread.isDaemon(), "daemonThread creates daemon thread");
     if ("1".equals(System.getenv("BLOCKBOX_SKIP_SOCKET_TESTS"))) {
@@ -246,7 +352,8 @@ public final class BlockboxJavaHelpersTest {
   }
 
   private static void check(boolean condition, String message) {
-    if (!condition) throw new AssertionError(message);
+    if (!condition)
+      throw new AssertionError(message);
   }
 
   private static void expectIOException(IoRunnable runnable, String message) throws Exception {
@@ -257,7 +364,8 @@ public final class BlockboxJavaHelpersTest {
     }
   }
 
-  private static void expectIllegalArgument(ThrowingRunnable runnable, String message) throws Exception {
+  private static void expectIllegalArgument(ThrowingRunnable runnable, String message)
+      throws Exception {
     try {
       runnable.run();
       throw new AssertionError(message);
@@ -265,6 +373,12 @@ public final class BlockboxJavaHelpersTest {
     }
   }
 
-  @FunctionalInterface private interface IoRunnable { void run() throws Exception; }
-  @FunctionalInterface private interface ThrowingRunnable { void run() throws Exception; }
+  @FunctionalInterface
+  private interface IoRunnable {
+    void run() throws Exception;
+  }
+  @FunctionalInterface
+  private interface ThrowingRunnable {
+    void run() throws Exception;
+  }
 }

@@ -7,14 +7,25 @@ import scala.collection.mutable.ArrayBuffer
 import scala.math.*
 import scala.util.Random
 
-/** Living torches: a soft flickering glow around each nearby flame, small flame wisps
-  * and drifting smoke, like Minecraft's torch particles. Flame positions come from the
-  * chunks' light sources and are refreshed a few times per second by the game.
+/** Living torches: a soft flickering glow around each nearby flame, small flame wisps and drifting
+  * smoke, like Minecraft's torch particles. Flame positions come from the chunks' light sources and
+  * are refreshed a few times per second by the game.
   */
 object TorchEffects:
   final case class Flame(x: Float, y: Float, z: Float)
-  private final class Particle(var x: Float, var y: Float, var z: Float, var vx: Float, var vy: Float, var vz: Float,
-                               var life: Float, val maxLife: Float, val size: Float, val smoke: Boolean, val phase: Float)
+  private final class Particle(
+      var x: Float,
+      var y: Float,
+      var z: Float,
+      var vx: Float,
+      var vy: Float,
+      var vz: Float,
+      var life: Float,
+      val maxLife: Float,
+      val size: Float,
+      val smoke: Boolean,
+      val phase: Float
+  )
   private val particles = ArrayBuffer.empty[Particle]
   private val rng = Random(0x70c4b1L)
   private var flames: Array[Flame] = Array.empty
@@ -31,7 +42,9 @@ object TorchEffects:
   /** Per-flame flicker around 1, desynchronised by position. */
   def flicker(f: Flame, time: Float): Float =
     val seed = f.x * 12.9898f + f.z * 78.233f + f.y * 3.17f
-    (1.0 + 0.07 * sin(time * 9.1 + seed) + 0.05 * sin(time * 15.3 + seed * 1.7) + 0.03 * sin(time * 23.7 + seed * 0.3)).toFloat
+    (1.0 + 0.07 * sin(time * 9.1 + seed) + 0.05 * sin(time * 15.3 + seed * 1.7) + 0.03 * sin(
+      time * 23.7 + seed * 0.3
+    )).toFloat
 
   def update(dt: Float, camera: Vec3): Unit =
     var i = particles.length - 1
@@ -59,13 +72,34 @@ object TorchEffects:
       if dx * dx + dy * dy + dz * dz < r2 then
         if rng.nextFloat() < dt * 1.7f then
           val life = 0.35f + rng.nextFloat() * 0.30f
-          particles += Particle(flame.x + (rng.nextFloat() - 0.5f) * 0.05f, flame.y - 0.02f, flame.z + (rng.nextFloat() - 0.5f) * 0.05f,
-            0f, 0.20f + rng.nextFloat() * 0.12f, 0f, life, life, 0.030f + rng.nextFloat() * 0.018f, false, rng.nextFloat() * 6.28f)
+          particles += Particle(
+            flame.x + (rng.nextFloat() - 0.5f) * 0.05f,
+            flame.y - 0.02f,
+            flame.z + (rng.nextFloat() - 0.5f) * 0.05f,
+            0f,
+            0.20f + rng.nextFloat() * 0.12f,
+            0f,
+            life,
+            life,
+            0.030f + rng.nextFloat() * 0.018f,
+            false,
+            rng.nextFloat() * 6.28f
+          )
         if rng.nextFloat() < dt * 0.85f then
           val life = 1.4f + rng.nextFloat() * 1.1f
-          particles += Particle(flame.x + (rng.nextFloat() - 0.5f) * 0.06f, flame.y + 0.12f, flame.z + (rng.nextFloat() - 0.5f) * 0.06f,
-            (rng.nextFloat() - 0.5f) * 0.05f, 0.42f + rng.nextFloat() * 0.18f, (rng.nextFloat() - 0.5f) * 0.05f,
-            life, life, 0.045f + rng.nextFloat() * 0.025f, true, rng.nextFloat() * 6.28f)
+          particles += Particle(
+            flame.x + (rng.nextFloat() - 0.5f) * 0.06f,
+            flame.y + 0.12f,
+            flame.z + (rng.nextFloat() - 0.5f) * 0.06f,
+            (rng.nextFloat() - 0.5f) * 0.05f,
+            0.42f + rng.nextFloat() * 0.18f,
+            (rng.nextFloat() - 0.5f) * 0.05f,
+            life,
+            life,
+            0.045f + rng.nextFloat() * 0.025f,
+            true,
+            rng.nextFloat() * 6.28f
+          )
       f += 1
 
   private def ensureTexture(): Unit =
@@ -88,17 +122,29 @@ object TorchEffects:
     glBindTexture(GL_TEXTURE_2D, 0)
 
   /** Draws in the world pass: x/z relative to the camera, y absolute (as block particles).
-    * @param night 0 at noon .. 1 at night; the glow is subtle by day and strong at night
-    * @param light terrain light colour at a world position, for smoke
+    * @param night
+    *   0 at noon .. 1 at night; the glow is subtle by day and strong at night
+    * @param light
+    *   terrain light colour at a world position, for smoke
     */
-  def render(camera: Vec3, yaw: Float, pitch: Float, time: Float, night: Float,
-             light: (Float, Float, Float) => (Float, Float, Float)): Unit =
+  def render(
+      camera: Vec3,
+      yaw: Float,
+      pitch: Float,
+      time: Float,
+      night: Float,
+      light: (Float, Float, Float) => (Float, Float, Float)
+  ): Unit =
     if flames.isEmpty && particles.isEmpty then return
     ensureTexture()
     val forward = BlockboxRaycast.viewDirection(yaw, pitch)
     val ry = toRadians(yaw)
     val right = Vec3(cos(ry).toFloat, 0f, sin(ry).toFloat)
-    val up = Vec3(right.y * forward.z - right.z * forward.y, right.z * forward.x - right.x * forward.z, right.x * forward.y - right.y * forward.x)
+    val up = Vec3(
+      right.y * forward.z - right.z * forward.y,
+      right.z * forward.x - right.x * forward.z,
+      right.x * forward.y - right.y * forward.x
+    )
     def billboard(x: Float, y: Float, z: Float, s: Float): Unit =
       val rx = right.x * s; val rz = right.z * s
       val ux = up.x * s; val uy = up.y * s; val uz = up.z * s

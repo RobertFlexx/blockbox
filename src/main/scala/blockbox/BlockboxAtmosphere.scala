@@ -8,46 +8,77 @@ import scala.math.*
 
 /** Continuous sky color, evaluated per pixel rather than interpolated across dome rings.
   *
-  * A vertical gradient carries the time of day. At sunrise and sunset a broad twilight
-  * band hugs the horizon (orange toward the sun, mauve-pink opposite it) under a deeper
-  * zenith, and forward scattering puts a soft corona around the sun all day.
+  * A vertical gradient carries the time of day. At sunrise and sunset a broad twilight band hugs
+  * the horizon (orange toward the sun, mauve-pink opposite it) under a deeper zenith, and forward
+  * scattering puts a soft corona around the sun all day.
   */
 object BlockboxAtmosphere:
   /** @param glow strength of the corona around the sun (daylight or twilight, minus storm) */
-  final case class Palette(top: Vec3, horizon: Vec3, below: Vec3, sun: Vec3, warmth: Float, glow: Float = 0f)
-  private def lerp(a: Vec3,b: Vec3,t: Float): Vec3 = a+(b-a)*t.max(0f).min(1f)
+  final case class Palette(
+      top: Vec3,
+      horizon: Vec3,
+      below: Vec3,
+      sun: Vec3,
+      warmth: Float,
+      glow: Float = 0f
+  )
+  private def lerp(a: Vec3, b: Vec3, t: Float): Vec3 = a + (b - a) * t.max(0f).min(1f)
 
-  def palette(phase: Float,daylight: Float,rain: Float,cloud: Float,flash: Float): Palette =
-    val lightning=flash.max(0f).min(1f)
-    val day=BlockboxSky.smooth01((daylight+lightning*0.42f).min(1f))
-    val storm=BlockboxSky.smooth01(rain.max(cloud*0.94f))
-    val warm=(1f-BlockboxSky.smooth01(abs(sin(phase*Pi*2)).toFloat/0.28f))*(1f-storm*0.74f)
-    val tint=lerp(Vec3(0.009f,0.014f,0.025f),Vec3(0.26f,0.29f,0.33f),day)+Vec3(lightning*0.30f,lightning*0.32f,lightning*0.38f)
-    val top=lerp(lerp(Vec3(0.004f,0.008f,0.024f),Vec3(0.17f,0.43f,0.88f),day),tint*0.70f,storm*0.96f)
-    val horizon=lerp(lerp(Vec3(0.028f,0.035f,0.070f),Vec3(0.74f,0.87f,0.99f),day),tint,storm*0.91f)
-    val below=lerp(lerp(Vec3(0.010f,0.014f,0.026f),Vec3(0.46f,0.62f,0.80f),day),tint*0.86f,storm*0.88f)
-    val sun=BlockboxSky.sunDirection(phase)
-    Palette(lerp(top,Vec3(0.15f,0.22f,0.50f),warm*0.34f),lerp(horizon,Vec3(0.97f,0.64f,0.46f),warm*0.26f),below,
-      Vec3(sun._1,sun._2,sun._3),warm,day.max(warm*0.9f)*(1f-storm*0.85f))
+  def palette(phase: Float, daylight: Float, rain: Float, cloud: Float, flash: Float): Palette =
+    val lightning = flash.max(0f).min(1f)
+    val day = BlockboxSky.smooth01((daylight + lightning * 0.42f).min(1f))
+    val storm = BlockboxSky.smooth01(rain.max(cloud * 0.94f))
+    val warm =
+      (1f - BlockboxSky.smooth01(abs(sin(phase * Pi * 2)).toFloat / 0.28f)) * (1f - storm * 0.74f)
+    val tint = lerp(Vec3(0.009f, 0.014f, 0.025f), Vec3(0.26f, 0.29f, 0.33f), day) + Vec3(
+      lightning * 0.30f,
+      lightning * 0.32f,
+      lightning * 0.38f
+    )
+    val top = lerp(
+      lerp(Vec3(0.004f, 0.008f, 0.024f), Vec3(0.17f, 0.43f, 0.88f), day),
+      tint * 0.70f,
+      storm * 0.96f
+    )
+    val horizon =
+      lerp(lerp(Vec3(0.028f, 0.035f, 0.070f), Vec3(0.74f, 0.87f, 0.99f), day), tint, storm * 0.91f)
+    val below = lerp(
+      lerp(Vec3(0.010f, 0.014f, 0.026f), Vec3(0.46f, 0.62f, 0.80f), day),
+      tint * 0.86f,
+      storm * 0.88f
+    )
+    val sun = BlockboxSky.sunDirection(phase)
+    Palette(
+      lerp(top, Vec3(0.15f, 0.22f, 0.50f), warm * 0.34f),
+      lerp(horizon, Vec3(0.97f, 0.64f, 0.46f), warm * 0.26f),
+      below,
+      Vec3(sun._1, sun._2, sun._3),
+      warm,
+      day.max(warm * 0.9f) * (1f - storm * 0.85f)
+    )
 
-  /** CPU reference also serves the compatibility dome and regression tests. It must stay
-    * identical to `skyFunction` below.
+  /** CPU reference also serves the compatibility dome and regression tests. It must stay identical
+    * to `skyFunction` below.
     */
-  def color(direction: Vec3,p: Palette): Vec3 =
-    val d=direction.normalized
-    val base=if d.y>=0 then lerp(p.horizon,p.top,pow(BlockboxSky.smooth01(d.y),0.65).toFloat)
-      else lerp(p.horizon,p.below,BlockboxSky.smooth01(-d.y/0.50f))
-    val horizontal=Vec3(d.x+0.000001f,0,d.z+0.000001f).normalized
-    val solar=Vec3(p.sun.x+0.000001f,0,p.sun.z+0.000001f).normalized
-    val toward=(horizontal.x*solar.x+horizontal.z*solar.z)*0.5f+0.5f
-    val toward2=toward*toward
-    val band=if d.y>=0 then exp(-d.y*4.5f).toFloat else exp(d.y*9f).toFloat
-    val warm=lerp(Vec3(0.80f,0.50f,0.62f),Vec3(1.0f,0.50f,0.20f),toward2)
-    val banded=lerp(base,warm,p.warmth*band*(0.30f+0.62f*toward2))
-    val mu=(d.x*p.sun.x+d.y*p.sun.y+d.z*p.sun.z).max(0f)
-    val corona=(pow(mu,6).toFloat*0.16f+pow(mu,48).toFloat*0.30f)*p.glow
-    val tint=lerp(Vec3(1.0f,0.97f,0.88f),Vec3(1.0f,0.62f,0.30f),p.warmth)
-    Vec3(banded.x+tint.x*corona*(1f-banded.x),banded.y+tint.y*corona*(1f-banded.y),banded.z+tint.z*corona*(1f-banded.z))
+  def color(direction: Vec3, p: Palette): Vec3 =
+    val d = direction.normalized
+    val base = if d.y >= 0 then lerp(p.horizon, p.top, pow(BlockboxSky.smooth01(d.y), 0.65).toFloat)
+    else lerp(p.horizon, p.below, BlockboxSky.smooth01(-d.y / 0.50f))
+    val horizontal = Vec3(d.x + 0.000001f, 0, d.z + 0.000001f).normalized
+    val solar = Vec3(p.sun.x + 0.000001f, 0, p.sun.z + 0.000001f).normalized
+    val toward = (horizontal.x * solar.x + horizontal.z * solar.z) * 0.5f + 0.5f
+    val toward2 = toward * toward
+    val band = if d.y >= 0 then exp(-d.y * 4.5f).toFloat else exp(d.y * 9f).toFloat
+    val warm = lerp(Vec3(0.80f, 0.50f, 0.62f), Vec3(1.0f, 0.50f, 0.20f), toward2)
+    val banded = lerp(base, warm, p.warmth * band * (0.30f + 0.62f * toward2))
+    val mu = (d.x * p.sun.x + d.y * p.sun.y + d.z * p.sun.z).max(0f)
+    val corona = (pow(mu, 6).toFloat * 0.16f + pow(mu, 48).toFloat * 0.30f) * p.glow
+    val tint = lerp(Vec3(1.0f, 0.97f, 0.88f), Vec3(1.0f, 0.62f, 0.30f), p.warmth)
+    Vec3(
+      banded.x + tint.x * corona * (1f - banded.x),
+      banded.y + tint.y * corona * (1f - banded.y),
+      banded.z + tint.z * corona * (1f - banded.z)
+    )
 
   /** GLSL twin of [[color]]; shared by the sky and cloud shaders. */
   private[blockbox] val skyFunction = """
@@ -72,80 +103,92 @@ object BlockboxAtmosphere:
   """
 
   /** Uploads a palette to a program that includes [[skyFunction]]. */
-  private[blockbox] def setPaletteUniforms(program: Int,p: Palette): Unit =
-    def v(name: String,value: Vec3): Unit =
-      val loc = glGetUniformLocation(program,name)
-      if loc >= 0 then glUniform3f(loc,value.x,value.y,value.z)
-    def f(name: String,value: Float): Unit =
-      val loc = glGetUniformLocation(program,name)
-      if loc >= 0 then glUniform1f(loc,value)
-    v("topColor",p.top); v("horizonColor",p.horizon); v("belowColor",p.below); v("sun",p.sun)
-    f("warmth",p.warmth)
-    f("sunGlow",p.glow)
+  private[blockbox] def setPaletteUniforms(program: Int, p: Palette): Unit =
+    def v(name: String, value: Vec3): Unit =
+      val loc = glGetUniformLocation(program, name)
+      if loc >= 0 then glUniform3f(loc, value.x, value.y, value.z)
+    def f(name: String, value: Float): Unit =
+      val loc = glGetUniformLocation(program, name)
+      if loc >= 0 then glUniform1f(loc, value)
+    v("topColor", p.top); v("horizonColor", p.horizon); v("belowColor", p.below); v("sun", p.sun)
+    f("warmth", p.warmth)
+    f("sunGlow", p.glow)
 
-  private var program=0
-  private var failed=false
-  private var uniforms=Map.empty[String,Int]
-  private val projection=BufferUtils.createFloatBuffer(16)
+  private var program = 0
+  private var failed = false
+  private var uniforms = Map.empty[String, Int]
+  private val projection = BufferUtils.createFloatBuffer(16)
 
-  def render(yaw: Float,pitch: Float,p: Palette,displayDither: Boolean,nightStars: Float=0f): Boolean =
+  def render(
+      yaw: Float,
+      pitch: Float,
+      p: Palette,
+      displayDither: Boolean,
+      nightStars: Float = 0f
+  ): Boolean =
     if failed || !GL.getCapabilities.OpenGL20 then return false
-    if program==0 then
+    if program == 0 then
       try initialize()
       catch
         case e: Exception =>
-          failed=true
-          System.err.println("Sky shader unavailable; using smooth dome: "+e.getMessage)
+          failed = true
+          System.err.println("Sky shader unavailable; using smooth dome: " + e.getMessage)
           return false
-    val previous=glGetInteger(GL_CURRENT_PROGRAM)
+    val previous = glGetInteger(GL_CURRENT_PROGRAM)
     glUseProgram(program)
-    def v(name: String,value: Vec3): Unit = glUniform3f(uniforms(name),value.x,value.y,value.z)
-    val yr=toRadians(yaw); val pr=toRadians(pitch)
-    val cy=cos(yr).toFloat; val sy=sin(yr).toFloat; val cp=cos(pr).toFloat; val sp=sin(pr).toFloat
-    v("right",Vec3(cy,0,sy)); v("up",Vec3(sy*sp,cp,-cy*sp)); v("forward",Vec3(sy*cp,-sp,-cy*cp))
-    setPaletteUniforms(program,p)
-    glUniform1f(uniforms("ditherAmount"),if displayDither then 1f else 0f)
-    glUniform1f(uniforms("nightStars"),nightStars.max(0f).min(1f))
-    projection.clear(); glGetFloatv(GL_PROJECTION_MATRIX,projection)
-    glUniform2f(uniforms("halfFov"),1f/projection.get(0),1f/projection.get(5))
+    def v(name: String, value: Vec3): Unit = glUniform3f(uniforms(name), value.x, value.y, value.z)
+    val yr = toRadians(yaw); val pr = toRadians(pitch)
+    val cy = cos(yr).toFloat; val sy = sin(yr).toFloat; val cp = cos(pr).toFloat;
+    val sp = sin(pr).toFloat
+    v("right", Vec3(cy, 0, sy)); v("up", Vec3(sy * sp, cp, -cy * sp));
+    v("forward", Vec3(sy * cp, -sp, -cy * cp))
+    setPaletteUniforms(program, p)
+    glUniform1f(uniforms("ditherAmount"), if displayDither then 1f else 0f)
+    glUniform1f(uniforms("nightStars"), nightStars.max(0f).min(1f))
+    projection.clear(); glGetFloatv(GL_PROJECTION_MATRIX, projection)
+    glUniform2f(uniforms("halfFov"), 1f / projection.get(0), 1f / projection.get(5))
     glDisable(GL_BLEND)
-    glBegin(GL_TRIANGLES); glVertex2f(-1,-1); glVertex2f(3,-1); glVertex2f(-1,3); glEnd()
+    glBegin(GL_TRIANGLES); glVertex2f(-1, -1); glVertex2f(3, -1); glVertex2f(-1, 3); glEnd()
     glUseProgram(previous); glEnable(GL_BLEND)
     true
 
   private def initialize(): Unit =
-    program=buildProgram(vertexSource,fragmentSource)
-    uniforms=Seq("right","up","forward","halfFov","ditherAmount","nightStars")
-      .map(name => name -> glGetUniformLocation(program,name)).toMap
+    program = buildProgram(vertexSource, fragmentSource)
+    uniforms = Seq("right", "up", "forward", "halfFov", "ditherAmount", "nightStars")
+      .map(name => name -> glGetUniformLocation(program, name))
+      .toMap
 
   /** Compiles and links a GLSL 1.20 program, throwing with the driver log on failure. */
-  private[blockbox] def buildProgram(vertexSource: String,fragmentSource: String): Int =
-    def compile(kind: Int,source: String): Int =
-      val shader=glCreateShader(kind)
-      glShaderSource(shader,source); glCompileShader(shader)
-      if glGetShaderi(shader,GL_COMPILE_STATUS)==GL_FALSE then
-        val reason=glGetShaderInfoLog(shader); glDeleteShader(shader)
+  private[blockbox] def buildProgram(vertexSource: String, fragmentSource: String): Int =
+    def compile(kind: Int, source: String): Int =
+      val shader = glCreateShader(kind)
+      glShaderSource(shader, source); glCompileShader(shader)
+      if glGetShaderi(shader, GL_COMPILE_STATUS) == GL_FALSE then
+        val reason = glGetShaderInfoLog(shader); glDeleteShader(shader)
         throw IllegalStateException(reason)
       shader
-    var vertex=0; var fragment=0; var linked=0
+    var vertex = 0; var fragment = 0; var linked = 0
     try
-      vertex=compile(GL_VERTEX_SHADER,vertexSource); fragment=compile(GL_FRAGMENT_SHADER,fragmentSource)
-      linked=glCreateProgram(); glAttachShader(linked,vertex); glAttachShader(linked,fragment); glLinkProgram(linked)
-      if glGetProgrami(linked,GL_LINK_STATUS)==GL_FALSE then throw IllegalStateException(glGetProgramInfoLog(linked))
+      vertex = compile(GL_VERTEX_SHADER, vertexSource);
+      fragment = compile(GL_FRAGMENT_SHADER, fragmentSource)
+      linked = glCreateProgram(); glAttachShader(linked, vertex); glAttachShader(linked, fragment);
+      glLinkProgram(linked)
+      if glGetProgrami(linked, GL_LINK_STATUS) == GL_FALSE then
+        throw IllegalStateException(glGetProgramInfoLog(linked))
       linked
     catch
       case e: Exception =>
-        if linked!=0 then glDeleteProgram(linked)
+        if linked != 0 then glDeleteProgram(linked)
         throw e
     finally
-      if vertex!=0 then glDeleteShader(vertex)
-      if fragment!=0 then glDeleteShader(fragment)
+      if vertex != 0 then glDeleteShader(vertex)
+      if fragment != 0 then glDeleteShader(fragment)
 
   def destroy(): Unit =
-    if program!=0 then glDeleteProgram(program)
-    program=0; failed=false; uniforms=Map.empty
+    if program != 0 then glDeleteProgram(program)
+    program = 0; failed = false; uniforms = Map.empty
 
-  private val vertexSource="""#version 120
+  private val vertexSource = """#version 120
     uniform vec3 right, up, forward;
     uniform vec2 halfFov;
     varying vec3 direction;
@@ -154,7 +197,7 @@ object BlockboxAtmosphere:
       direction=forward+right*gl_Vertex.x*halfFov.x+up*gl_Vertex.y*halfFov.y;
     }
   """
-  private val fragmentSource="""#version 120
+  private val fragmentSource = """#version 120
     uniform float ditherAmount, nightStars;
     varying vec3 direction;
   """ + skyFunction + """

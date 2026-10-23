@@ -11,69 +11,86 @@ import java.util.UUID
 import scala.math.*
 
 final class GameServer(
-  port: Int,
-  worldSeed: Long,
-  spawn: Vec3,
-  hostName: String,
-  hostColorId: Int,
-  worldSnapshot: () => Seq[(Int, Int, Int, Byte, Int, Int, Int)],
-  opSnapshot: () => Seq[String],
-  hostPosition: () => Vec3,
-  hostYaw: () => Float,
-  hostPitch: () => Float,
-  requiredModHash: String,
-  requiredModList: String,
-  environmentSnapshot: () => String,
-  rulesSnapshot: () => String = () => "",
-  hostHeld: () => Int = () => 0
+    port: Int,
+    worldSeed: Long,
+    spawn: Vec3,
+    hostName: String,
+    hostColorId: Int,
+    worldSnapshot: () => Seq[(Int, Int, Int, Byte, Int, Int, Int)],
+    opSnapshot: () => Seq[String],
+    hostPosition: () => Vec3,
+    hostYaw: () => Float,
+    hostPitch: () => Float,
+    requiredModHash: String,
+    requiredModList: String,
+    environmentSnapshot: () => String,
+    rulesSnapshot: () => String = () => "",
+    hostHeld: () => Int = () => 0
 ):
   import GameServer.*
   // Keep this explicitly IPv4 for local/LAN testing. 0.0.0.0 accepts 127.0.0.1, LAN, and ZeroTier IPv4.
   private val initialSnapshot = worldSnapshot()
-  require(initialSnapshot.size<=250000,"World exceeds the 250000-edit multiplayer snapshot limit")
+  require(
+    initialSnapshot.size <= 250000,
+    "World exceeds the 250000-edit multiplayer snapshot limit"
+  )
   private val serverSocket = BlockboxSockets.bindIpv4Server(port)
   private val clients = collection.mutable.ListBuffer[ClientHandler]()
   private val serverEvents = new LinkedBlockingQueue[String](32768)
   private val connectionCount = new java.util.concurrent.atomic.AtomicInteger(0)
-  private val worldEdits = new ConcurrentHashMap[(Int, Int, Int), (Int, Int, Int, Byte, Int, Int, Int)]()
+  private val worldEdits =
+    new ConcurrentHashMap[(Int, Int, Int), (Int, Int, Int, Byte, Int, Int, Int)]()
   initialSnapshot.foreach { edit => worldEdits.put((edit._1, edit._2, edit._3), edit) }
   private val running = java.util.concurrent.atomic.AtomicBoolean(true)
   private val sessionId = UUID.randomUUID().toString
-  private val acceptThread = BlockboxSockets.daemonThread("blockbox-server-accept", () =>
-    try
-      while running.get do
-        try
-          val sock = serverSocket.accept()
-          BlockboxSockets.configureTcp(sock)
-          sock.setSoTimeout(120000)
-          if connectionCount.incrementAndGet() > BlockboxNet.MAX_PLAYERS + 8 then
-            connectionCount.decrementAndGet()
-            BlockboxSockets.closeQuietly(sock)
-          else
-            val handler = ClientHandler(sock)
-            registerClient(handler)
-            handler.start()
-        catch case _: SocketTimeoutException => ()
-    catch
-      case _: SocketException => running.set(false)
-      case _: IOException => running.set(false)
+  private val acceptThread = BlockboxSockets.daemonThread(
+    "blockbox-server-accept",
+    () =>
+      try
+        while running.get do
+          try
+            val sock = serverSocket.accept()
+            BlockboxSockets.configureTcp(sock)
+            sock.setSoTimeout(120000)
+            if connectionCount.incrementAndGet() > BlockboxNet.MAX_PLAYERS + 8 then
+              connectionCount.decrementAndGet()
+              BlockboxSockets.closeQuietly(sock)
+            else
+              val handler = ClientHandler(sock)
+              registerClient(handler)
+              handler.start()
+          catch case _: SocketTimeoutException => ()
+      catch
+        case _: SocketException => running.set(false)
+        case _: IOException     => running.set(false)
   )
 
   def localPort: Int = serverSocket.getLocalPort
   def isListening: Boolean = running.get && serverSocket.isBound && !serverSocket.isClosed
 
   def broadcast(msg: String): Unit =
-    val recipients = clients.synchronized(clients.filter(c => c.active && c.readyForBroadcast).toList)
+    val recipients =
+      clients.synchronized(clients.filter(c => c.active && c.readyForBroadcast).toList)
     recipients.foreach(_.send(msg))
 
-  def sendTo(name: String,message: String): Unit =
-    val client = clients.synchronized(clients.find(c => c.active && c.readyForBroadcast && c.onlineName.equalsIgnoreCase(name)))
+  def sendTo(name: String, message: String): Unit =
+    val client = clients.synchronized(
+      clients.find(c => c.active && c.readyForBroadcast && c.onlineName.equalsIgnoreCase(name))
+    )
     client.foreach(_.send(message))
 
   def broadcastPlayerList(): Unit =
     broadcast("PLAYERS|" + activePlayerTokensSnapshot.mkString("|"))
 
-  def broadcastBlockChange(x: Int, y: Int, z: Int, blockId: Byte, waterLevel: Int = 0, logAxis: Int = 0, torchMount: Int = 0): Unit =
+  def broadcastBlockChange(
+      x: Int,
+      y: Int,
+      z: Int,
+      blockId: Byte,
+      waterLevel: Int = 0,
+      logAxis: Int = 0,
+      torchMount: Int = 0
+  ): Unit =
     worldEdits.put((x, y, z), (x, y, z, blockId, waterLevel, logAxis, torchMount))
     broadcast(blockMessage(x, y, z, blockId, waterLevel, logAxis, torchMount))
 
@@ -97,32 +114,57 @@ final class GameServer(
 
   private def parseNetworkFloat(value: String): Float = BlockboxNet.parseFloat(value)
 
-  private def posMessage(name: String, pos: Vec3, yaw: Float, pitch: Float, colorId: Int, heldBlock: Int = 0): String =
+  private def posMessage(
+      name: String,
+      pos: Vec3,
+      yaw: Float,
+      pitch: Float,
+      colorId: Int,
+      heldBlock: Int = 0
+  ): String =
     BlockboxNet.pos(name, pos.x, pos.y, pos.z, yaw, pitch, colorId, colorCount, heldBlock)
 
-  private def blockMessage(x: Int, y: Int, z: Int, blockId: Byte, waterLevel: Int = 0, logAxis: Int = 0, torchMount: Int = 0): String =
+  private def blockMessage(
+      x: Int,
+      y: Int,
+      z: Int,
+      blockId: Byte,
+      waterLevel: Int = 0,
+      logAxis: Int = 0,
+      torchMount: Int = 0
+  ): String =
     BlockboxNet.block(x, y, z, blockId.toInt, waterLevel, logAxis, torchMount)
 
   private def readProtocolLine(in: BufferedReader): String =
     BlockboxNet.readProtocolLine(in)
 
   private def sendCurrentPositionsTo(client: ClientHandler): Unit =
-    client.send(posMessage(safeHostName, hostPosition(), hostYaw(), hostPitch(), safeHostColor, hostHeld()))
+    client.send(
+      posMessage(safeHostName, hostPosition(), hostYaw(), hostPitch(), safeHostColor, hostHeld())
+    )
     clients.synchronized {
       clients.filter(c => (c ne client) && c.active && c.registered && c.hasPosition).foreach { c =>
-        client.send(posMessage(c.onlineName, c.lastPos, c.lastYaw, c.lastPitch, c.colorId, c.lastHeld))
+        client.send(
+          posMessage(c.onlineName, c.lastPos, c.lastYaw, c.lastPitch, c.colorId, c.lastHeld)
+        )
       }
     }
 
   private def activePlayerTokensSnapshot: List[String] =
     clients.synchronized {
       (playerToken(safeHostName, safeHostColor) ::
-        clients.filter(c => c.active && c.registered).map(c => playerToken(c.onlineName, c.colorId)).toList).distinct
+        clients
+          .filter(c => c.active && c.registered)
+          .map(c => playerToken(c.onlineName, c.colorId))
+          .toList).distinct
     }
 
   private def assignColor(): Int =
     clients.synchronized {
-      val used = (safeHostColor :: clients.filter(c => c.active && c.registered).map(_.colorId).toList).map(c => Math.floorMod(c, colorCount)).toSet
+      val used =
+        (safeHostColor :: clients.filter(c => c.active && c.registered).map(_.colorId).toList)
+          .map(c => Math.floorMod(c, colorCount))
+          .toSet
       PlayerAppearance.nextFreeColor(used).getOrElse(throw IOException("No player shirt available"))
     }
 
@@ -167,20 +209,25 @@ final class GameServer(
     @volatile var lastPitch: Float = 0f
     @volatile var lastHeld: Int = 0
     private var badPackets = 0
+    private var furnaceTarget = Option.empty[(Int, Int, Int)]
 
     private def noteBadPacket(kind: String, error: Exception): Unit =
       badPackets += 1
-      System.err.println(s"Ignored bad $kind from ${BlockboxSockets.remoteAddress(sock)}: ${Option(error.getMessage).getOrElse(error.getClass.getSimpleName)}")
+      System.err.println(
+        s"Ignored bad $kind from ${BlockboxSockets.remoteAddress(sock)}: ${Option(error.getMessage).getOrElse(error.getClass.getSimpleName)}"
+      )
       if badPackets >= BlockboxNet.BAD_PACKET_LIMIT then active = false
 
-    private val writerThread = BlockboxSockets.daemonThread("blockbox-server-writer", () =>
-      try
-        while active || !outgoing.isEmpty do
-          val batch = outgoing.poll(1, java.util.concurrent.TimeUnit.SECONDS)
-          if batch != null then
-            batch.foreach { msg => out.write(msg); out.write('\n') }
-            if out.checkError() then close()
-      catch case _: Exception => close()
+    private val writerThread = BlockboxSockets.daemonThread(
+      "blockbox-server-writer",
+      () =>
+        try
+          while active || !outgoing.isEmpty do
+            val batch = outgoing.poll(1, java.util.concurrent.TimeUnit.SECONDS)
+            if batch != null then
+              batch.foreach { msg => out.write(msg); out.write('\n') }
+              if out.checkError() then close()
+        catch case _: Exception => close()
     )
 
     override def run(): Unit =
@@ -203,29 +250,50 @@ final class GameServer(
               send(BlockboxNet.error("SERVER_FULL", "Server is full"))
               active = false
             else if !hello.modern || hello.badProtocol then
-              send(BlockboxNet.error("VERSION", "Server protocol " + BlockboxNet.PROTOCOL_VERSION.toString + " does not match client protocol " + hello.clientProtocol))
+              send(
+                BlockboxNet.error(
+                  "VERSION",
+                  "Server protocol " + BlockboxNet.PROTOCOL_VERSION.toString + " does not match client protocol " + hello.clientProtocol
+                )
+              )
               active = false
             else if clientModHash != requiredModHash then
               val list = if requiredModList.trim.nonEmpty then requiredModList else requiredModHash
-              send(BlockboxNet.error("MOD_MISMATCH", "Server requires modpack " + requiredModHash + " [" + list + "]"))
+              send(
+                BlockboxNet.error(
+                  "MOD_MISMATCH",
+                  "Server requires modpack " + requiredModHash + " [" + list + "]"
+                )
+              )
               active = false
             else if isNameInUse(requestedName) then
               send(BlockboxNet.error("NAME_TAKEN", "That name is already in this world"))
               active = false
             else
               clients.synchronized {
-                if registeredClientCount >= BlockboxNet.MAX_PLAYERS - 1 || isNameInUse(requestedName) then
-                  throw IOException("Player slot or name is already in use")
+                if registeredClientCount >= BlockboxNet.MAX_PLAYERS - 1 || isNameInUse(
+                    requestedName
+                  )
+                then throw IOException("Player slot or name is already in use")
                 onlineName = requestedName
                 colorId = assignColor()
                 registered = true
               }
-              val worldMsg = BlockboxNet.world(worldSeed, spawn.x, spawn.y, spawn.z, colorId, safeHostName, safeHostColor, sessionId)
+              val worldMsg = BlockboxNet.world(
+                worldSeed,
+                spawn.x,
+                spawn.y,
+                spawn.z,
+                colorId,
+                safeHostName,
+                safeHostColor,
+                sessionId
+              )
               send(worldMsg)
               readyForBroadcast = true
               send(environmentSnapshot())
-              val rules=rulesSnapshot()
-              if rules.nonEmpty then send("RULES|"+rules)
+              val rules = rulesSnapshot()
+              if rules.nonEmpty then send("RULES|" + rules)
               send("PLAYERS|" + activePlayerTokensSnapshot.mkString("|"))
               val opList =
                 try opSnapshot().map(safeName).filter(_.nonEmpty).distinct
@@ -241,11 +309,17 @@ final class GameServer(
               val snapshot =
                 try
                   import scala.jdk.CollectionConverters.*
-                  if worldEdits.size()>250000 then throw IOException("World exceeds multiplayer snapshot limit")
+                  if worldEdits.size() > 250000 then
+                    throw IOException("World exceeds multiplayer snapshot limit")
                   worldEdits.values().asScala.toVector
                 catch
                   case e: Exception =>
-                    send(BlockboxNet.error("SNAPSHOT",Option(e.getMessage).getOrElse("Could not synchronize world")))
+                    send(
+                      BlockboxNet.error(
+                        "SNAPSHOT",
+                        Option(e.getMessage).getOrElse("Could not synchronize world")
+                      )
+                    )
                     throw e
               send(BlockboxNet.snapBegin(snapshot.length))
               var checksum = 0L
@@ -254,7 +328,8 @@ final class GameServer(
               // a syscall/flush for every block. Packet format and ordering stay the same.
               val syncBatch = collection.mutable.ArrayBuffer.empty[String]
               snapshot.foreach { case (sx, sy, sz, sid, slevel, saxis, smount) =>
-                checksum = BlockboxNet.blockChecksum(checksum, sx, sy, sz, sid.toInt, slevel, saxis, smount)
+                checksum =
+                  BlockboxNet.blockChecksum(checksum, sx, sy, sz, sid.toInt, slevel, saxis, smount)
                 syncBatch += blockMessage(sx, sy, sz, sid, slevel, saxis, smount)
                 if syncBatch.length >= 256 then
                   sendBatch(syncBatch)
@@ -262,7 +337,9 @@ final class GameServer(
               }
               if syncBatch.nonEmpty then sendBatch(syncBatch)
               sendLock.synchronized {
-                enqueue(Seq(BlockboxNet.snapEnd(snapshot.length, checksum), BlockboxNet.enter(sessionId)))
+                enqueue(
+                  Seq(BlockboxNet.snapEnd(snapshot.length, checksum), BlockboxNet.enter(sessionId))
+                )
                 syncing = false
                 if pendingLiveBlocks.nonEmpty then enqueue(pendingLiveBlocks.toVector)
                 pendingLiveBlocks.clear()
@@ -273,24 +350,67 @@ final class GameServer(
               val blockId = bp.blockId.toByte
               val block = Block.fromId(blockId)
               val target = Vec3(bp.x + 0.5f, bp.y + 0.5f, bp.z + 0.5f)
-              val validBlock = bp.blockId < Block.values.length && CustomBlocks.registered(block) && (block == Block.Air || block.solid || block == Block.Water || block == Block.Torch || CustomBlocks.isSlot(block)) && block != Block.Bedrock
-              if !validBlock || bp.y == 0 || (target - lastPos).lengthSquared > 100f || !editBudget.allow(System.nanoTime()) then
-                throw IOException("Invalid block edit or reach")
-              val level = if blockId == Block.Water.id then (if bp.waterLevel > 0 then bp.waterLevel else 8) else 0
-              val clean = blockMessage(bp.x, bp.y, bp.z, blockId, level, bp.logAxis, if block==Block.Torch then bp.torchMount else 0)
-              if worldEdits.size() >= 250000 && !worldEdits.containsKey((bp.x, bp.y, bp.z)) then throw IOException("World edit limit reached")
+              val validBlock = bp.blockId < Block.values.length && CustomBlocks.registered(
+                block
+              ) && (block == Block.Air || block.solid || block == Block.Water || block == Block.Torch || CustomBlocks
+                .isSlot(block)) && block != Block.Bedrock
+              if !validBlock || bp.y == 0 || (target - lastPos).lengthSquared > 100f || !editBudget
+                  .allow(System.nanoTime())
+              then throw IOException("Invalid block edit or reach")
+              val level = if blockId == Block.Water.id then
+                (if bp.waterLevel > 0 then bp.waterLevel else 8
+              )
+              else 0
+              val clean = blockMessage(
+                bp.x,
+                bp.y,
+                bp.z,
+                blockId,
+                level,
+                bp.logAxis,
+                if block == Block.Torch then bp.torchMount else 0
+              )
+              if worldEdits.size() >= 250000 && !worldEdits.containsKey((bp.x, bp.y, bp.z)) then
+                throw IOException("World edit limit reached")
               // The game thread validates the current world state and commits
               // the edit before it is added to snapshots or broadcast to peers.
-              if !serverEvents.offer("EDIT|"+onlineName+"|"+clean.stripPrefix("BLOC|")) then throw IOException("Server queue full")
+              if !serverEvents.offer("EDIT|" + onlineName + "|" + clean.stripPrefix("BLOC|")) then
+                throw IOException("Server queue full")
             catch case e: Exception => noteBadPacket("BLOC", e)
+          else if registered && packet.is("FIRE") then
+            try
+              packet.requireExact(5)
+              val bp = BlockboxNet.parseBlock(
+                BlockboxNet.packet(s"BLOC|${packet.part(1)}|${packet.part(2)}|${packet.part(3)}|0"),
+                Terrain.worldHeight
+              )
+              val p = (bp.x, bp.y, bp.z)
+              val on = BlockboxNet.parseInt(packet.part(4), 0, 1) == 1
+              val target = Vec3(bp.x + 0.5f, bp.y + 0.5f, bp.z + 0.5f)
+              if !editBudget.allow(
+                  System.nanoTime()
+                ) || (on && (target - lastPos).lengthSquared > 100f) || (!on && !furnaceTarget
+                  .contains(p))
+              then throw IOException("Invalid furnace reach, owner or rate")
+              if !serverEvents.offer(
+                  s"FIRE|$onlineName|${bp.x}|${bp.y}|${bp.z}|${if on then 1 else 0}"
+                )
+              then throw IOException("Server queue full")
+              furnaceTarget = if on then Some(p) else None
+            catch case e: Exception => noteBadPacket("FIRE", e)
           else if registered && packet.is("USE") then
             try
               packet.requireExact(4)
-              val bp=BlockboxNet.parseBlock(BlockboxNet.packet(s"BLOC|${packet.part(1)}|${packet.part(2)}|${packet.part(3)}|0"),Terrain.worldHeight)
-              val target=Vec3(bp.x+0.5f,bp.y+0.5f,bp.z+0.5f)
-              if (target-lastPos).lengthSquared>100f || !editBudget.allow(System.nanoTime()) then throw IOException("Invalid interaction reach or rate")
-              if !serverEvents.offer(s"INTERACT|$onlineName|${bp.x}|${bp.y}|${bp.z}") then throw IOException("Server queue full")
-            catch case e: Exception => noteBadPacket("USE",e)
+              val bp = BlockboxNet.parseBlock(
+                BlockboxNet.packet(s"BLOC|${packet.part(1)}|${packet.part(2)}|${packet.part(3)}|0"),
+                Terrain.worldHeight
+              )
+              val target = Vec3(bp.x + 0.5f, bp.y + 0.5f, bp.z + 0.5f)
+              if (target - lastPos).lengthSquared > 100f || !editBudget.allow(System.nanoTime())
+              then throw IOException("Invalid interaction reach or rate")
+              if !serverEvents.offer(s"INTERACT|$onlineName|${bp.x}|${bp.y}|${bp.z}") then
+                throw IOException("Server queue full")
+            catch case e: Exception => noteBadPacket("USE", e)
           else if registered && packet.is(BlockboxNet.POS) then
             try
               val pp = BlockboxNet.parsePosition(packet, colorCount)
@@ -310,25 +430,27 @@ final class GameServer(
           else if registered && packet.is("ZHIT") then
             try
               packet.requireExact(2)
-              val id=BlockboxNet.parseInt(packet.part(1),0,Int.MaxValue)
-              if editBudget.allow(System.nanoTime()) then serverEvents.offer(s"ZHIT|$onlineName|$id")
-            catch case e: Exception => noteBadPacket("ZHIT",e)
+              val id = BlockboxNet.parseInt(packet.part(1), 0, Int.MaxValue)
+              if editBudget.allow(System.nanoTime()) then
+                serverEvents.offer(s"ZHIT|$onlineName|$id")
+            catch case e: Exception => noteBadPacket("ZHIT", e)
           else if registered && packet.is("PHIT") then
             try
               packet.requireExact(2)
-              val victim=safeName(packet.part(1))
-              if victim.nonEmpty && victim!=onlineName && editBudget.allow(System.nanoTime()) then
+              val victim = safeName(packet.part(1))
+              if victim.nonEmpty && victim != onlineName && editBudget.allow(System.nanoTime()) then
                 serverEvents.offer(s"PHIT|$onlineName|$victim")
-            catch case e: Exception => noteBadPacket("PHIT",e)
+            catch case e: Exception => noteBadPacket("PHIT", e)
           else if registered && packet.is("HURTME") then
             packet.requireExact(1)
             if editBudget.allow(System.nanoTime()) then
-              val clean=s"HURT|$onlineName"
+              val clean = s"HURT|$onlineName"
               serverEvents.offer(clean); broadcast(clean)
           else if registered && line.startsWith("CMD|") then
             if !chatBudget.allow(System.nanoTime()) then throw IOException("Command rate exceeded")
             val text = if parts.length >= 2 then parts.drop(1).mkString("|") else ""
-            if text.nonEmpty && !serverEvents.offer("RCMD|" + onlineName + "|" + text.take(1024)) then throw IOException("Server queue full")
+            if text.nonEmpty && !serverEvents.offer("RCMD|" + onlineName + "|" + text.take(1024))
+            then throw IOException("Server queue full")
           else if registered && line.startsWith("CHAT|") then
             if !chatBudget.allow(System.nanoTime()) then throw IOException("Chat rate exceeded")
             val text = if parts.length >= 3 then parts.drop(2).mkString("|") else ""
@@ -337,10 +459,14 @@ final class GameServer(
             broadcast(clean)
           if active then line = readProtocolLine(in) else line = null
       catch
-        case e: Exception => System.err.println(s"Blockbox server client error from ${BlockboxSockets.remoteAddress(sock)}: ${Option(e.getMessage).getOrElse(e.getClass.getSimpleName)}")
+        case e: Exception =>
+          System.err.println(
+            s"Blockbox server client error from ${BlockboxSockets.remoteAddress(sock)}: ${Option(e.getMessage).getOrElse(e.getClass.getSimpleName)}"
+          )
       finally
         active = false
-        try writerThread.join(250) catch case _: InterruptedException => Thread.currentThread().interrupt()
+        try writerThread.join(250)
+        catch case _: InterruptedException => Thread.currentThread().interrupt()
         val wasRegistered = registered
         registered = false
         unregisterClient(this)
@@ -368,7 +494,6 @@ final class GameServer(
     def close(): Unit =
       active = false
       BlockboxSockets.closeQuietly(sock)
-
 
 object GameServer:
   private val threadGroup = Thread.currentThread.getThreadGroup
@@ -402,7 +527,11 @@ final class GameClient(host: String, port: Int):
       sock.setSoTimeout(BlockboxNet.JOIN_TIMEOUT_MS)
       out = BlockboxSockets.utf8Writer(sock)
       in = BlockboxSockets.utf8Reader(sock)
-      if !BlockboxSockets.sendLine(out, BlockboxNet.helo(playerName, Option(localModHash).getOrElse(ModRuntime.VanillaHash))) then
+      if !BlockboxSockets.sendLine(
+          out,
+          BlockboxNet.helo(playerName, Option(localModHash).getOrElse(ModRuntime.VanillaHash))
+        )
+      then
         lastError = "Could not send handshake to server."
         disconnect()
         return false
@@ -415,7 +544,8 @@ final class GameClient(host: String, port: Int):
       val firstPacket = BlockboxNet.packet(firstLine)
       if firstPacket.is(BlockboxNet.ERR) then
         val parts = firstPacket.parts()
-        lastError = if parts.length >= 3 then parts.drop(2).map(BlockboxNet.unescape).mkString(" ") else firstLine
+        lastError = if parts.length >= 3 then parts.drop(2).map(BlockboxNet.unescape).mkString(" ")
+        else firstLine
         disconnect()
         return false
       if !firstPacket.is(BlockboxNet.WORLD) then
@@ -441,8 +571,7 @@ final class GameClient(host: String, port: Int):
           snapshot.begin(BlockboxNet.parseInt(packet.part(1), 0, Int.MaxValue))
         else if packet.is(BlockboxNet.BLOC) then
           snapshot.add(BlockboxNet.parseBlock(packet, Terrain.worldHeight))
-        else if packet.is(BlockboxNet.SNAPEND) then
-          snapshot.end(packet)
+        else if packet.is(BlockboxNet.SNAPEND) then snapshot.end(packet)
         else if packet.is(BlockboxNet.ERR) then
           val parts = packet.parts()
           lastError = parts.drop(2).map(BlockboxNet.unescape).mkString(" ")
@@ -463,38 +592,44 @@ final class GameClient(host: String, port: Int):
         return false
       connected = true
       sock.setSoTimeout(120000)
-      writerThread = BlockboxSockets.daemonThread("blockbox-client-writer", () =>
-        try
-          while connected do
-            val message = outgoing.poll(1,java.util.concurrent.TimeUnit.SECONDS)
-            if message != null && !BlockboxSockets.sendLine(out,message) then disconnect()
-        catch case _: Exception => disconnect()
+      writerThread = BlockboxSockets.daemonThread(
+        "blockbox-client-writer",
+        () =>
+          try
+            while connected do
+              val message = outgoing.poll(1, java.util.concurrent.TimeUnit.SECONDS)
+              if message != null && !BlockboxSockets.sendLine(out, message) then disconnect()
+          catch case _: Exception => disconnect()
       )
       writerThread.start()
-      readerThread = BlockboxSockets.daemonThread("client-reader", () =>
-        try
-          var line = GameServer.readProtocolLine(in)
-          while line != null && connected do
-            if !BlockboxSockets.offerLine(msgQueue, line) then
-              lastError = "Network queue full"
-              disconnect()
-            else line = GameServer.readProtocolLine(in)
-          connected = false
-          BlockboxSockets.closeQuietly(sock)
-        catch
-          case _: SocketException => connected = false
-          case _: IOException => connected = false
-          case _: Exception => connected = false
-        finally BlockboxSockets.closeQuietly(sock)
+      readerThread = BlockboxSockets.daemonThread(
+        "client-reader",
+        () =>
+          try
+            var line = GameServer.readProtocolLine(in)
+            while line != null && connected do
+              if !BlockboxSockets.offerLine(msgQueue, line) then
+                lastError = "Network queue full"
+                disconnect()
+              else line = GameServer.readProtocolLine(in)
+            connected = false
+            BlockboxSockets.closeQuietly(sock)
+          catch
+            case _: SocketException => connected = false
+            case _: IOException     => connected = false
+            case _: Exception       => connected = false
+          finally BlockboxSockets.closeQuietly(sock)
       )
       readerThread.start()
       true
     catch
       case e: SocketTimeoutException =>
-        lastError = "Timed out. Check the IP, port 25565, firewall, ZeroTier/LAN route, or port forward."
+        lastError =
+          "Timed out. Check the IP, port 25565, firewall, ZeroTier/LAN route, or port forward."
         disconnect(); false
       case e: ConnectException =>
-        lastError = "Connection refused. The host is reachable, but no Blockbox server is listening on that port."
+        lastError =
+          "Connection refused. The host is reachable, but no Blockbox server is listening on that port."
         disconnect(); false
       case e: UnknownHostException =>
         lastError = "Unknown host. Check the server IP/name."
@@ -534,7 +669,11 @@ object BlockboxNetworkText:
   def safeName(value: String): String = BlockboxNet.safeName(value)
 
   def cleanPlayerName(value: String, fallbackNumber: => Int): String =
-    val cleaned = Option(value).getOrElse("").trim.filter(ch => ch.isLetterOrDigit || ch == '_' || ch == '-').take(16)
+    val cleaned = Option(value)
+      .getOrElse("")
+      .trim
+      .filter(ch => ch.isLetterOrDigit || ch == '_' || ch == '-')
+      .take(16)
     if cleaned.nonEmpty then cleaned else s"Player$fallbackNumber"
 
   def normalizeColorId(id: Int, colorCount: Int): Int =
@@ -550,7 +689,8 @@ object BlockboxNetworkText:
       val idx = raw.lastIndexOf(':')
       if idx > 0 && idx < raw.length - 1 then
         val name = safeName(raw.substring(0, idx))
-        val color = try normalizeColorId(raw.substring(idx + 1).toInt, colorCount) catch case _: Exception => fallbackColorForName(name, colorCount)
+        val color = try normalizeColorId(raw.substring(idx + 1).toInt, colorCount)
+        catch case _: Exception => fallbackColorForName(name, colorCount)
         Some((name, color))
       else
         val name = safeName(raw)
@@ -567,10 +707,12 @@ object BlockboxNetworkText:
     else
       val colon = value.lastIndexOf(':')
       val singleColon = colon > 0 && value.indexOf(':') == colon
-      if singleColon && colon < value.length - 1 && value.substring(colon + 1).forall(_.isDigit) then
+      if singleColon && colon < value.length - 1 && value.substring(colon + 1).forall(_.isDigit)
+      then
         val host = value.substring(0, colon).trim
         val portText = value.substring(colon + 1)
-        if host.isEmpty then Left("Missing host before port.") else parsePort(portText).map(port => (host, port))
+        if host.isEmpty then Left("Missing host before port.")
+        else parsePort(portText).map(port => (host, port))
       else Right((value, defaultPort))
 
   def parsePort(text: String): Either[String, Int] =

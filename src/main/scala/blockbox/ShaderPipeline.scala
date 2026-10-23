@@ -18,30 +18,39 @@ import scala.collection.mutable
 
 /** High-throughput Blockbox shader-pack pipeline.
   *
-  * The world geometry is submitted once. Packs can replace the geometry programs,
-  * then run a chain of fullscreen deferred/composite passes on the GPU before a
-  * final pass writes the 3D image to the window. Main renders HUD/menu overlays
-  * after finishFrame(), so packs transform the world without mangling UI text.
+  * The world geometry is submitted once. Packs can replace the geometry programs, then run a chain
+  * of fullscreen deferred/composite passes on the GPU before a final pass writes the 3D image to
+  * the window. Main renders HUD/menu overlays after finishFrame(), so packs transform the world
+  * without mangling UI text.
   *
-  * Supported stage names use Minecraft/Iris naming where the engine has equivalent
-  * data: gbuffers_terrain[_solid/_cutout], gbuffers_textured[_lit],
-  * gbuffers_translucent, gbuffers_water, deferred/deferred1..99,
-  * composite/composite1..99 and final. Vertex/fragment aliases (.vsh/.fsh or
-  * .vert/.frag) are accepted, plus optional geometry shaders (.gsh/.geom).
-  * Overworld overrides in shaders/world0 and root-relative #include paths work too.
+  * Supported stage names use Minecraft/Iris naming where the engine has equivalent data:
+  * gbuffers_terrain[_solid/_cutout], gbuffers_textured[_lit], gbuffers_translucent, gbuffers_water,
+  * deferred/deferred1..99, composite/composite1..99 and final. Vertex/fragment aliases (.vsh/.fsh
+  * or .vert/.frag) are accepted, plus optional geometry shaders (.gsh/.geom). Overworld overrides
+  * in shaders/world0 and root-relative #include paths work too.
   *
-  * This is a compatibility bridge, not a claim that arbitrary Iris packs can be
-  * drop-in perfect: packs that depend on Minecraft-only generic terrain attributes,
-  * custom images, compute/tessellation or renderer-specific hooks still need an
-  * adapter. Blockbox does provide the compatibility lightmap, multi-target buffers,
-  * shadow map pass and common Iris uniforms so ordinary compatibility packs have a
-  * useful path instead of being bottlenecked by the base renderer.
+  * This is a compatibility bridge, not a claim that arbitrary Iris packs can be drop-in perfect:
+  * packs that depend on Minecraft-only generic terrain attributes, custom images,
+  * compute/tessellation or renderer-specific hooks still need an adapter. Blockbox does provide the
+  * compatibility lightmap, multi-target buffers, shadow map pass and common Iris uniforms so
+  * ordinary compatibility packs have a useful path instead of being bottlenecked by the base
+  * renderer.
   */
-final class BlockboxShaderPipeline(rootDir: File,launchPack: Option[String]=Option(System.getenv("BLOCKBOX_SHADERPACK")).map(_.trim).filter(_.nonEmpty)):
-  private final class Program(val id: Int, val label: String, val renderTargets: Option[Array[Int]], val mipmapBuffers: Array[Int]):
+final class BlockboxShaderPipeline(
+    rootDir: File,
+    launchPack: Option[String] =
+      Option(System.getenv("BLOCKBOX_SHADERPACK")).map(_.trim).filter(_.nonEmpty)
+):
+  private final class Program(
+      val id: Int,
+      val label: String,
+      val renderTargets: Option[Array[Int]],
+      val mipmapBuffers: Array[Int]
+  ):
     private val uniformCache = mutable.HashMap.empty[String, Int]
     var customVersion = -1L
-    def uniform(name: String): Int = uniformCache.getOrElseUpdate(name, glGetUniformLocation(id, name))
+    def uniform(name: String): Int =
+      uniformCache.getOrElseUpdate(name, glGetUniformLocation(id, name))
 
   private val fallbackVertexFile = File(rootDir, "assets/shaders/world.vert")
   private val fallbackFragmentFile = File(rootDir, "assets/shaders/world.frag")
@@ -55,19 +64,22 @@ final class BlockboxShaderPipeline(rootDir: File,launchPack: Option[String]=Opti
   private var activePackName = ""
   private var selectedPackName: Option[String] = None
   private var pendingPackName: Option[String] = None
-  private val customFloats=mutable.LinkedHashMap.empty[String,Float]
-  private var customVersion=0L
+  private val customFloats = mutable.LinkedHashMap.empty[String, Float]
+  private var customVersion = 0L
 
-  def setCustomUniform(name: String,value: Float): Unit =
-    require(name!=null && name.matches("mod_[A-Za-z0-9_]{1,56}") && value.isFinite,"Custom uniforms need a mod_ prefix and a finite value")
-    require(customFloats.contains(name) || customFloats.size<64,"Custom uniform limit is 64")
+  def setCustomUniform(name: String, value: Float): Unit =
+    require(
+      name != null && name.matches("mod_[A-Za-z0-9_]{1,56}") && value.isFinite,
+      "Custom uniforms need a mod_ prefix and a finite value"
+    )
+    require(customFloats.contains(name) || customFloats.size < 64, "Custom uniform limit is 64")
     if !customFloats.get(name).contains(value) then
-      customFloats(name)=value; customVersion+=1
+      customFloats(name) = value; customVersion += 1
 
   private def applyCustomUniforms(p: Program): Unit =
-    if p.customVersion!=customVersion then
-      customFloats.foreach((name,value) => set1f(p,name,value))
-      p.customVersion=customVersion
+    if p.customVersion != customVersion then
+      customFloats.foreach((name, value) => set1f(p, name, value))
+      p.customVersion = customVersion
   private var sourceStamp = Long.MinValue
   private var lastReloadCheck = -1000.0
   private var failedPackName = ""
@@ -131,7 +143,8 @@ final class BlockboxShaderPipeline(rootDir: File,launchPack: Option[String]=Opti
   // wasting VRAM and memory bandwidth even when a pack only used color/normal/material.
   private var desiredGbufferCount = 3
   private var alternateTargets = Set.empty[Int]
-  private var colorFormats = Array(GL_RGBA16F,GL_RGBA16F,GL_RGBA8,GL_RGBA8,GL_RGBA8,GL_RGBA8,GL_RGBA8,GL_RGBA8)
+  private var colorFormats =
+    Array(GL_RGBA16F, GL_RGBA16F, GL_RGBA8, GL_RGBA8, GL_RGBA8, GL_RGBA8, GL_RGBA8, GL_RGBA8)
   private var celestialTime = 150f
   private var antialiasing = true
   def setAntialiasing(enabled: Boolean): Unit = antialiasing = enabled
@@ -142,35 +155,54 @@ final class BlockboxShaderPipeline(rootDir: File,launchPack: Option[String]=Opti
   private var linearLighting = false
   private var planarReflections = false
   def needsWaterReflection: Boolean = planarReflections
-  private var waterSurfaceY=0f
-  def setWaterSurface(y: Float): Unit = waterSurfaceY=y
+  private var waterSurfaceY = 0f
+  def setWaterSurface(y: Float): Unit = waterSurfaceY = y
   private var rayFrameReady = false
+
   /** The active pack asked for the hardware ray-tracing pass. */
   def rayTracingEnabled: Boolean = rayTracing
+
   /** The pack draws its own clouds, so the block cloud layer should stay out of the way. */
   def rendersVolumetricClouds: Boolean = volumetricClouds && activePackName.nonEmpty
+
   /** Fixed-function entities must supply linear colour while drawing into HDR packs. */
   def linearSceneLighting: Boolean = linearLighting && (sceneBound || reflectionBound)
   def updateRayGeometry(chunks: Iterable[Chunk]): Unit =
     if rayTracing then BlockboxRayTrace.updateWorld(chunks, cameraPos._1, cameraPos._3)
   private var lightEnvironment = BlockboxLightmap.Environment.Noon
+
   /** Dusk tint, weather and torch flicker for this frame's lightmap. */
-  def setLightEnvironment(environment: BlockboxLightmap.Environment): Unit = lightEnvironment = environment
+  def setLightEnvironment(environment: BlockboxLightmap.Environment): Unit = lightEnvironment =
+    environment
+  private var stormCells = Vector.empty[WeatherField.Cell]
+  def setWeatherCells(cells: Seq[WeatherField.Cell], x: Float, z: Float): Unit =
+    stormCells = cells.sortBy(c => (c.x - x) * (c.x - x) + (c.z - z) * (c.z - z)).take(4).toVector
+  private def applyWeatherUniforms(p: Program): Unit =
+    set1i(p, "bbStormCellCount", stormCells.size)
+    stormCells.zipWithIndex.foreach { (cell, i) =>
+      val loc = p.uniform(s"bbStormCells[$i]")
+      if loc >= 0 then glUniform4f(loc, cell.x, cell.z, cell.radius, cell.strength)
+    }
 
   /** The compatibility renderer uses the same block/sky lightmap as shader packs. */
-  def beginCompatibilityLighting(day: Float,eyeY: Float = Float.NaN,surfaceY: Float = Float.NaN): Unit =
-    if lightmapTexture==0 then lightmapTexture=createLightmapTexture()
+  def beginCompatibilityLighting(
+      day: Float,
+      eyeY: Float = Float.NaN,
+      surfaceY: Float = Float.NaN
+  ): Unit =
+    if lightmapTexture == 0 then lightmapTexture = createLightmapTexture()
     updateLightmapTexture(day)
     glActiveTexture(GL_TEXTURE1)
-    glEnable(GL_TEXTURE_2D); glBindTexture(GL_TEXTURE_2D,lightmapTexture)
-    glTexEnvi(GL_TEXTURE_ENV,GL_TEXTURE_ENV_MODE,GL_MODULATE)
-    glMatrixMode(GL_TEXTURE); glLoadIdentity(); glTranslatef(0.03125f,0.03125f,0f); glScalef(1f/256f,1f/256f,1f)
+    glEnable(GL_TEXTURE_2D); glBindTexture(GL_TEXTURE_2D, lightmapTexture)
+    glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE)
+    glMatrixMode(GL_TEXTURE); glLoadIdentity(); glTranslatef(0.03125f, 0.03125f, 0f);
+    glScalef(1f / 256f, 1f / 256f, 1f)
     glMatrixMode(GL_MODELVIEW); glActiveTexture(GL_TEXTURE0)
-    UnderwaterFog.begin(eyeY,surfaceY)
+    UnderwaterFog.begin(eyeY, surfaceY)
 
   def endCompatibilityLighting(): Unit =
     UnderwaterFog.end()
-    glActiveTexture(GL_TEXTURE1); glDisable(GL_TEXTURE_2D); glBindTexture(GL_TEXTURE_2D,0)
+    glActiveTexture(GL_TEXTURE1); glDisable(GL_TEXTURE_2D); glBindTexture(GL_TEXTURE_2D, 0)
     glMatrixMode(GL_TEXTURE); glLoadIdentity(); glMatrixMode(GL_MODELVIEW)
     glActiveTexture(GL_TEXTURE0)
   def setCelestialTime(time: Float): Unit = celestialTime = time
@@ -242,7 +274,7 @@ final class BlockboxShaderPipeline(rootDir: File,launchPack: Option[String]=Opti
   def selectPack(name: String): Boolean =
     if !availablePackNames.contains(name) then return false
     if sceneBound || reflectionBound || shadowPassBound then
-      pendingPackName=Some(name)
+      pendingPackName = Some(name)
       return true
     val previous = selectedPackName
     selectedPackName = Some(name)
@@ -253,11 +285,18 @@ final class BlockboxShaderPipeline(rootDir: File,launchPack: Option[String]=Opti
     else
       try
         Files.createDirectories(shaderpacksRoot.toPath)
-        Files.writeString(File(shaderpacksRoot, "active.txt").toPath,name+System.lineSeparator(),StandardCharsets.UTF_8)
-      catch case e: Exception => System.err.println(s"Blockbox shaders: selection could not be saved: ${e.getMessage}")
+        Files.writeString(
+          File(shaderpacksRoot, "active.txt").toPath,
+          name + System.lineSeparator(),
+          StandardCharsets.UTF_8
+        )
+      catch
+        case e: Exception =>
+          System.err.println(s"Blockbox shaders: selection could not be saved: ${e.getMessage}")
       true
 
-  def postProcessing: Boolean = (postPrograms.nonEmpty || finalProgram.nonEmpty) && GL.getCapabilities.OpenGL30
+  def postProcessing: Boolean =
+    (postPrograms.nonEmpty || finalProgram.nonEmpty) && GL.getCapabilities.OpenGL30
   def shadowMapping: Boolean = shadowPrograms.nonEmpty && GL.getCapabilities.OpenGL30
 
   def initialize(): Unit =
@@ -275,8 +314,8 @@ final class BlockboxShaderPipeline(rootDir: File,launchPack: Option[String]=Opti
 
   def reloadIfChanged(now: Double): Unit =
     if !sceneBound && !reflectionBound && !shadowPassBound && pendingPackName.nonEmpty then
-      val next=pendingPackName.get
-      pendingPackName=None
+      val next = pendingPackName.get
+      pendingPackName = None
       selectPack(next)
     if !GL.getCapabilities.OpenGL20 || now - lastReloadCheck < 0.75 then return
     lastReloadCheck = now
@@ -285,8 +324,8 @@ final class BlockboxShaderPipeline(rootDir: File,launchPack: Option[String]=Opti
     if nextPack == failedPackName && nextStamp == failedSourceStamp then return
     if nextPack != activePackName || nextStamp != sourceStamp then reload(force = false)
 
-  /** True while Main is drawing the world into the offscreen G-buffer. Lets the
-    * compatibility renderer avoid double-wrapping the world when shaders are on.
+  /** True while Main is drawing the world into the offscreen G-buffer. Lets the compatibility
+    * renderer avoid double-wrapping the world when shaders are on.
     */
   def isSceneBound: Boolean = sceneBound
 
@@ -339,8 +378,10 @@ final class BlockboxShaderPipeline(rootDir: File,launchPack: Option[String]=Opti
     // sky rendering leaves slots 1..N as NONE, so restore the mapping first.
     enableGBufferWrites()
     clearColorBuffer.clear(); clearColorBuffer.put(r).put(g).put(b).put(1f); clearColorBuffer.flip()
-    clearNormalBuffer.clear(); clearNormalBuffer.put(0.5f).put(0.5f).put(1f).put(1f); clearNormalBuffer.flip()
-    clearMaterialBuffer.clear(); clearMaterialBuffer.put(0f).put(0f).put(0f).put(0f); clearMaterialBuffer.flip()
+    clearNormalBuffer.clear(); clearNormalBuffer.put(0.5f).put(0.5f).put(1f).put(1f);
+    clearNormalBuffer.flip()
+    clearMaterialBuffer.clear(); clearMaterialBuffer.put(0f).put(0f).put(0f).put(0f);
+    clearMaterialBuffer.flip()
     glClearBufferfv(GL_COLOR, 0, clearColorBuffer)
     glClearBufferfv(GL_COLOR, 1, clearNormalBuffer)
     glClearBufferfv(GL_COLOR, 2, clearMaterialBuffer)
@@ -360,23 +401,23 @@ final class BlockboxShaderPipeline(rootDir: File,launchPack: Option[String]=Opti
       sceneDrawBuffers.rewind()
       glDrawBuffers(sceneDrawBuffers)
 
-  /** Preserve opaque depth for refraction while depth-testing water against its
-    * nearest interface. Copying on the GPU avoids order-dependent water aux data.
+  /** Preserve opaque depth for refraction while depth-testing water against its nearest interface.
+    * Copying on the GPU avoids order-dependent water aux data.
     */
   def beginWaterSurface(): Unit =
-    if sceneBound && waterTestDepth!=0 && !waterDepthBound then
-      val old=glGetInteger(GL_TEXTURE_BINDING_2D)
-      glBindTexture(GL_TEXTURE_2D,waterTestDepth)
-      glCopyTexSubImage2D(GL_TEXTURE_2D,0,0,0,0,0,frameWidth,frameHeight)
-      glBindTexture(GL_TEXTURE_2D,old)
-      glFramebufferTexture2D(GL_FRAMEBUFFER,GL_DEPTH_ATTACHMENT,GL_TEXTURE_2D,waterTestDepth,0)
-      waterDepthBound=true
+    if sceneBound && waterTestDepth != 0 && !waterDepthBound then
+      val old = glGetInteger(GL_TEXTURE_BINDING_2D)
+      glBindTexture(GL_TEXTURE_2D, waterTestDepth)
+      glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, frameWidth, frameHeight)
+      glBindTexture(GL_TEXTURE_2D, old)
+      glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, waterTestDepth, 0)
+      waterDepthBound = true
       glDepthMask(true)
 
   def endWaterSurface(): Unit =
     if waterDepthBound then
-      glFramebufferTexture2D(GL_FRAMEBUFFER,GL_DEPTH_ATTACHMENT,GL_TEXTURE_2D,sceneDepth,0)
-      waterDepthBound=false
+      glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, sceneDepth, 0)
+      waterDepthBound = false
       glDepthMask(false)
 
   /** Run deferred/composite/final passes and return to the real framebuffer. */
@@ -388,7 +429,27 @@ final class BlockboxShaderPipeline(rootDir: File,launchPack: Option[String]=Opti
     if rayTracing && sceneDepth != 0 then
       val waterNormal = if gbufferCount > 3 then sceneExtraColors(0) else 0
       val waterDepth = if gbufferCount > 4 then sceneExtraColors(1) else 0
-      rayFrameReady = BlockboxRayTrace.trace(rootDir, frameWidth, frameHeight, cameraPos, previousCameraPos, sunDir, daylight, rainAmount, worldTime, nearPlane, farPlane, projectionInverse, modelViewInverse, previousProjection, previousModelView, sceneDepth, sceneNormal, waterNormal, waterDepth)
+      rayFrameReady = BlockboxRayTrace.trace(
+        rootDir,
+        frameWidth,
+        frameHeight,
+        cameraPos,
+        previousCameraPos,
+        sunDir,
+        daylight,
+        rainAmount,
+        worldTime,
+        nearPlane,
+        farPlane,
+        projectionInverse,
+        modelViewInverse,
+        previousProjection,
+        previousModelView,
+        sceneDepth,
+        sceneNormal,
+        waterNormal,
+        waterDepth
+      )
 
     glDisable(GL_DEPTH_TEST)
     glDepthMask(false)
@@ -441,14 +502,19 @@ final class BlockboxShaderPipeline(rootDir: File,launchPack: Option[String]=Opti
     glDepthMask(true)
     glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
 
-  /** Render terrain once from the active celestial light's point of view. Main calls
-    * this before the normal chunk pass while the atlas/client arrays are already set.
-    * The scene framebuffer and camera matrices are restored by endShadow().
+  /** Render terrain once from the active celestial light's point of view. Main calls this before
+    * the normal chunk pass while the atlas/client arrays are already set. The scene framebuffer and
+    * camera matrices are restored by endShadow().
     */
   def beginShadow(
       cam: (Float, Float, Float),
-      sd: (Float, Float, Float), md: (Float, Float, Float),
-      dl: Float, radius: Float, time: Float, rain: Float, wetness: Float
+      sd: (Float, Float, Float),
+      md: (Float, Float, Float),
+      dl: Float,
+      radius: Float,
+      time: Float,
+      rain: Float,
+      wetness: Float
   ): Boolean =
     if !shadowMapping then return false
     try
@@ -457,11 +523,14 @@ final class BlockboxShaderPipeline(rootDir: File,launchPack: Option[String]=Opti
       cameraPos = cam; sunDir = sd; moonDir = md; daylight = dl; worldTime = time
       rainAmount = rain.max(0f).min(1f); wetnessAmount = wetness.max(0f).min(1f)
       val requestedRadius = radius.max(32f)
-      activeShadowDistance = if configuredShadowDistance > 0f then requestedRadius.min(configuredShadowDistance.max(32f)) else requestedRadius
+      activeShadowDistance = if configuredShadowDistance > 0f then
+        requestedRadius.min(configuredShadowDistance.max(32f))
+      else requestedRadius
       updateLightmapTexture(daylight)
       val light = if sd._2 > -0.08f then sd else md
       glActiveTexture(GL_TEXTURE1)
-      glMatrixMode(GL_TEXTURE); glLoadIdentity(); glTranslatef(0.03125f, 0.03125f, 0.03125f); glScalef(1f / 256f, 1f / 256f, 1f / 256f)
+      glMatrixMode(GL_TEXTURE); glLoadIdentity(); glTranslatef(0.03125f, 0.03125f, 0.03125f);
+      glScalef(1f / 256f, 1f / 256f, 1f / 256f)
       glMatrixMode(GL_MODELVIEW); glActiveTexture(GL_TEXTURE0)
 
       glBindFramebuffer(GL_FRAMEBUFFER, shadowFbo)
@@ -496,7 +565,9 @@ final class BlockboxShaderPipeline(rootDir: File,launchPack: Option[String]=Opti
       true
     catch
       case e: Throwable =>
-        System.err.println(s"Blockbox shaders: shadow pass disabled for this frame: ${e.getMessage}")
+        System.err.println(
+          s"Blockbox shaders: shadow pass disabled for this frame: ${e.getMessage}"
+        )
         if shadowPassBound then endShadow()
         false
 
@@ -511,7 +582,8 @@ final class BlockboxShaderPipeline(rootDir: File,launchPack: Option[String]=Opti
     glMatrixMode(GL_MODELVIEW); glPopMatrix()
     glMatrixMode(GL_PROJECTION); glPopMatrix()
     glMatrixMode(GL_MODELVIEW)
-    if sceneBound && sceneFbo != 0 then glBindFramebuffer(GL_FRAMEBUFFER, sceneFbo) else glBindFramebuffer(GL_FRAMEBUFFER, 0)
+    if sceneBound && sceneFbo != 0 then glBindFramebuffer(GL_FRAMEBUFFER, sceneFbo)
+    else glBindFramebuffer(GL_FRAMEBUFFER, 0)
     glViewport(0, 0, frameWidth.max(1), frameHeight.max(1))
     // Shadow stages are allowed to use the compatibility lightmap matrix. Do not
     // leak it into fixed-function UI/viewmodel rendering between passes.
@@ -538,8 +610,10 @@ final class BlockboxShaderPipeline(rootDir: File,launchPack: Option[String]=Opti
     set3f(p, "moonPosition", moonDir._1, moonDir._2, moonDir._3)
     set1i(p, "shadowMapResolution", shadowTargetSize)
     set1f(p, "shadowDistance", activeShadowDistance)
-    setMat4(p, "shadowProjection", shadowProjection); setMat4(p, "shadowProjectionInverse", shadowProjectionInverse)
-    setMat4(p, "shadowModelView", shadowModelView); setMat4(p, "shadowModelViewInverse", shadowModelViewInverse)
+    setMat4(p, "shadowProjection", shadowProjection);
+    setMat4(p, "shadowProjectionInverse", shadowProjectionInverse)
+    setMat4(p, "shadowModelView", shadowModelView);
+    setMat4(p, "shadowModelViewInverse", shadowModelViewInverse)
     glActiveTexture(GL_TEXTURE0)
 
   private def bindShadowTargets(targets: Option[Array[Int]]): Unit =
@@ -557,19 +631,28 @@ final class BlockboxShaderPipeline(rootDir: File,launchPack: Option[String]=Opti
         var location = 0
         while location < count do
           val logical = logicalTargets(location)
-          val texture = if logical == 0 then shadowColor0 else if logical == 1 then shadowColor1 else 0
-          glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0 + location, GL_TEXTURE_2D, texture, 0)
+          val texture =
+            if logical == 0 then shadowColor0 else if logical == 1 then shadowColor1 else 0
+          glFramebufferTexture2D(
+            GL_FRAMEBUFFER,
+            GL_COLOR_ATTACHMENT0 + location,
+            GL_TEXTURE_2D,
+            texture,
+            0
+          )
           shadowDrawBuffers.put(if texture != 0 then GL_COLOR_ATTACHMENT0 + location else GL_NONE)
           location += 1
         shadowDrawBuffers.flip(); glDrawBuffers(shadowDrawBuffers)
       case _ =>
         glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, shadowColor0, 0)
         glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1, GL_TEXTURE_2D, shadowColor1, 0)
-        shadowDrawBuffers.clear(); shadowDrawBuffers.put(GL_COLOR_ATTACHMENT0).put(GL_COLOR_ATTACHMENT1); shadowDrawBuffers.flip(); glDrawBuffers(shadowDrawBuffers)
+        shadowDrawBuffers.clear();
+        shadowDrawBuffers.put(GL_COLOR_ATTACHMENT0).put(GL_COLOR_ATTACHMENT1);
+        shadowDrawBuffers.flip(); glDrawBuffers(shadowDrawBuffers)
 
-  /** Lightmap sampler state plus the fixed-function texture matrix. Shader packs no longer
-    * depend on that matrix, but the compatibility path still does, and a stale wrap mode
-    * or an unbound unit samples black.
+  /** Lightmap sampler state plus the fixed-function texture matrix. Shader packs no longer depend
+    * on that matrix, but the compatibility path still does, and a stale wrap mode or an unbound
+    * unit samples black.
     */
   private def bindLightmapForDraw(): Unit =
     if lightmapTexture == 0 then lightmapTexture = createLightmapTexture()
@@ -588,12 +671,21 @@ final class BlockboxShaderPipeline(rootDir: File,launchPack: Option[String]=Opti
     glActiveTexture(GL_TEXTURE0)
 
   def beginWorld(
-      fr: Float, fg: Float, fb: Float,
-      fs: Float, fe: Float,
-      dl: Float, time: Float,
-      sd: (Float, Float, Float), md: (Float, Float, Float),
-      cam: (Float, Float, Float), near: Float, far: Float,
-      rain: Float, wetness: Float, underwater: Boolean
+      fr: Float,
+      fg: Float,
+      fb: Float,
+      fs: Float,
+      fe: Float,
+      dl: Float,
+      time: Float,
+      sd: (Float, Float, Float),
+      md: (Float, Float, Float),
+      cam: (Float, Float, Float),
+      near: Float,
+      far: Float,
+      rain: Float,
+      wetness: Float,
+      underwater: Boolean
   ): Boolean =
     if worldPrograms.isEmpty then return false
     fogR = fr; fogG = fg; fogB = fb
@@ -627,49 +719,51 @@ final class BlockboxShaderPipeline(rootDir: File,launchPack: Option[String]=Opti
 
   def setPass(pass: Int): Unit = usePass(pass)
 
-  /** A real mirrored view preserves off-screen trees and their alpha silhouettes.
-    * No water is drawn into this target; uncovered pixels keep zero coverage for
-    * the atmospheric sky fallback. Filtering the premultiplied coverage prevents
-    * distant leaves becoming a field of isolated screen-space ray hits.
+  /** A real mirrored view preserves off-screen trees and their alpha silhouettes. No water is drawn
+    * into this target; uncovered pixels keep zero coverage for the atmospheric sky fallback.
+    * Filtering the premultiplied coverage prevents distant leaves becoming a field of isolated
+    * screen-space ray hits.
     */
   def captureWaterReflection(height: Float)(draw: => Unit): Boolean =
-    if !sceneBound || !planarReflections || eyeInWater!=0 || !height.isFinite || cameraPos._2<=height || reflectionFbo==0 then return false
-    val savedCamera=cameraPos
-    copyMatrix(modelView,reflectionModelView)
-    copyMatrix(modelViewInverse,reflectionModelViewInverse)
-    reflectionBound=true; sceneBound=false
-    reflectionHeight=height
+    if !sceneBound || !planarReflections || eyeInWater != 0 || !height.isFinite || cameraPos._2 <= height || reflectionFbo == 0
+    then return false
+    val savedCamera = cameraPos
+    copyMatrix(modelView, reflectionModelView)
+    copyMatrix(modelViewInverse, reflectionModelViewInverse)
+    reflectionBound = true; sceneBound = false
+    reflectionHeight = height
     glMatrixMode(GL_MODELVIEW); glPushMatrix()
     glPushAttrib(GL_ENABLE_BIT | GL_DEPTH_BUFFER_BIT | GL_COLOR_BUFFER_BIT | GL_VIEWPORT_BIT)
     try
-      glBindFramebuffer(GL_FRAMEBUFFER,reflectionFbo)
+      glBindFramebuffer(GL_FRAMEBUFFER, reflectionFbo)
       glDrawBuffer(GL_COLOR_ATTACHMENT0)
-      glViewport(0,0,(targetW/2).max(1),(targetH/2).max(1))
+      glViewport(0, 0, (targetW / 2).max(1), (targetH / 2).max(1))
       glDepthMask(true); glEnable(GL_DEPTH_TEST); glDisable(GL_BLEND); glDisable(GL_FOG)
-      glClearColor(0,0,0,0); glClearDepth(1)
+      glClearColor(0, 0, 0, 0); glClearDepth(1)
       glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
-      glTranslatef(0,2f*height,0); glScalef(1,-1,1)
-      reflectionClipPlane.clear(); reflectionClipPlane.put(0).put(1).put(0).put(-height.toDouble).flip()
-      glClipPlane(GL_CLIP_PLANE0,reflectionClipPlane); glEnable(GL_CLIP_PLANE0)
-      cameraPos=(savedCamera._1,2f*height-savedCamera._2,savedCamera._3)
-      captureMatrix(GL_MODELVIEW_MATRIX,modelView); invertMatrix(modelView,modelViewInverse)
+      glTranslatef(0, 2f * height, 0); glScalef(1, -1, 1)
+      reflectionClipPlane.clear();
+      reflectionClipPlane.put(0).put(1).put(0).put(-height.toDouble).flip()
+      glClipPlane(GL_CLIP_PLANE0, reflectionClipPlane); glEnable(GL_CLIP_PLANE0)
+      cameraPos = (savedCamera._1, 2f * height - savedCamera._2, savedCamera._3)
+      captureMatrix(GL_MODELVIEW_MATRIX, modelView); invertMatrix(modelView, modelViewInverse)
       usePass(0)
       draw
       end()
-      glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D,reflectionColor)
+      glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, reflectionColor)
       glGenerateMipmap(GL_TEXTURE_2D)
-      reflectionReady=true
+      reflectionReady = true
       true
     finally
-      glUseProgram(0); activeProgram=null
-      cameraPos=savedCamera
-      copyMatrix(reflectionModelView,modelView)
-      copyMatrix(reflectionModelViewInverse,modelViewInverse)
-      reflectionBound=false; sceneBound=true
-      glBindFramebuffer(GL_FRAMEBUFFER,sceneFbo)
+      glUseProgram(0); activeProgram = null
+      cameraPos = savedCamera
+      copyMatrix(reflectionModelView, modelView)
+      copyMatrix(reflectionModelViewInverse, modelViewInverse)
+      reflectionBound = false; sceneBound = true
+      glBindFramebuffer(GL_FRAMEBUFFER, sceneFbo)
       glPopAttrib()
       glMatrixMode(GL_MODELVIEW); glPopMatrix()
-      glViewport(0,0,targetW,targetH)
+      glViewport(0, 0, targetW, targetH)
       usePass(0)
 
   def beginEntityLighting(): Boolean =
@@ -677,7 +771,7 @@ final class BlockboxShaderPipeline(rootDir: File,launchPack: Option[String]=Opti
     else
       enableGBufferWrites()
       usePass(1)
-      if activeProgram!=null then set1i(activeProgram,"bbEntityPass",1)
+      if activeProgram != null then set1i(activeProgram, "bbEntityPass", 1)
       true
 
   def endEntityLighting(): Unit =
@@ -728,6 +822,7 @@ final class BlockboxShaderPipeline(rootDir: File,launchPack: Option[String]=Opti
     applyWorldUniforms(p, pass)
 
   private def applyWorldUniforms(p: Program, pass: Int): Unit =
+    applyWeatherUniforms(p)
     val phase = BlockboxSky.dayPhase(celestialTime)
     val minecraftTicks = ((phase * 24000f).toInt % 24000 + 24000) % 24000
     val worldDay = math.floor(worldTime.toDouble / BlockboxSky.dayNightCycleSeconds.toDouble).toInt
@@ -738,39 +833,56 @@ final class BlockboxShaderPipeline(rootDir: File,launchPack: Option[String]=Opti
     bindTextureUniform(p, "lightmap", 1, lightmapTexture)
     bindTextureUniform(p, "normals", 2, normalAtlasFallback)
     bindTextureUniform(p, "specular", 3, specularAtlasFallback)
-    set3f(p, "uFogColor", fogR, fogG, fogB); set3f(p, "fogColor", fogR, fogG, fogB); set3f(p, "skyColor", fogR, fogG, fogB)
+    set3f(p, "uFogColor", fogR, fogG, fogB); set3f(p, "fogColor", fogR, fogG, fogB);
+    set3f(p, "skyColor", fogR, fogG, fogB)
     set1f(p, "uFogStart", fogStart); set1f(p, "uFogEnd", fogEnd)
     set1f(p, "uDaylight", daylight); set1f(p, "sunBrightness", daylight)
     set1f(p, "bbLightning", lightEnvironment.flash.max(0f).min(1f))
-    set1f(p, "uNightDarkness", if nightShading then ((1f-daylight)/0.82f*0.65f).max(0f).min(0.65f) else 0f)
-    set1f(p, "uTime", worldTime); set1f(p, "frameTimeCounter", worldTime % 3600f); set1f(p, "frameTime", frameTimeSeconds)
+    set1f(
+      p,
+      "uNightDarkness",
+      if nightShading then ((1f - daylight) / 0.82f * 0.65f).max(0f).min(0.65f) else 0f
+    )
+    set1f(p, "uTime", worldTime); set1f(p, "frameTimeCounter", worldTime % 3600f);
+    set1f(p, "frameTime", frameTimeSeconds)
     set1i(p, "worldTime", minecraftTicks); set1i(p, "worldDay", worldDay)
-    set1f(p, "rainStrength", rainAmount); set1f(p, "wetness", wetnessAmount); set1f(p, "screenBrightness", 1f); set1f(p, "nightVision", 0f); set1f(p, "blindness", 0f)
+    set1f(p, "rainStrength", rainAmount); set1f(p, "wetness", wetnessAmount);
+    set1f(p, "screenBrightness", 1f); set1f(p, "nightVision", 0f); set1f(p, "blindness", 0f)
     set1i(p, "uPass", pass); set1i(p, "renderStage", pass)
-    set1i(p,"bbEntityPass",0)
-    set1i(p,"bbPlanarPass",if reflectionBound then 1 else 0)
+    set1i(p, "bbEntityPass", 0)
+    set1i(p, "bbPlanarPass", if reflectionBound then 1 else 0)
     set1i(p, "frameCounter", (frameIndex % 720720L).toInt)
-    set3f(p, "uSunDir", sunDir._1, sunDir._2, sunDir._3); set3f(p, "sunPosition", sunDir._1, sunDir._2, sunDir._3)
-    set3f(p, "uMoonDir", moonDir._1, moonDir._2, moonDir._3); set3f(p, "moonPosition", moonDir._1, moonDir._2, moonDir._3)
+    set3f(p, "uSunDir", sunDir._1, sunDir._2, sunDir._3);
+    set3f(p, "sunPosition", sunDir._1, sunDir._2, sunDir._3)
+    set3f(p, "uMoonDir", moonDir._1, moonDir._2, moonDir._3);
+    set3f(p, "moonPosition", moonDir._1, moonDir._2, moonDir._3)
     set3f(p, "cameraPosition", cameraPos._1, cameraPos._2, cameraPos._3)
     set3i(p, "cameraPositionInt", cix, ciy, ciz)
     set3f(p, "cameraPositionFract", cameraPos._1 - cix, cameraPos._2 - ciy, cameraPos._3 - ciz)
     set1f(p, "eyeAltitude", cameraPos._2)
     set1i(p, "isEyeInWater", eyeInWater)
-    set1f(p,"uWaterSurfaceY",waterSurfaceY)
+    set1f(p, "uWaterSurfaceY", waterSurfaceY)
     set2f(p, "eyeBrightness", 240f, (daylight.max(0.06f) * 240f).min(240f))
     set2f(p, "eyeBrightnessSmooth", 240f, (daylight.max(0.06f) * 240f).min(240f))
     set1i(p, "hideGUI", 0); set1i(p, "heldBlockLightValue", 0)
-    set3f(p, "previousCameraPosition", previousCameraPos._1, previousCameraPos._2, previousCameraPos._3)
+    set3f(
+      p,
+      "previousCameraPosition",
+      previousCameraPos._1,
+      previousCameraPos._2,
+      previousCameraPos._3
+    )
     set2f(p, "viewSize", frameWidth.toFloat, frameHeight.toFloat)
     set2f(p, "uResolution", frameWidth.toFloat, frameHeight.toFloat)
     set1f(p, "viewWidth", frameWidth.toFloat); set1f(p, "viewHeight", frameHeight.toFloat)
     set1f(p, "near", nearPlane); set1f(p, "far", farPlane)
     set1f(p, "aspectRatio", frameWidth.toFloat / frameHeight.max(1).toFloat)
     setMat4(p, "gbufferProjection", projection); setMat4(p, "projectionMatrix", projection)
-    setMat4(p, "gbufferProjectionInverse", projectionInverse); setMat4(p, "projectionMatrixInverse", projectionInverse)
+    setMat4(p, "gbufferProjectionInverse", projectionInverse);
+    setMat4(p, "projectionMatrixInverse", projectionInverse)
     setMat4(p, "gbufferModelView", modelView); setMat4(p, "modelViewMatrix", modelView)
-    setMat4(p, "gbufferModelViewInverse", modelViewInverse); setMat4(p, "modelViewMatrixInverse", modelViewInverse)
+    setMat4(p, "gbufferModelViewInverse", modelViewInverse);
+    setMat4(p, "modelViewMatrixInverse", modelViewInverse)
     setMat4(p, "gbufferPreviousProjection", previousProjection)
     setMat4(p, "gbufferPreviousModelView", previousModelView)
     applyShadowUniforms(p)
@@ -779,27 +891,37 @@ final class BlockboxShaderPipeline(rootDir: File,launchPack: Option[String]=Opti
     glActiveTexture(GL_TEXTURE0)
 
   private def applyPostUniforms(p: Program, width: Int, height: Int, time: Float): Unit =
-    if reflectionReady then bindTextureUniform(p,"planarReflection",7,reflectionColor)
-    set1i(p,"planarActive",if reflectionReady then 1 else 0)
-    set1f(p,"planarHeight",reflectionHeight)
-    set2f(p,"planarSize",(targetW/2).max(1).toFloat,(targetH/2).max(1).toFloat)
-    set1f(p,"uWaterSurfaceY",waterSurfaceY)
-    set1i(p,"uAntialiasing",if antialiasing then 1 else 0)
+    applyWeatherUniforms(p)
+    if reflectionReady then bindTextureUniform(p, "planarReflection", 7, reflectionColor)
+    set1i(p, "planarActive", if reflectionReady then 1 else 0)
+    set1f(p, "planarHeight", reflectionHeight)
+    set2f(p, "planarSize", (targetW / 2).max(1).toFloat, (targetH / 2).max(1).toFloat)
+    set1f(p, "uWaterSurfaceY", waterSurfaceY)
+    set1i(p, "uAntialiasing", if antialiasing then 1 else 0)
     val phase = BlockboxSky.dayPhase(celestialTime)
     val minecraftTicks = ((phase * 24000f).toInt % 24000 + 24000) % 24000
-    set1f(p, "frameTimeCounter", time % 3600f); set1f(p, "frameTime", frameTimeSeconds); set1f(p, "uTime", time)
+    set1f(p, "frameTimeCounter", time % 3600f); set1f(p, "frameTime", frameTimeSeconds);
+    set1f(p, "uTime", time)
     set1i(p, "worldTime", minecraftTicks)
     set1i(p, "frameCounter", (frameIndex % 720720L).toInt)
-    set2f(p, "viewSize", width.toFloat, height.toFloat); set2f(p, "uResolution", width.toFloat, height.toFloat)
+    set2f(p, "viewSize", width.toFloat, height.toFloat);
+    set2f(p, "uResolution", width.toFloat, height.toFloat)
     set1f(p, "viewWidth", width.toFloat); set1f(p, "viewHeight", height.toFloat)
     set1f(p, "near", nearPlane); set1f(p, "far", farPlane)
     set1f(p, "aspectRatio", width.toFloat / height.max(1).toFloat)
     set3f(p, "cameraPosition", cameraPos._1, cameraPos._2, cameraPos._3)
-    set3f(p, "previousCameraPosition", previousCameraPos._1, previousCameraPos._2, previousCameraPos._3)
+    set3f(
+      p,
+      "previousCameraPosition",
+      previousCameraPos._1,
+      previousCameraPos._2,
+      previousCameraPos._3
+    )
     set3f(p, "sunPosition", sunDir._1, sunDir._2, sunDir._3)
     set3f(p, "moonPosition", moonDir._1, moonDir._2, moonDir._3)
     set1f(p, "sunBrightness", daylight)
-    set1f(p, "rainStrength", rainAmount); set1f(p, "wetness", wetnessAmount); set1f(p, "screenBrightness", 1f); set1f(p, "nightVision", 0f); set1f(p, "blindness", 0f)
+    set1f(p, "rainStrength", rainAmount); set1f(p, "wetness", wetnessAmount);
+    set1f(p, "screenBrightness", 1f); set1f(p, "nightVision", 0f); set1f(p, "blindness", 0f)
     set1f(p, "bbLightning", lightEnvironment.flash.max(0f).min(1f))
     set1f(p, "eyeAltitude", cameraPos._2)
     set1i(p, "isEyeInWater", eyeInWater)
@@ -808,11 +930,15 @@ final class BlockboxShaderPipeline(rootDir: File,launchPack: Option[String]=Opti
     set1i(p, "hideGUI", 0); set1i(p, "heldBlockLightValue", 0)
     set3f(p, "fogColor", fogR, fogG, fogB); set3f(p, "skyColor", fogR, fogG, fogB)
     set1f(p, "uFogStart", fogStart); set1f(p, "uFogEnd", fogEnd)
-    setMat4(p, "gbufferProjection", projection); setMat4(p, "gbufferProjectionInverse", projectionInverse)
-    setMat4(p, "gbufferModelView", modelView); setMat4(p, "gbufferModelViewInverse", modelViewInverse)
-    setMat4(p, "gbufferPreviousProjection", previousProjection); setMat4(p, "gbufferPreviousModelView", previousModelView)
+    setMat4(p, "gbufferProjection", projection);
+    setMat4(p, "gbufferProjectionInverse", projectionInverse)
+    setMat4(p, "gbufferModelView", modelView);
+    setMat4(p, "gbufferModelViewInverse", modelViewInverse)
+    setMat4(p, "gbufferPreviousProjection", previousProjection);
+    setMat4(p, "gbufferPreviousModelView", previousModelView)
     applyShadowUniforms(p)
     applyRayUniforms(p)
+    applyCustomUniforms(p)
 
   private def applyRayUniforms(p: Program): Unit =
     val lighting = if rayFrameReady then BlockboxRayTrace.lightingTexture else 0
@@ -836,27 +962,46 @@ final class BlockboxShaderPipeline(rootDir: File,launchPack: Option[String]=Opti
     if shadowColor1 != 0 then bindTextureUniform(p, "shadowcolor1", 12, shadowColor1)
     set1i(p, "shadowMapResolution", shadowTargetSize.max(1))
     set1f(p, "shadowDistance", activeShadowDistance)
-    setMat4(p, "shadowProjection", shadowProjection); setMat4(p, "shadowProjectionInverse", shadowProjectionInverse)
-    setMat4(p, "shadowModelView", shadowModelView); setMat4(p, "shadowModelViewInverse", shadowModelViewInverse)
+    setMat4(p, "shadowProjection", shadowProjection);
+    setMat4(p, "shadowProjectionInverse", shadowProjectionInverse)
+    setMat4(p, "shadowModelView", shadowModelView);
+    setMat4(p, "shadowModelViewInverse", shadowModelViewInverse)
 
-  private def drawFullscreen(p: Program | Null, colors: Array[Int], depthTex: Int, width: Int, height: Int, time: Float): Unit =
+  private def drawFullscreen(
+      p: Program | Null,
+      colors: Array[Int],
+      depthTex: Int,
+      width: Int,
+      height: Int,
+      time: Float
+  ): Unit =
     if p != null then
       val prog = p.asInstanceOf[Program]
       glUseProgram(prog.id)
       val color0 = if colors.nonEmpty then colors(0) else 0
-      bindTextureUniform(prog, "colortex0", 0, color0); bindTextureUniform(prog, "gcolor", 0, color0); bindTextureUniform(prog, "uScene", 0, color0)
-      bindTextureUniform(prog, "depthtex0", 1, depthTex); bindTextureUniform(prog, "depthtex1", 1, depthTex); bindTextureUniform(prog, "depthtex2", 1, depthTex); bindTextureUniform(prog, "uDepth", 1, depthTex)
+      bindTextureUniform(prog, "colortex0", 0, color0);
+      bindTextureUniform(prog, "gcolor", 0, color0); bindTextureUniform(prog, "uScene", 0, color0)
+      bindTextureUniform(prog, "depthtex0", 1, depthTex);
+      bindTextureUniform(prog, "depthtex1", 1, depthTex);
+      bindTextureUniform(prog, "depthtex2", 1, depthTex);
+      bindTextureUniform(prog, "uDepth", 1, depthTex)
       val color1 = if colors.length > 1 then colors(1) else sceneNormal
       val color2 = if colors.length > 2 then colors(2) else sceneMaterial
-      bindTextureUniform(prog, "colortex1", 2, color1); bindTextureUniform(prog, "gdepth", 2, color1); bindTextureUniform(prog, "normals", 2, color1); bindTextureUniform(prog, "normaltex0", 2, color1)
-      bindTextureUniform(prog, "colortex2", 3, color2); bindTextureUniform(prog, "gnormal", 3, color2); bindTextureUniform(prog, "materialtex0", 3, color2); bindTextureUniform(prog, "uMaterial", 3, color2)
+      bindTextureUniform(prog, "colortex1", 2, color1);
+      bindTextureUniform(prog, "gdepth", 2, color1); bindTextureUniform(prog, "normals", 2, color1);
+      bindTextureUniform(prog, "normaltex0", 2, color1)
+      bindTextureUniform(prog, "colortex2", 3, color2);
+      bindTextureUniform(prog, "gnormal", 3, color2);
+      bindTextureUniform(prog, "materialtex0", 3, color2);
+      bindTextureUniform(prog, "uMaterial", 3, color2)
       var colorIndex = 3
       while colorIndex < colors.length && colorIndex < gbufferCount do
         val tex = colors(colorIndex)
         val unit = colorIndex + 1
         bindTextureUniform(prog, s"colortex$colorIndex", unit, tex)
         if colorIndex == 3 then bindTextureUniform(prog, "composite", unit, tex)
-        if colorIndex >= 4 && colorIndex <= 7 then bindTextureUniform(prog, s"gaux${colorIndex - 3}", unit, tex)
+        if colorIndex >= 4 && colorIndex <= 7 then
+          bindTextureUniform(prog, s"gaux${colorIndex - 3}", unit, tex)
         colorIndex += 1
       bindTextureUniform(prog, "noisetex", 9, noiseTexture)
       applyPostUniforms(prog, width, height, time)
@@ -877,16 +1022,22 @@ final class BlockboxShaderPipeline(rootDir: File,launchPack: Option[String]=Opti
     glTexCoord2f(0f, 1f); glVertex2f(-1f, 1f)
     glEnd()
 
-  /** Final stage of finishFrame: resolve a scaled scene when enabled,
-    * otherwise draw directly to the window.
+  /** Final stage of finishFrame: resolve a scaled scene when enabled, otherwise draw directly to
+    * the window.
     */
-  private def drawFinalThroughFovea(p: Program | Null, colors: Array[Int], depthTex: Int, width: Int, height: Int, time: Float): Unit =
+  private def drawFinalThroughFovea(
+      p: Program | Null,
+      colors: Array[Int],
+      depthTex: Int,
+      width: Int,
+      height: Int,
+      time: Float
+  ): Unit =
     val fovea = foveaHook
     if fovea != null && fovea.supportsFbos && fovea.enabled && fovea.bindTarget(width, height) then
       drawFullscreen(p, colors, depthTex, fovea.targetWidth, fovea.targetHeight, time)
       fovea.upsampleToWindow(width, height)
-    else
-      drawFullscreen(p, colors, depthTex, width, height, time)
+    else drawFullscreen(p, colors, depthTex, width, height, time)
 
   private def sceneColorArray(): Array[Int] =
     val out = new Array[Int](gbufferCount)
@@ -907,13 +1058,15 @@ final class BlockboxShaderPipeline(rootDir: File,launchPack: Option[String]=Opti
     var i = 0
     while i < count do
       val logical = targets(i)
-      postDrawBuffers.put(if logical >= 0 && logical < gbufferCount then GL_COLOR_ATTACHMENT0 + logical else GL_NONE)
+      postDrawBuffers.put(
+        if logical >= 0 && logical < gbufferCount then GL_COLOR_ATTACHMENT0 + logical else GL_NONE
+      )
       i += 1
     postDrawBuffers.flip()
     glDrawBuffers(postDrawBuffers)
 
-  /** Attach alternate logical buffers to physical output locations 0..N. The
-    * returned logical indices are exactly the buffers that will flip after drawing.
+  /** Attach alternate logical buffers to physical output locations 0..N. The returned logical
+    * indices are exactly the buffers that will flip after drawing.
     */
   private def bindPostTargets(targets: Array[Int], alternates: Array[Int]): Array[Int] =
     if postFbo == 0 || targets.isEmpty then return Array.empty[Int]
@@ -929,7 +1082,13 @@ final class BlockboxShaderPipeline(rootDir: File,launchPack: Option[String]=Opti
     while location < count do
       val logical = targets(location)
       if logical >= 0 && logical < gbufferCount && alternates(logical) != 0 then
-        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0 + location, GL_TEXTURE_2D, alternates(logical), 0)
+        glFramebufferTexture2D(
+          GL_FRAMEBUFFER,
+          GL_COLOR_ATTACHMENT0 + location,
+          GL_TEXTURE_2D,
+          alternates(logical),
+          0
+        )
         postDrawBuffers.put(GL_COLOR_ATTACHMENT0 + location)
         if !written.contains(logical) then written += logical
       else postDrawBuffers.put(GL_NONE)
@@ -995,15 +1154,26 @@ final class BlockboxShaderPipeline(rootDir: File,launchPack: Option[String]=Opti
 
     val built = mutable.ArrayBuffer.empty[Program]
     try
-      val stages=mutable.HashMap.empty[String,Option[Program]]
-      def optional(name: String): Option[Program]=stages.getOrElseUpdate(name,compileOptionalStage(name,nextPackDir))
+      val stages = mutable.HashMap.empty[String, Option[Program]]
+      def optional(name: String): Option[Program] =
+        stages.getOrElseUpdate(name, compileOptionalStage(name, nextPackDir))
       def firstStage(names: Seq[String]): Option[Program] =
         names.iterator.map(optional).collectFirst { case Some(p) => p }
 
-      val terrain = firstStage(Seq("gbuffers_terrain_solid", "gbuffers_terrain")).getOrElse(compileStage("gbuffers_terrain", nextPackDir, fallbackVertex, fallbackFragment)); built += terrain
-      val texturedOpt = firstStage(Seq("gbuffers_terrain_cutout", "gbuffers_textured_lit", "gbuffers_textured")); texturedOpt.foreach(built += _)
-      val translucentOpt = firstStage(Seq("gbuffers_translucent", "gbuffers_textured_lit", "gbuffers_textured")); translucentOpt.foreach(p => if !built.exists(_.id == p.id) then built += p)
-      val waterOpt = firstStage(Seq("gbuffers_water", "gbuffers_translucent")); waterOpt.foreach(p => if !built.exists(_.id == p.id) then built += p)
+      val terrain = firstStage(Seq("gbuffers_terrain_solid", "gbuffers_terrain")).getOrElse(
+        compileStage("gbuffers_terrain", nextPackDir, fallbackVertex, fallbackFragment)
+      );
+      built += terrain
+      val texturedOpt = firstStage(
+        Seq("gbuffers_terrain_cutout", "gbuffers_textured_lit", "gbuffers_textured")
+      );
+      texturedOpt.foreach(built += _)
+      val translucentOpt = firstStage(
+        Seq("gbuffers_translucent", "gbuffers_textured_lit", "gbuffers_textured")
+      );
+      translucentOpt.foreach(p => if !built.exists(_.id == p.id) then built += p)
+      val waterOpt = firstStage(Seq("gbuffers_water", "gbuffers_translucent"));
+      waterOpt.foreach(p => if !built.exists(_.id == p.id) then built += p)
       val textured = texturedOpt.getOrElse(terrain)
       val translucent = translucentOpt.getOrElse(textured)
       val water = waterOpt.getOrElse(translucent)
@@ -1011,12 +1181,13 @@ final class BlockboxShaderPipeline(rootDir: File,launchPack: Option[String]=Opti
       // Iris supplies a default shadow shader when a pack omits shadow.vsh/fsh.
       // Do the same for active external packs so composite shaders can still consume
       // a useful shadowtex0 instead of silently seeing texture 0.
-      val explicitShadow=optional("shadow"); explicitShadow.foreach(built += _)
+      val explicitShadow = optional("shadow"); explicitShadow.foreach(built += _)
       val nextShadowResolution = resolveShadowResolution(nextPackDir)
       val nextShadowDistance = resolveShadowDistance(nextPackDir)
       val nextNoiseResolution = resolveNoiseResolution(nextPackDir)
 
-      def numbered(prefix: String): Vector[String] = Vector(prefix) ++ (1 to 99).map(i => s"$prefix$i").toVector
+      def numbered(prefix: String): Vector[String] =
+        Vector(prefix) ++ (1 to 99).map(i => s"$prefix$i").toVector
       val postNames = numbered("deferred") ++ numbered("composite")
       val posts = postNames.flatMap { name =>
         val p = optional(name)
@@ -1024,14 +1195,28 @@ final class BlockboxShaderPipeline(rootDir: File,launchPack: Option[String]=Opti
         p
       }
       val fin = optional("final"); fin.foreach(built += _)
-      val shadowSamplers = Seq("shadowtex0", "shadowtex1", "shadow", "watershadow", "shadowcolor0", "shadowcolor1", "shadowcolor")
-      val needsShadows = explicitShadow.nonEmpty || (Seq(terrain, textured, translucent, water) ++ posts ++ fin).exists(p => shadowSamplers.exists(name => p.uniform(name) >= 0))
+      val shadowSamplers = Seq(
+        "shadowtex0",
+        "shadowtex1",
+        "shadow",
+        "watershadow",
+        "shadowcolor0",
+        "shadowcolor1",
+        "shadowcolor"
+      )
+      val needsShadows =
+        explicitShadow.nonEmpty || (Seq(terrain, textured, translucent, water) ++ posts ++ fin)
+          .exists(p => shadowSamplers.exists(name => p.uniform(name) >= 0))
       val shadowBase = explicitShadow.orElse {
-        if needsShadows && nextPackName.nonEmpty then Some(compileStage("shadow", nextPackDir, fallbackShadowVertex, fallbackShadowFragment)) else None
+        if needsShadows && nextPackName.nonEmpty then
+          Some(compileStage("shadow", nextPackDir, fallbackShadowVertex, fallbackShadowFragment))
+        else None
       }
       shadowBase.foreach(p => if !built.exists(_.id == p.id) then built += p)
-      val shadowSolidOpt = optional("shadow_solid"); shadowSolidOpt.foreach(p => if !built.exists(_.id == p.id) then built += p)
-      val shadowCutoutOpt = optional("shadow_cutout"); shadowCutoutOpt.foreach(p => if !built.exists(_.id == p.id) then built += p)
+      val shadowSolidOpt = optional("shadow_solid");
+      shadowSolidOpt.foreach(p => if !built.exists(_.id == p.id) then built += p)
+      val shadowCutoutOpt = optional("shadow_cutout");
+      shadowCutoutOpt.foreach(p => if !built.exists(_.id == p.id) then built += p)
       val nextShadowPrograms = shadowBase.toSeq.flatMap { base =>
         Seq(0 -> shadowSolidOpt.getOrElse(base), 1 -> shadowCutoutOpt.getOrElse(base))
       }.toMap
@@ -1039,8 +1224,10 @@ final class BlockboxShaderPipeline(rootDir: File,launchPack: Option[String]=Opti
       val nextGbufferCount = discoverRequestedColorBufferCount(nextPackDir, built)
       val nextAlternateTargets = posts.flatMap(_.renderTargets.getOrElse(Array(0))).toSet
       val nextFormats = resolveColorFormats(nextPackDir)
-      val nextPlanarReflections=posts.exists(_.uniform("planarReflection")>=0)
-      if desiredGbufferCount != nextGbufferCount || alternateTargets != nextAlternateTargets || !colorFormats.sameElements(nextFormats) || planarReflections!=nextPlanarReflections then
+      val nextPlanarReflections = posts.exists(_.uniform("planarReflection") >= 0)
+      if desiredGbufferCount != nextGbufferCount || alternateTargets != nextAlternateTargets || !colorFormats
+          .sameElements(nextFormats) || planarReflections != nextPlanarReflections
+      then
         desiredGbufferCount = nextGbufferCount
         alternateTargets = nextAlternateTargets
         colorFormats = nextFormats
@@ -1049,8 +1236,8 @@ final class BlockboxShaderPipeline(rootDir: File,launchPack: Option[String]=Opti
         destroyTargets()
 
       val oldIds = liveProgramIds
-      glUseProgram(0); activeProgram=null
-      havePreviousFrame=false
+      glUseProgram(0); activeProgram = null
+      havePreviousFrame = false
       worldPrograms = Map(0 -> terrain, 1 -> textured, 2 -> translucent, 3 -> water)
       shadowPrograms = if needsShadows then nextShadowPrograms else Map.empty
       if shadowResolution != nextShadowResolution then
@@ -1085,7 +1272,11 @@ final class BlockboxShaderPipeline(rootDir: File,launchPack: Option[String]=Opti
         shadowLabel,
         noiseLabel
       ).filter(_.nonEmpty)
-      currentStatus = if nextPackName.nonEmpty then s"pack '$nextPackName' [Iris-compat bridge]${if details.nonEmpty then details.mkString(" (", ", ", ")") else ""}" else "built-in GLSL + hot reload"
+      currentStatus = if nextPackName.nonEmpty then
+        s"pack '$nextPackName' [Iris-compat bridge]${
+            if details.nonEmpty then details.mkString(" (", ", ", ")") else ""
+          }"
+      else "built-in GLSL + hot reload"
       System.err.println(s"Blockbox shaders: $currentStatus")
       val newIds = liveProgramIds
       (oldIds -- newIds).filter(_ != 0).foreach(glDeleteProgram)
@@ -1094,13 +1285,16 @@ final class BlockboxShaderPipeline(rootDir: File,launchPack: Option[String]=Opti
     catch
       case e: Throwable =>
         built.map(_.id).toSet.filter(_ != 0).foreach(glDeleteProgram)
-        currentStatus = if worldPrograms.nonEmpty then s"shader reload failed; keeping ${packName}" else "shader compile failed; fixed-function fallback"
+        currentStatus = if worldPrograms.nonEmpty then s"shader reload failed; keeping ${packName}"
+        else "shader compile failed; fixed-function fallback"
         System.err.println(s"Blockbox shaders: $currentStatus: ${e.getMessage}")
         failedPackName = nextPackName
         failedSourceStamp = nextStamp
 
   private def liveProgramIds: Set[Int] =
-    worldPrograms.values.map(_.id).toSet ++ shadowPrograms.values.map(_.id) ++ postPrograms.map(_.id) ++ finalProgram.map(_.id)
+    worldPrograms.values.map(_.id).toSet ++ shadowPrograms.values.map(_.id) ++ postPrograms.map(
+      _.id
+    ) ++ finalProgram.map(_.id)
 
   private def packFlag(pack: Option[File], key: String): Boolean =
     pack match
@@ -1110,7 +1304,8 @@ final class BlockboxShaderPipeline(rootDir: File,launchPack: Option[String]=Opti
         else
           val props = java.util.Properties()
           val in = java.io.FileInputStream(file)
-          try props.load(in) finally in.close()
+          try props.load(in)
+          finally in.close()
           Option(props.getProperty(key)).exists(_.trim.equalsIgnoreCase("true"))
       case None => false
 
@@ -1127,12 +1322,18 @@ final class BlockboxShaderPipeline(rootDir: File,launchPack: Option[String]=Opti
   private def resolvePackDir(name: String): Option[File] =
     if name.isEmpty || name.equalsIgnoreCase("off") || name.equalsIgnoreCase("builtin") then None
     else
-      val clean = name.replace('\\', '/').split('/').filter(part => part.nonEmpty && part != "." && part != "..").mkString("_")
+      val clean = name
+        .replace('\\', '/')
+        .split('/')
+        .filter(part => part.nonEmpty && part != "." && part != "..")
+        .mkString("_")
       val dir = File(shaderpacksRoot, clean)
       if dir.isDirectory then Some(dir) else None
 
   private def resolveShadowResolution(pack: Option[File]): Int =
-    val env = Option(System.getenv("BLOCKBOX_SHADOW_RESOLUTION")).flatMap(v => scala.util.Try(v.trim.toInt).toOption)
+    val env = Option(System.getenv("BLOCKBOX_SHADOW_RESOLUTION")).flatMap(v =>
+      scala.util.Try(v.trim.toInt).toOption
+    )
     env.map(_.max(256).min(4096)).getOrElse {
       val rx = raw"(?m)^\s*const\s+int\s+shadowMapResolution\s*=\s*([0-9]+)\s*;".r
       val requested = shaderDir(pack).flatMap { dir =>
@@ -1143,8 +1344,14 @@ final class BlockboxShaderPipeline(rootDir: File,launchPack: Option[String]=Opti
           while it.hasNext && found.isEmpty do
             val path = it.next()
             val name = path.getFileName.toString.toLowerCase
-            if Files.isRegularFile(path) && (name.endsWith(".vsh") || name.endsWith(".fsh") || name.endsWith(".gsh") || name.endsWith(".vert") || name.endsWith(".frag") || name.endsWith(".geom")) then
-              try found = rx.findFirstMatchIn(Files.readString(path, StandardCharsets.UTF_8)).map(_.group(1).toInt)
+            if Files.isRegularFile(path) && (name.endsWith(".vsh") || name.endsWith(".fsh") || name
+                .endsWith(".gsh") || name.endsWith(".vert") || name.endsWith(".frag") || name
+                .endsWith(".geom"))
+            then
+              try
+                found = rx
+                  .findFirstMatchIn(Files.readString(path, StandardCharsets.UTF_8))
+                  .map(_.group(1).toInt)
               catch case _: Throwable => ()
           found
         finally stream.close()
@@ -1163,8 +1370,14 @@ final class BlockboxShaderPipeline(rootDir: File,launchPack: Option[String]=Opti
         while it.hasNext && found.isEmpty do
           val path = it.next()
           val name = path.getFileName.toString.toLowerCase
-          if Files.isRegularFile(path) && (name.endsWith(".vsh") || name.endsWith(".fsh") || name.endsWith(".gsh") || name.endsWith(".vert") || name.endsWith(".frag") || name.endsWith(".geom")) then
-            try found = rx.findFirstMatchIn(Files.readString(path, StandardCharsets.UTF_8)).flatMap(m => scala.util.Try(m.group(1).toFloat).toOption)
+          if Files.isRegularFile(path) && (name.endsWith(".vsh") || name.endsWith(".fsh") || name
+              .endsWith(".gsh") || name.endsWith(".vert") || name.endsWith(".frag") || name
+              .endsWith(".geom"))
+          then
+            try
+              found = rx
+                .findFirstMatchIn(Files.readString(path, StandardCharsets.UTF_8))
+                .flatMap(m => scala.util.Try(m.group(1).toFloat).toOption)
             catch case _: Throwable => ()
         found
       finally stream.close()
@@ -1181,22 +1394,39 @@ final class BlockboxShaderPipeline(rootDir: File,launchPack: Option[String]=Opti
         while it.hasNext && found.isEmpty do
           val path = it.next()
           val name = path.getFileName.toString.toLowerCase
-          if Files.isRegularFile(path) && (name.endsWith(".vsh") || name.endsWith(".fsh") || name.endsWith(".gsh") || name.endsWith(".vert") || name.endsWith(".frag") || name.endsWith(".geom")) then
-            try found = rx.findFirstMatchIn(Files.readString(path, StandardCharsets.UTF_8)).flatMap(m => scala.util.Try(m.group(1).toInt).toOption)
+          if Files.isRegularFile(path) && (name.endsWith(".vsh") || name.endsWith(".fsh") || name
+              .endsWith(".gsh") || name.endsWith(".vert") || name.endsWith(".frag") || name
+              .endsWith(".geom"))
+          then
+            try
+              found = rx
+                .findFirstMatchIn(Files.readString(path, StandardCharsets.UTF_8))
+                .flatMap(m => scala.util.Try(m.group(1).toInt).toOption)
             catch case _: Throwable => ()
         found
       finally stream.close()
     }
 
   private def resolveShadowDistance(pack: Option[File]): Float =
-    val env = Option(System.getenv("BLOCKBOX_SHADOW_DISTANCE")).flatMap(v => scala.util.Try(v.trim.toFloat).toOption)
-    env.orElse(resolveShaderFloatConstant(pack, "shadowDistance")).map(_.max(32f).min(1024f)).getOrElse(0f)
+    val env = Option(System.getenv("BLOCKBOX_SHADOW_DISTANCE")).flatMap(v =>
+      scala.util.Try(v.trim.toFloat).toOption
+    )
+    env
+      .orElse(resolveShaderFloatConstant(pack, "shadowDistance"))
+      .map(_.max(32f).min(1024f))
+      .getOrElse(0f)
 
   private def resolveNoiseResolution(pack: Option[File]): Int =
-    val env = Option(System.getenv("BLOCKBOX_NOISE_RESOLUTION")).flatMap(v => scala.util.Try(v.trim.toInt).toOption)
-    env.orElse(resolveShaderIntConstant(pack, "noiseTextureResolution")).map(_.max(16).min(2048)).getOrElse(256)
+    val env = Option(System.getenv("BLOCKBOX_NOISE_RESOLUTION")).flatMap(v =>
+      scala.util.Try(v.trim.toInt).toOption
+    )
+    env
+      .orElse(resolveShaderIntConstant(pack, "noiseTextureResolution"))
+      .map(_.max(16).min(2048))
+      .getOrElse(256)
 
-  private def shaderDir(pack: Option[File]): Option[File] = pack.map(p => File(p, "shaders")).filter(_.isDirectory)
+  private def shaderDir(pack: Option[File]): Option[File] =
+    pack.map(p => File(p, "shaders")).filter(_.isDirectory)
 
   private def shaderSearchDirs(pack: Option[File]): Seq[File] =
     shaderDir(pack).toSeq.flatMap { dir =>
@@ -1206,11 +1436,13 @@ final class BlockboxShaderPipeline(rootDir: File,launchPack: Option[String]=Opti
 
   private def stageFile(pack: Option[File], base: String, kind: String): Option[File] =
     val extensions = kind match
-      case "vertex" => Seq("vsh", "vert")
+      case "vertex"   => Seq("vsh", "vert")
       case "fragment" => Seq("fsh", "frag")
       case "geometry" => Seq("gsh", "geom")
-      case _ => Seq.empty
-    shaderSearchDirs(pack).iterator.flatMap(dir => extensions.iterator.map(ext => File(dir, s"$base.$ext"))).find(_.isFile)
+      case _          => Seq.empty
+    shaderSearchDirs(pack).iterator
+      .flatMap(dir => extensions.iterator.map(ext => File(dir, s"$base.$ext")))
+      .find(_.isFile)
 
   private def compileOptionalStage(base: String, pack: Option[File]): Option[Program] =
     val vertex = stageFile(pack, base, "vertex")
@@ -1220,11 +1452,27 @@ final class BlockboxShaderPipeline(rootDir: File,launchPack: Option[String]=Opti
     else
       val postStage = base == "final" || base.startsWith("composite") || base.startsWith("deferred")
       val shadowStage = base == "shadow" || base.startsWith("shadow_")
-      val defaultVertex = if postStage then fullscreenVertex else if shadowStage then fallbackShadowVertex else fallbackVertex
-      val defaultFragment = if postStage then passthroughFragment else if shadowStage then fallbackShadowFragment else fallbackFragment
-      Some(compileStage(base, pack, vertex.map(readExpanded).getOrElse(defaultVertex), fragment.map(readExpanded).getOrElse(defaultFragment)))
+      val defaultVertex = if postStage then fullscreenVertex
+      else if shadowStage then fallbackShadowVertex
+      else fallbackVertex
+      val defaultFragment = if postStage then passthroughFragment
+      else if shadowStage then fallbackShadowFragment
+      else fallbackFragment
+      Some(
+        compileStage(
+          base,
+          pack,
+          vertex.map(readExpanded).getOrElse(defaultVertex),
+          fragment.map(readExpanded).getOrElse(defaultFragment)
+        )
+      )
 
-  private def compileStage(base: String, pack: Option[File], defaultVertex: String, defaultFragment: String): Program =
+  private def compileStage(
+      base: String,
+      pack: Option[File],
+      defaultVertex: String,
+      defaultFragment: String
+  ): Program =
     val vs = stageFile(pack, base, "vertex").map(readExpanded).getOrElse(defaultVertex)
     val fs = stageFile(pack, base, "fragment").map(readExpanded).getOrElse(defaultFragment)
     val gs = stageFile(pack, base, "geometry").map(readExpanded)
@@ -1233,15 +1481,16 @@ final class BlockboxShaderPipeline(rootDir: File,launchPack: Option[String]=Opti
     val stages = mutable.ArrayBuffer.empty[Int]
     var id = 0
     try
-      stages += compileShader(GL_VERTEX_SHADER,vs,s"$base vertex")
-      stages += compileShader(GL_FRAGMENT_SHADER,fs,s"$base fragment")
-      gs.foreach(src => stages += compileShader(GL_GEOMETRY_SHADER,src,s"$base geometry"))
+      stages += compileShader(GL_VERTEX_SHADER, vs, s"$base vertex")
+      stages += compileShader(GL_FRAGMENT_SHADER, fs, s"$base fragment")
+      gs.foreach(src => stages += compileShader(GL_GEOMETRY_SHADER, src, s"$base geometry"))
       id = glCreateProgram()
-      stages.foreach(stage => glAttachShader(id,stage))
+      stages.foreach(stage => glAttachShader(id, stage))
       glLinkProgram(id)
-      if glGetProgrami(id,GL_LINK_STATUS) == 0 then throw IllegalStateException(s"$base link: ${glGetProgramInfoLog(id,16384)}")
-      stages.foreach(stage => glDetachShader(id,stage))
-      new Program(id,base,parseRenderTargets(fs),parseMipmapBuffers(fs))
+      if glGetProgrami(id, GL_LINK_STATUS) == 0 then
+        throw IllegalStateException(s"$base link: ${glGetProgramInfoLog(id, 16384)}")
+      stages.foreach(stage => glDetachShader(id, stage))
+      new Program(id, base, parseRenderTargets(fs), parseMipmapBuffers(fs))
     catch
       case e: Throwable =>
         if id != 0 then glDeleteProgram(id)
@@ -1260,7 +1509,11 @@ final class BlockboxShaderPipeline(rootDir: File,launchPack: Option[String]=Opti
 
   private def parseMipmapBuffers(source: String): Array[Int] =
     val rx = raw"(?m)^\s*const\s+bool\s+colortex([0-9]+)MipmapEnabled\s*=\s*true\s*;".r
-    rx.findAllMatchIn(source).map(_.group(1).toInt).filter(i => i >= 0 && i < MaxCompatColorBuffers).toArray.distinct
+    rx.findAllMatchIn(source)
+      .map(_.group(1).toInt)
+      .filter(i => i >= 0 && i < MaxCompatColorBuffers)
+      .toArray
+      .distinct
 
   private def compileShader(kind: Int, source: String, label: String): Int =
     val id = glCreateShader(kind)
@@ -1274,14 +1527,15 @@ final class BlockboxShaderPipeline(rootDir: File,launchPack: Option[String]=Opti
       throw IllegalStateException(s"$label: $log")
     id
 
-
   private def glVersionMacro(raw: String): Int =
     val rx = raw"^\s*([0-9]+)\.([0-9]+)".r
-    rx.findFirstMatchIn(Option(raw).getOrElse("")).map { m =>
-      val minorText = m.group(2)
-      val minor = if minorText.length == 1 then minorText.toInt * 10 else minorText.take(2).toInt
-      m.group(1).toInt * 100 + minor
-    }.getOrElse(0)
+    rx.findFirstMatchIn(Option(raw).getOrElse(""))
+      .map { m =>
+        val minorText = m.group(2)
+        val minor = if minorText.length == 1 then minorText.toInt * 10 else minorText.take(2).toInt
+        m.group(1).toInt * 100 + minor
+      }
+      .getOrElse(0)
 
   private def injectCompatibilityDefines(source: String): String =
     val glVersion = glVersionMacro(glGetString(GL_VERSION))
@@ -1305,13 +1559,23 @@ final class BlockboxShaderPipeline(rootDir: File,launchPack: Option[String]=Opti
       else if renderer.contains("mesa") || vendor.contains("mesa") then "MC_GL_RENDERER_MESA"
       else if renderer.contains("apple") then "MC_GL_RENDERER_APPLE"
       else "MC_GL_RENDERER_OTHER"
-    val formatDefines = Seq("RGBA8"->GL_RGBA8,"RGBA16F"->GL_RGBA16F,"RGBA32F"->GL_RGBA32F,"RGB16F"->GL_RGB16F,"R16F"->GL_R16F,"R32F"->GL_R32F,"RG16F"->GL_RG16F,"RG32F"->GL_RG32F).map { case (name,value) => s"#ifndef $name\n#define $name $value\n#endif\n" }.mkString
+    val formatDefines = Seq(
+      "RGBA8" -> GL_RGBA8,
+      "RGBA16F" -> GL_RGBA16F,
+      "RGBA32F" -> GL_RGBA32F,
+      "RGB16F" -> GL_RGB16F,
+      "R16F" -> GL_R16F,
+      "R32F" -> GL_R32F,
+      "RG16F" -> GL_RG16F,
+      "RG32F" -> GL_RG32F
+    ).map { case (name, value) => s"#ifndef $name\n#define $name $value\n#endif\n" }.mkString
     val defines = formatDefines +
       s"#define BLOCKBOX_SHADER_BRIDGE 1\n#define MC_GL_VERSION $glVersion\n#define MC_GLSL_VERSION $glslVersion\n#define $vendorMacro 1\n#define $rendererMacro 1\n"
     val lines = source.linesIterator.toVector
     val versionIndex = lines.indexWhere(_.trim.startsWith("#version"))
     if versionIndex >= 0 then
-      (lines.take(versionIndex + 1) ++ Vector(defines) ++ lines.drop(versionIndex + 1)).mkString("\n") + "\n"
+      (lines.take(versionIndex + 1) ++ Vector(defines) ++ lines.drop(versionIndex + 1))
+        .mkString("\n") + "\n"
     else defines + source
 
   private def shaderSandbox(file: File): Path =
@@ -1320,16 +1584,21 @@ final class BlockboxShaderPipeline(rootDir: File,launchPack: Option[String]=Opti
     while current != null && found == null do
       if current.asInstanceOf[File].getName == "shaders" then found = current
       else current = current.asInstanceOf[File].getParentFile
-    (if found != null then found.asInstanceOf[File] else file.getParentFile).toPath.toAbsolutePath.normalize()
+    (if found != null then found.asInstanceOf[File] else file.getParentFile).toPath.toAbsolutePath
+      .normalize()
 
   private def readExpanded(file: File): String =
-    blockbox.render.ShaderSources.read(file.toPath,shaderSandbox(file))
+    blockbox.render.ShaderSources.read(file.toPath, shaderSandbox(file))
 
-  private def discoverRequestedColorBufferCount(packDir: Option[File], programs: Iterable[Program]): Int =
+  private def discoverRequestedColorBufferCount(
+      packDir: Option[File],
+      programs: Iterable[Program]
+  ): Int =
     var maxLogical = 2 // Blockbox core color/normal/material
     programs.foreach { p =>
       p.renderTargets.foreach(_.foreach { logical =>
-        if logical >= 0 && logical < MaxCompatColorBuffers then maxLogical = math.max(maxLogical, logical)
+        if logical >= 0 && logical < MaxCompatColorBuffers then
+          maxLogical = math.max(maxLogical, logical)
       })
     }
     // Also scan sampler/writer references. This catches packs that consume colortex7
@@ -1346,11 +1615,20 @@ final class BlockboxShaderPipeline(rootDir: File,launchPack: Option[String]=Opti
           while it.hasNext do
             val file = it.next().toFile
             val name = file.getName.toLowerCase
-            if file.isFile && (name.endsWith(".vsh") || name.endsWith(".fsh") || name.endsWith(".vert") || name.endsWith(".frag") || name.endsWith(".gsh") || name.endsWith(".geom")) then
+            if file.isFile && (name.endsWith(".vsh") || name.endsWith(".fsh") || name.endsWith(
+                ".vert"
+              ) || name.endsWith(".frag") || name.endsWith(".gsh") || name.endsWith(".geom"))
+            then
               val src = Files.readString(file.toPath, StandardCharsets.UTF_8)
-              colortex.findAllMatchIn(src).foreach(m => maxLogical = math.max(maxLogical, m.group(1).toInt))
-              fragData.findAllMatchIn(src).foreach(m => maxLogical = math.max(maxLogical, m.group(1).toInt))
-              gaux.findAllMatchIn(src).foreach(m => maxLogical = math.max(maxLogical, 3 + m.group(1).toInt))
+              colortex
+                .findAllMatchIn(src)
+                .foreach(m => maxLogical = math.max(maxLogical, m.group(1).toInt))
+              fragData
+                .findAllMatchIn(src)
+                .foreach(m => maxLogical = math.max(maxLogical, m.group(1).toInt))
+              gaux
+                .findAllMatchIn(src)
+                .foreach(m => maxLogical = math.max(maxLogical, 3 + m.group(1).toInt))
         finally stream.close()
     }
     (maxLogical + 1).max(3).min(MaxCompatColorBuffers)
@@ -1359,40 +1637,59 @@ final class BlockboxShaderPipeline(rootDir: File,launchPack: Option[String]=Opti
     // Mix every file's metadata. Taking only the newest mtime missed deletions and
     // edits hidden by another file's future timestamp; active.txt is a selection,
     // not a shader source, and must not cause a second compile after each UI click.
-    var stamp=0x6a09e667f3bcc909L
-    def include(file: File): Unit=
+    var stamp = 0x6a09e667f3bcc909L
+    def include(file: File): Unit =
       if file.isFile then
-        var h=file.lastModified()^(file.length()*0x9e3779b97f4a7c15L)^file.getPath.hashCode.toLong
-        h=(h^(h>>>30))*0xbf58476d1ce4e5b9L
-        h=(h^(h>>>27))*0x94d049bb133111ebL
-        stamp^=h^(h>>>31)
+        var h =
+          file.lastModified() ^ (file.length() * 0x9e3779b97f4a7c15L) ^ file.getPath.hashCode.toLong
+        h = (h ^ (h >>> 30)) * 0xbf58476d1ce4e5b9L
+        h = (h ^ (h >>> 27)) * 0x94d049bb133111ebL
+        stamp ^= h ^ (h >>> 31)
     include(fallbackVertexFile); include(fallbackFragmentFile)
     resolvePackDir(packName).foreach { pack =>
-      val shaders=File(pack,"shaders")
+      val shaders = File(pack, "shaders")
       if shaders.isDirectory then
-        val stream=Files.walk(shaders.toPath)
+        val stream = Files.walk(shaders.toPath)
         try
-          val iterator=stream.iterator()
+          val iterator = stream.iterator()
           while iterator.hasNext do include(iterator.next().toFile)
         finally stream.close()
-      include(File(pack,"pack.properties"))
+      include(File(pack, "pack.properties"))
     }
     stamp
 
   private def fileStamp(file: File): Long = if file.isFile then file.lastModified() else 0L
 
   private def resolveColorFormats(pack: Option[File]): Array[Int] =
-    val result = Array(GL_RGBA16F,GL_RGBA16F,GL_RGBA8,GL_RGBA8,GL_RGBA8,GL_RGBA8,GL_RGBA8,GL_RGBA8)
-    val formats = Map("RGBA8"->GL_RGBA8,"RGBA16F"->GL_RGBA16F,"RGBA32F"->GL_RGBA32F,"RGB16F"->GL_RGB16F,"R16F"->GL_R16F,"R32F"->GL_R32F,"RG16F"->GL_RG16F,"RG32F"->GL_RG32F)
+    val result =
+      Array(GL_RGBA16F, GL_RGBA16F, GL_RGBA8, GL_RGBA8, GL_RGBA8, GL_RGBA8, GL_RGBA8, GL_RGBA8)
+    val formats = Map(
+      "RGBA8" -> GL_RGBA8,
+      "RGBA16F" -> GL_RGBA16F,
+      "RGBA32F" -> GL_RGBA32F,
+      "RGB16F" -> GL_RGB16F,
+      "R16F" -> GL_R16F,
+      "R32F" -> GL_R32F,
+      "RG16F" -> GL_RG16F,
+      "RG32F" -> GL_RG32F
+    )
     val pattern = raw"const\s+int\s+colortex([0-7])Format\s*=\s*([A-Z0-9]+)\s*;".r
     shaderDir(pack).foreach { dir =>
       val stream = Files.walk(dir.toPath)
       try
         import scala.jdk.CollectionConverters.*
-        stream.iterator().asScala.filter(p => Files.isRegularFile(p) && Seq(".fsh",".frag",".glsl").exists(p.toString.endsWith)).foreach { path =>
-          val source = readExpanded(path.toFile)
-          pattern.findAllMatchIn(source).foreach { m => formats.get(m.group(2)).foreach(format => result(m.group(1).toInt) = format) }
-        }
+        stream
+          .iterator()
+          .asScala
+          .filter(p =>
+            Files.isRegularFile(p) && Seq(".fsh", ".frag", ".glsl").exists(p.toString.endsWith)
+          )
+          .foreach { path =>
+            val source = readExpanded(path.toFile)
+            pattern.findAllMatchIn(source).foreach { m =>
+              formats.get(m.group(2)).foreach(format => result(m.group(1).toInt) = format)
+            }
+          }
       finally stream.close()
     }
     result
@@ -1402,8 +1699,12 @@ final class BlockboxShaderPipeline(rootDir: File,launchPack: Option[String]=Opti
     destroyTargets()
     targetW = width; targetH = height
 
-    val supportedDrawBuffers = math.min(glGetInteger(GL_MAX_DRAW_BUFFERS), glGetInteger(GL_MAX_COLOR_ATTACHMENTS))
-    gbufferCount = math.max(3, math.min(desiredGbufferCount, math.min(MaxCompatColorBuffers, supportedDrawBuffers)))
+    val supportedDrawBuffers =
+      math.min(glGetInteger(GL_MAX_DRAW_BUFFERS), glGetInteger(GL_MAX_COLOR_ATTACHMENTS))
+    gbufferCount = math.max(
+      3,
+      math.min(desiredGbufferCount, math.min(MaxCompatColorBuffers, supportedDrawBuffers))
+    )
     sceneDrawBuffers.clear()
     var db = 0
     while db < gbufferCount do
@@ -1413,13 +1714,16 @@ final class BlockboxShaderPipeline(rootDir: File,launchPack: Option[String]=Opti
 
     sceneColor = createColorTexture(width, height, hdr = true, format = colorFormats(0))
     sceneDepth = createDepthTexture(width, height)
-    waterTestDepth = createDepthTexture(width,height)
-    sceneNormal = createColorTexture(width, height, hdr = true, smooth = false, format = colorFormats(1))
-    sceneMaterial = createColorTexture(width, height, hdr = false, smooth = false, format = colorFormats(2))
+    waterTestDepth = createDepthTexture(width, height)
+    sceneNormal =
+      createColorTexture(width, height, hdr = true, smooth = false, format = colorFormats(1))
+    sceneMaterial =
+      createColorTexture(width, height, hdr = false, smooth = false, format = colorFormats(2))
     sceneExtraColors = Array.fill[Int](MaxCompatColorBuffers - 3)(0)
     var extra = 0
     while extra < gbufferCount - 3 do
-      sceneExtraColors(extra) = createColorTexture(width, height, hdr = false, format = colorFormats(extra+3))
+      sceneExtraColors(extra) =
+        createColorTexture(width, height, hdr = false, format = colorFormats(extra + 3))
       extra += 1
     sceneFbo = glGenFramebuffers(); glBindFramebuffer(GL_FRAMEBUFFER, sceneFbo)
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, sceneColor, 0)
@@ -1427,7 +1731,13 @@ final class BlockboxShaderPipeline(rootDir: File,launchPack: Option[String]=Opti
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT2, GL_TEXTURE_2D, sceneMaterial, 0)
     extra = 0
     while extra < gbufferCount - 3 do
-      glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT3 + extra, GL_TEXTURE_2D, sceneExtraColors(extra), 0)
+      glFramebufferTexture2D(
+        GL_FRAMEBUFFER,
+        GL_COLOR_ATTACHMENT3 + extra,
+        GL_TEXTURE_2D,
+        sceneExtraColors(extra),
+        0
+      )
       extra += 1
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, sceneDepth, 0)
     sceneDrawBuffers.rewind()
@@ -1438,19 +1748,31 @@ final class BlockboxShaderPipeline(rootDir: File,launchPack: Option[String]=Opti
     var alt = 0
     while alt < gbufferCount do
       if alternateTargets.contains(alt) then
-        postAlternateColors(alt) = createColorTexture(width, height, hdr = alt <= 1, smooth = alt == 0, format = colorFormats(alt))
+        postAlternateColors(alt) = createColorTexture(
+          width,
+          height,
+          hdr = alt <= 1,
+          smooth = alt == 0,
+          format = colorFormats(alt)
+        )
       alt += 1
     postFbo = glGenFramebuffers()
 
     if planarReflections then
-      val rw=(width/2).max(1); val rh=(height/2).max(1)
-      reflectionColor=createColorTexture(rw,rh,hdr=true)
-      glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_LINEAR_MIPMAP_LINEAR)
+      val rw = (width / 2).max(1); val rh = (height / 2).max(1)
+      reflectionColor = createColorTexture(rw, rh, hdr = true)
+      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR)
       glGenerateMipmap(GL_TEXTURE_2D)
-      reflectionDepth=createDepthTexture(rw,rh)
-      reflectionFbo=glGenFramebuffers(); glBindFramebuffer(GL_FRAMEBUFFER,reflectionFbo)
-      glFramebufferTexture2D(GL_FRAMEBUFFER,GL_COLOR_ATTACHMENT0,GL_TEXTURE_2D,reflectionColor,0)
-      glFramebufferTexture2D(GL_FRAMEBUFFER,GL_DEPTH_ATTACHMENT,GL_TEXTURE_2D,reflectionDepth,0)
+      reflectionDepth = createDepthTexture(rw, rh)
+      reflectionFbo = glGenFramebuffers(); glBindFramebuffer(GL_FRAMEBUFFER, reflectionFbo)
+      glFramebufferTexture2D(
+        GL_FRAMEBUFFER,
+        GL_COLOR_ATTACHMENT0,
+        GL_TEXTURE_2D,
+        reflectionColor,
+        0
+      )
+      glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, reflectionDepth, 0)
       glDrawBuffer(GL_COLOR_ATTACHMENT0)
       checkFramebuffer("water reflection")
 
@@ -1468,7 +1790,8 @@ final class BlockboxShaderPipeline(rootDir: File,launchPack: Option[String]=Opti
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, shadowDepth, 0)
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, shadowColor0, 0)
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1, GL_TEXTURE_2D, shadowColor1, 0)
-    shadowDrawBuffers.clear(); shadowDrawBuffers.put(GL_COLOR_ATTACHMENT0).put(GL_COLOR_ATTACHMENT1); shadowDrawBuffers.flip()
+    shadowDrawBuffers.clear();
+    shadowDrawBuffers.put(GL_COLOR_ATTACHMENT0).put(GL_COLOR_ATTACHMENT1); shadowDrawBuffers.flip()
     glDrawBuffers(shadowDrawBuffers)
     checkFramebuffer("shadow")
     glBindFramebuffer(GL_FRAMEBUFFER, 0)
@@ -1478,13 +1801,15 @@ final class BlockboxShaderPipeline(rootDir: File,launchPack: Option[String]=Opti
     if shadowColor0 != 0 then glDeleteTextures(shadowColor0)
     if shadowColor1 != 0 then glDeleteTextures(shadowColor1)
     if shadowFbo != 0 then glDeleteFramebuffers(shadowFbo)
-    shadowDepth = 0; shadowColor0 = 0; shadowColor1 = 0; shadowFbo = 0; shadowTargetSize = 0; shadowPassBound = false
+    shadowDepth = 0; shadowColor0 = 0; shadowColor1 = 0; shadowFbo = 0; shadowTargetSize = 0;
+    shadowPassBound = false
 
   private def loadDirectionalLightView(light: (Float, Float, Float)): Unit =
     val lx = light._1; val ly = light._2; val lz = light._3
     val len = math.sqrt((lx * lx + ly * ly + lz * lz).toDouble).toFloat.max(0.0001f)
     val fx = -lx / len; val fy = -ly / len; val fz = -lz / len
-    val upx = 0f; val upy = if math.abs(fy) > 0.97f then 0f else 1f; val upz = if math.abs(fy) > 0.97f then 1f else 0f
+    val upx = 0f; val upy = if math.abs(fy) > 0.97f then 0f else 1f;
+    val upz = if math.abs(fy) > 0.97f then 1f else 0f
     var sx = fy * upz - fz * upy
     var sy = fz * upx - fx * upz
     var sz = fx * upy - fy * upx
@@ -1494,22 +1819,40 @@ final class BlockboxShaderPipeline(rootDir: File,launchPack: Option[String]=Opti
     val uy = sz * fx - sx * fz
     val uz = sx * fy - sy * fx
     val m = Array[Float](
-      sx, ux, -fx, 0f,
-      sy, uy, -fy, 0f,
-      sz, uz, -fz, 0f,
-      0f, 0f, 0f, 1f
+      sx,
+      ux,
+      -fx,
+      0f,
+      sy,
+      uy,
+      -fy,
+      0f,
+      sz,
+      uz,
+      -fz,
+      0f,
+      0f,
+      0f,
+      0f,
+      1f
     )
     // Quantize the light-space center to shadow texels to reduce crawling when
     // the camera moves by less than a shadow-map pixel.
-    val texel = activeShadowDistance*2f/shadowTargetSize.max(1)
-    val lightX = sx*cameraPos._1+sy*cameraPos._2+sz*cameraPos._3
-    val lightY = ux*cameraPos._1+uy*cameraPos._2+uz*cameraPos._3
-    m(12) = lightX - math.floor(lightX/texel).toFloat*texel
-    m(13) = lightY - math.floor(lightY/texel).toFloat*texel
+    val texel = activeShadowDistance * 2f / shadowTargetSize.max(1)
+    val lightX = sx * cameraPos._1 + sy * cameraPos._2 + sz * cameraPos._3
+    val lightY = ux * cameraPos._1 + uy * cameraPos._2 + uz * cameraPos._3
+    m(12) = lightX - math.floor(lightX / texel).toFloat * texel
+    m(13) = lightY - math.floor(lightY / texel).toFloat * texel
     shadowMatrixBuffer.clear(); shadowMatrixBuffer.put(m); shadowMatrixBuffer.flip()
     glLoadMatrixf(shadowMatrixBuffer)
 
-  private def createColorTexture(width: Int, height: Int, hdr: Boolean, smooth: Boolean = true, format: Int = 0): Int =
+  private def createColorTexture(
+      width: Int,
+      height: Int,
+      hdr: Boolean,
+      smooth: Boolean = true,
+      format: Int = 0
+  ): Int =
     val tex = glGenTextures(); glBindTexture(GL_TEXTURE_2D, tex)
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, if smooth then GL_LINEAR else GL_NEAREST)
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, if smooth then GL_LINEAR else GL_NEAREST)
@@ -1526,7 +1869,12 @@ final class BlockboxShaderPipeline(rootDir: File,launchPack: Option[String]=Opti
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT)
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT)
     val pixel = BufferUtils.createByteBuffer(4)
-    pixel.put((r & 0xff).toByte).put((g & 0xff).toByte).put((b & 0xff).toByte).put((a & 0xff).toByte).flip()
+    pixel
+      .put((r & 0xff).toByte)
+      .put((g & 0xff).toByte)
+      .put((b & 0xff).toByte)
+      .put((a & 0xff).toByte)
+      .flip()
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixel)
     glBindTexture(GL_TEXTURE_2D, 0)
     tex
@@ -1552,8 +1900,13 @@ final class BlockboxShaderPipeline(rootDir: File,launchPack: Option[String]=Opti
     while sky < 16 do
       var block = 0
       while block < 16 do
-        val (rr, gg, bb) = BlockboxLightmap.color(sky.toFloat / 15f, block.toFloat / 15f, environment)
-        pixels.put((rr * 255f).round.toByte).put((gg * 255f).round.toByte).put((bb * 255f).round.toByte).put(0xff.toByte)
+        val (rr, gg, bb) =
+          BlockboxLightmap.color(sky.toFloat / 15f, block.toFloat / 15f, environment)
+        pixels
+          .put((rr * 255f).round.toByte)
+          .put((gg * 255f).round.toByte)
+          .put((bb * 255f).round.toByte)
+          .put(0xff.toByte)
         block += 1
       sky += 1
     pixels.flip()
@@ -1588,22 +1941,34 @@ final class BlockboxShaderPipeline(rootDir: File,launchPack: Option[String]=Opti
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST)
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE)
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, width, height, 0, GL_DEPTH_COMPONENT, GL_FLOAT, 0L)
+    glTexImage2D(
+      GL_TEXTURE_2D,
+      0,
+      GL_DEPTH_COMPONENT24,
+      width,
+      height,
+      0,
+      GL_DEPTH_COMPONENT,
+      GL_FLOAT,
+      0L
+    )
     tex
 
   private def checkFramebuffer(label: String): Unit =
     val status = glCheckFramebufferStatus(GL_FRAMEBUFFER)
-    if status != GL_FRAMEBUFFER_COMPLETE then throw IllegalStateException(f"$label framebuffer incomplete: 0x$status%04x")
+    if status != GL_FRAMEBUFFER_COMPLETE then
+      throw IllegalStateException(f"$label framebuffer incomplete: 0x$status%04x")
 
   private def destroyTargets(): Unit =
-    if reflectionColor!=0 then glDeleteTextures(reflectionColor)
-    if reflectionDepth!=0 then glDeleteTextures(reflectionDepth)
-    if reflectionFbo!=0 then glDeleteFramebuffers(reflectionFbo)
-    reflectionColor=0; reflectionDepth=0; reflectionFbo=0; reflectionBound=false; reflectionReady=false
+    if reflectionColor != 0 then glDeleteTextures(reflectionColor)
+    if reflectionDepth != 0 then glDeleteTextures(reflectionDepth)
+    if reflectionFbo != 0 then glDeleteFramebuffers(reflectionFbo)
+    reflectionColor = 0; reflectionDepth = 0; reflectionFbo = 0; reflectionBound = false;
+    reflectionReady = false
     if sceneColor != 0 then glDeleteTextures(sceneColor)
     if sceneDepth != 0 then glDeleteTextures(sceneDepth)
-    if waterTestDepth!=0 then glDeleteTextures(waterTestDepth)
-    waterTestDepth=0; waterDepthBound=false
+    if waterTestDepth != 0 then glDeleteTextures(waterTestDepth)
+    waterTestDepth = 0; waterDepthBound = false
     if sceneNormal != 0 then glDeleteTextures(sceneNormal)
     if sceneMaterial != 0 then glDeleteTextures(sceneMaterial)
     sceneExtraColors.filter(_ != 0).foreach(glDeleteTextures)
@@ -1631,28 +1996,60 @@ final class BlockboxShaderPipeline(rootDir: File,launchPack: Option[String]=Opti
     m(0) = 1f; m(5) = 1f; m(10) = 1f; m(15) = 1f
     m
 
-  /** General 4x4 inverse, column-major like OpenGL. Falls back to identity if the
-    * matrix is singular rather than feeding NaNs into third-party shader packs.
+  /** General 4x4 inverse, column-major like OpenGL. Falls back to identity if the matrix is
+    * singular rather than feeding NaNs into third-party shader packs.
     */
   private def invertMatrix(m: Array[Float], out: Array[Float]): Unit =
     val inv = new Array[Float](16)
-    inv(0) = m(5)*m(10)*m(15)-m(5)*m(11)*m(14)-m(9)*m(6)*m(15)+m(9)*m(7)*m(14)+m(13)*m(6)*m(11)-m(13)*m(7)*m(10)
-    inv(4) = -m(4)*m(10)*m(15)+m(4)*m(11)*m(14)+m(8)*m(6)*m(15)-m(8)*m(7)*m(14)-m(12)*m(6)*m(11)+m(12)*m(7)*m(10)
-    inv(8) = m(4)*m(9)*m(15)-m(4)*m(11)*m(13)-m(8)*m(5)*m(15)+m(8)*m(7)*m(13)+m(12)*m(5)*m(11)-m(12)*m(7)*m(9)
-    inv(12) = -m(4)*m(9)*m(14)+m(4)*m(10)*m(13)+m(8)*m(5)*m(14)-m(8)*m(6)*m(13)-m(12)*m(5)*m(10)+m(12)*m(6)*m(9)
-    inv(1) = -m(1)*m(10)*m(15)+m(1)*m(11)*m(14)+m(9)*m(2)*m(15)-m(9)*m(3)*m(14)-m(13)*m(2)*m(11)+m(13)*m(3)*m(10)
-    inv(5) = m(0)*m(10)*m(15)-m(0)*m(11)*m(14)-m(8)*m(2)*m(15)+m(8)*m(3)*m(14)+m(12)*m(2)*m(11)-m(12)*m(3)*m(10)
-    inv(9) = -m(0)*m(9)*m(15)+m(0)*m(11)*m(13)+m(8)*m(1)*m(15)-m(8)*m(3)*m(13)-m(12)*m(1)*m(11)+m(12)*m(3)*m(9)
-    inv(13) = m(0)*m(9)*m(14)-m(0)*m(10)*m(13)-m(8)*m(1)*m(14)+m(8)*m(2)*m(13)+m(12)*m(1)*m(10)-m(12)*m(2)*m(9)
-    inv(2) = m(1)*m(6)*m(15)-m(1)*m(7)*m(14)-m(5)*m(2)*m(15)+m(5)*m(3)*m(14)+m(13)*m(2)*m(7)-m(13)*m(3)*m(6)
-    inv(6) = -m(0)*m(6)*m(15)+m(0)*m(7)*m(14)+m(4)*m(2)*m(15)-m(4)*m(3)*m(14)-m(12)*m(2)*m(7)+m(12)*m(3)*m(6)
-    inv(10) = m(0)*m(5)*m(15)-m(0)*m(7)*m(13)-m(4)*m(1)*m(15)+m(4)*m(3)*m(13)+m(12)*m(1)*m(7)-m(12)*m(3)*m(5)
-    inv(14) = -m(0)*m(5)*m(14)+m(0)*m(6)*m(13)+m(4)*m(1)*m(14)-m(4)*m(2)*m(13)-m(12)*m(1)*m(6)+m(12)*m(2)*m(5)
-    inv(3) = -m(1)*m(6)*m(11)+m(1)*m(7)*m(10)+m(5)*m(2)*m(11)-m(5)*m(3)*m(10)-m(9)*m(2)*m(7)+m(9)*m(3)*m(6)
-    inv(7) = m(0)*m(6)*m(11)-m(0)*m(7)*m(10)-m(4)*m(2)*m(11)+m(4)*m(3)*m(10)+m(8)*m(2)*m(7)-m(8)*m(3)*m(6)
-    inv(11) = -m(0)*m(5)*m(11)+m(0)*m(7)*m(9)+m(4)*m(1)*m(11)-m(4)*m(3)*m(9)-m(8)*m(1)*m(7)+m(8)*m(3)*m(5)
-    inv(15) = m(0)*m(5)*m(10)-m(0)*m(6)*m(9)-m(4)*m(1)*m(10)+m(4)*m(2)*m(9)+m(8)*m(1)*m(6)-m(8)*m(2)*m(5)
-    val det = m(0)*inv(0)+m(1)*inv(4)+m(2)*inv(8)+m(3)*inv(12)
+    inv(0) = m(5) * m(10) * m(15) - m(5) * m(11) * m(14) - m(9) * m(6) * m(15) + m(9) * m(7) * m(
+      14
+    ) + m(13) * m(6) * m(11) - m(13) * m(7) * m(10)
+    inv(4) = -m(4) * m(10) * m(15) + m(4) * m(11) * m(14) + m(8) * m(6) * m(15) - m(8) * m(7) * m(
+      14
+    ) - m(12) * m(6) * m(11) + m(12) * m(7) * m(10)
+    inv(8) = m(4) * m(9) * m(15) - m(4) * m(11) * m(13) - m(8) * m(5) * m(15) + m(8) * m(7) * m(
+      13
+    ) + m(12) * m(5) * m(11) - m(12) * m(7) * m(9)
+    inv(12) = -m(4) * m(9) * m(14) + m(4) * m(10) * m(13) + m(8) * m(5) * m(14) - m(8) * m(6) * m(
+      13
+    ) - m(12) * m(5) * m(10) + m(12) * m(6) * m(9)
+    inv(1) = -m(1) * m(10) * m(15) + m(1) * m(11) * m(14) + m(9) * m(2) * m(15) - m(9) * m(3) * m(
+      14
+    ) - m(13) * m(2) * m(11) + m(13) * m(3) * m(10)
+    inv(5) = m(0) * m(10) * m(15) - m(0) * m(11) * m(14) - m(8) * m(2) * m(15) + m(8) * m(3) * m(
+      14
+    ) + m(12) * m(2) * m(11) - m(12) * m(3) * m(10)
+    inv(9) = -m(0) * m(9) * m(15) + m(0) * m(11) * m(13) + m(8) * m(1) * m(15) - m(8) * m(3) * m(
+      13
+    ) - m(12) * m(1) * m(11) + m(12) * m(3) * m(9)
+    inv(13) = m(0) * m(9) * m(14) - m(0) * m(10) * m(13) - m(8) * m(1) * m(14) + m(8) * m(2) * m(
+      13
+    ) + m(12) * m(1) * m(10) - m(12) * m(2) * m(9)
+    inv(2) = m(1) * m(6) * m(15) - m(1) * m(7) * m(14) - m(5) * m(2) * m(15) + m(5) * m(3) * m(
+      14
+    ) + m(13) * m(2) * m(7) - m(13) * m(3) * m(6)
+    inv(6) = -m(0) * m(6) * m(15) + m(0) * m(7) * m(14) + m(4) * m(2) * m(15) - m(4) * m(3) * m(
+      14
+    ) - m(12) * m(2) * m(7) + m(12) * m(3) * m(6)
+    inv(10) = m(0) * m(5) * m(15) - m(0) * m(7) * m(13) - m(4) * m(1) * m(15) + m(4) * m(3) * m(
+      13
+    ) + m(12) * m(1) * m(7) - m(12) * m(3) * m(5)
+    inv(14) = -m(0) * m(5) * m(14) + m(0) * m(6) * m(13) + m(4) * m(1) * m(14) - m(4) * m(2) * m(
+      13
+    ) - m(12) * m(1) * m(6) + m(12) * m(2) * m(5)
+    inv(3) = -m(1) * m(6) * m(11) + m(1) * m(7) * m(10) + m(5) * m(2) * m(11) - m(5) * m(3) * m(
+      10
+    ) - m(9) * m(2) * m(7) + m(9) * m(3) * m(6)
+    inv(7) = m(0) * m(6) * m(11) - m(0) * m(7) * m(10) - m(4) * m(2) * m(11) + m(4) * m(3) * m(
+      10
+    ) + m(8) * m(2) * m(7) - m(8) * m(3) * m(6)
+    inv(11) = -m(0) * m(5) * m(11) + m(0) * m(7) * m(9) + m(4) * m(1) * m(11) - m(4) * m(3) * m(
+      9
+    ) - m(8) * m(1) * m(7) + m(8) * m(3) * m(5)
+    inv(15) = m(0) * m(5) * m(10) - m(0) * m(6) * m(9) - m(4) * m(1) * m(10) + m(4) * m(2) * m(
+      9
+    ) + m(8) * m(1) * m(6) - m(8) * m(2) * m(5)
+    val det = m(0) * inv(0) + m(1) * inv(4) + m(2) * inv(8) + m(3) * inv(12)
     if math.abs(det) < 1e-8f then copyMatrix(identityMatrix(), out)
     else
       val d = 1f / det
@@ -1664,19 +2061,23 @@ final class BlockboxShaderPipeline(rootDir: File,launchPack: Option[String]=Opti
   private def readFile(file: File, fallback: String): String =
     if file.isFile then Files.readString(file.toPath, StandardCharsets.UTF_8) else fallback
 
-  private lazy val fallbackVertex: String = readFile(fallbackVertexFile,
+  private lazy val fallbackVertex: String = readFile(
+    fallbackVertexFile,
     """#version 120
       |uniform mat4 gbufferModelViewInverse; uniform int isEyeInWater;
       |varying vec4 vColor; varying vec2 vUv; varying vec2 vLightUv; varying vec3 vNormal; varying float vFogDepth; varying vec3 vWorldPos; varying float vSkyLight; varying float vEmission;
       |void main(){vec4 eye=gl_ModelViewMatrix*gl_Vertex;gl_Position=gl_ProjectionMatrix*eye;vColor=gl_Color;vUv=gl_MultiTexCoord0.xy;vec2 lm=gl_MultiTexCoord1.xy;vLightUv=max(lm.x,lm.y)>1.5?clamp(lm,vec2(0.0),vec2(240.0))*(1.0/256.0)+vec2(0.03125):clamp(lm,vec2(0.0),vec2(1.0));vNormal=normalize(gl_Normal);vFogDepth=isEyeInWater!=0?length(eye.xyz):length((gbufferModelViewInverse*eye).xz);vWorldPos=gl_Vertex.xyz;vSkyLight=clamp(gl_MultiTexCoord1.y/240.0,0.0,1.0);vEmission=step(1.75,max(gl_Color.r,max(gl_Color.g,gl_Color.b)));}
-      |""".stripMargin)
+      |""".stripMargin
+  )
 
-  private lazy val fallbackFragment: String = readFile(fallbackFragmentFile,
+  private lazy val fallbackFragment: String = readFile(
+    fallbackFragmentFile,
     """#version 120
       |uniform sampler2D uAtlas;uniform sampler2D lightmap;uniform vec3 uFogColor;uniform float uFogStart;uniform float uFogEnd;uniform float uDaylight;uniform float uTime;uniform int uPass;uniform vec3 uSunDir;uniform vec3 uMoonDir;
       |varying vec4 vColor;varying vec2 vUv;varying vec2 vLightUv;varying vec3 vNormal;varying float vFogDepth;varying vec3 vWorldPos;varying float vSkyLight;varying float vEmission;
       |float sat(float x){return clamp(x,0.0,1.0);}void main(){vec4 t=texture2D(uAtlas,vUv);vec4 b=t*vec4(min(vColor.rgb,vec3(1.0)),vColor.a);vec3 n=normalize(vNormal);float night=1.0-sat((uDaylight-.18)/.82);float s=max(dot(n,normalize(uSunDir)),0.0);float m=max(dot(n,normalize(uMoonDir)),0.0);vec3 l=texture2D(lightmap,vLightUv).rgb*mix(1.0,.86,vSkyLight*uDaylight)+(vec3(1.0,.9,.74)*s*uDaylight*.18+vec3(.45,.58,.86)*m*night*.05)*vSkyLight*vSkyLight*vSkyLight;b.rgb*=l;if(uPass==3){float w=sin((vWorldPos.x+vWorldPos.z)*.75+uTime*1.4)*.5+.5;b.rgb=mix(b.rgb,vec3(.08,.34,.62)*l,.05+w*.035);}b.rgb=mix(b.rgb,t.rgb*vec3(1.22,1.04,.66),vEmission);float f=sat((uFogEnd-vFogDepth)/max(uFogEnd-uFogStart,.001));b.rgb=mix(uFogColor,b.rgb,f);gl_FragColor=b;}
-      |""".stripMargin)
+      |""".stripMargin
+  )
 
   private val fallbackShadowVertex =
     """#version 120

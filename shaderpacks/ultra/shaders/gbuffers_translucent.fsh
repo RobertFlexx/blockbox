@@ -16,11 +16,12 @@ varying vec2 vUv;
 varying vec3 vNormalWorld;
 varying float vFogDepth;
 void main() {
-    vec4 texel = texture2D(uAtlas, vUv);
-    if (texel.a <= 0.01) discard;
-    vec3 albedo=linearAlbedo(texel.rgb,vColor.rgb);
-    vec3 ambient,direct;
-    surfaceLight(albedo,normalize(vNormalWorld),normalize(uSunDir),normalize(uMoonDir),vSkyLight,vBlockLight,sat(rainStrength),uTime,ambient,direct);
-    albedo=ambient+direct;
-    gl_FragData[0] = vec4(albedo, texel.a * vColor.a);
+  vec4 texel = texture2D(uAtlas, vUv);
+  if (texel.a <= 0.01) discard;
+  vec3 albedo = linearAlbedo(texel.rgb, vColor.rgb);
+  vec3 ambient, direct;
+  surfaceLight(albedo, normalize(vNormalWorld), normalize(uSunDir), normalize(uMoonDir), vSkyLight,
+               vBlockLight, sat(rainStrength), uTime, ambient, direct);
+  albedo = ambient + direct;
+  gl_FragData[0] = vec4(albedo, texel.a * vColor.a);
 }

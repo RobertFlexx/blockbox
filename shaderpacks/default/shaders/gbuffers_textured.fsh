@@ -21,24 +21,27 @@ varying vec3 vNormalView;
 varying float vFogDepth;
 varying vec3 vWorldPos;
 void main() {
-    vec4 texel = texture2D(uAtlas, vUv);
-    vec4 base = texel * vec4(min(vColor.rgb, vec3(1.0)), vColor.a);
-    if (base.a <= 0.01) discard;
-    vec3 n = normalize(vNormalWorld);
-    float sun = max(dot(n, normalize(uSunDir)), 0.0);
-    float moon = max(dot(n, normalize(uMoonDir)), 0.0);
-    float night = 1.0 - bb_saturate((uDaylight - 0.15) / 0.85);
-    // The lightmap already carries time of day, weather and torch light. Direct
-    // sun and moon only reach faces that can see the sky.
-    float exposure = vSkyLight * vSkyLight * vSkyLight;
-    vec3 light = bbBlockLight(lightmap, vLightUv, vSkyLight, vBlockLight) * mix(1.0, 0.88, vSkyLight * uDaylight);
-    light += (vec3(1.0, 0.90, 0.74) * sun * uDaylight * 0.14 + vec3(0.44, 0.56, 0.86) * moon * night * 0.05) * exposure;
-    base.rgb *= light;
-    float flicker = 0.975 + 0.025 * sin(uTime * 9.0 + vUv.x * 41.0) * sin(uTime * 6.3);
-    base.rgb = mix(base.rgb, texel.rgb * vec3(1.20, 1.03, 0.68) * flicker, vEmission);
-    float fog = bb_saturate((uFogEnd - vFogDepth) / max(uFogEnd - uFogStart, 0.001));
-    base.rgb = mix(uFogColor, base.rgb, fog);
-    gl_FragData[0] = base;
-    gl_FragData[1] = vec4(normalize(vNormalView) * 0.5 + 0.5, 1.0);
-    gl_FragData[2] = vec4(float(renderStage) / 255.0, vSkyLight, 0.0, max(vBlockLight, vEmission));
+  vec4 texel = texture2D(uAtlas, vUv);
+  vec4 base = texel * vec4(min(vColor.rgb, vec3(1.0)), vColor.a);
+  if (base.a <= 0.01) discard;
+  vec3 n = normalize(vNormalWorld);
+  float sun = max(dot(n, normalize(uSunDir)), 0.0);
+  float moon = max(dot(n, normalize(uMoonDir)), 0.0);
+  float night = 1.0 - bb_saturate((uDaylight - 0.15) / 0.85);
+  // The lightmap already carries time of day, weather and torch light. Direct
+  // sun and moon only reach faces that can see the sky.
+  float exposure = vSkyLight * vSkyLight * vSkyLight;
+  vec3 light = bbBlockLight(lightmap, vLightUv, vSkyLight, vBlockLight) *
+               mix(1.0, 0.88, vSkyLight * uDaylight);
+  light += (vec3(1.0, 0.90, 0.74) * sun * uDaylight * 0.14 +
+            vec3(0.44, 0.56, 0.86) * moon * night * 0.05) *
+           exposure;
+  base.rgb *= light;
+  float flicker = 0.975 + 0.025 * sin(uTime * 9.0 + vUv.x * 41.0) * sin(uTime * 6.3);
+  base.rgb = mix(base.rgb, texel.rgb * vec3(1.20, 1.03, 0.68) * flicker, vEmission);
+  float fog = bb_saturate((uFogEnd - vFogDepth) / max(uFogEnd - uFogStart, 0.001));
+  base.rgb = mix(uFogColor, base.rgb, fog);
+  gl_FragData[0] = base;
+  gl_FragData[1] = vec4(normalize(vNormalView) * 0.5 + 0.5, 1.0);
+  gl_FragData[2] = vec4(float(renderStage) / 255.0, vSkyLight, 0.0, max(vBlockLight, vEmission));
 }

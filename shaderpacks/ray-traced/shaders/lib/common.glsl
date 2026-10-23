@@ -4,359 +4,446 @@
 uniform float bbLightning;
 uniform int shadowMapResolution;
 uniform float shadowDistance;
+uniform int bbStormCellCount;
+uniform vec4 bbStormCells[4];
+
+// The same moving cells drive cloud banks, rain curtains and lightning.
+float stormCloudAmount(vec2 world, float fallback) {
+  if (bbStormCellCount == 0) return fallback;
+  float amount = 0.0;
+  for (int i = 0; i < 4; i++) {
+    if (i >= bbStormCellCount) break;
+    vec4 cell = bbStormCells[i];
+    vec2 delta = (world - cell.xy) / max(cell.z, 1.0);
+    float d2 = dot(delta, delta);
+    amount = max(amount, (1.0 - smoothstep(0.16, 1.82, d2)) * cell.w);
+  }
+  return amount;
+}
 
 float sat(float x) { return clamp(x, 0.0, 1.0); }
 vec2 sat2(vec2 x) { return clamp(x, vec2(0.0), vec2(1.0)); }
 vec3 sat3(vec3 x) { return clamp(x, vec3(0.0), vec3(1.0)); }
 float luma(vec3 c) { return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
 
+// FXAA resolves coverage in linear HDR using perceptual luminance for edge
+// detection. UI is composited afterwards, so text and inventory icons stay sharp.
+float aaLuma(vec3 c) {
+  float y = max(luma(c), 0.0);
+  return sqrt(y / (1.0 + y));
+}
+vec3 resolveAA(sampler2D source, vec2 uv, vec2 resolution, int enabled) {
+  vec3 center = texture2D(source, uv).rgb;
+  if (enabled == 0) return center;
+  vec2 px = 1.0 / max(resolution, vec2(1.0));
+  vec3 nw = texture2D(source, uv + vec2(-1.0, 1.0) * px).rgb;
+  vec3 ne = texture2D(source, uv + vec2(1.0, 1.0) * px).rgb;
+  vec3 sw = texture2D(source, uv + vec2(-1.0, -1.0) * px).rgb;
+  vec3 se = texture2D(source, uv + vec2(1.0, -1.0) * px).rgb;
+  float c = aaLuma(center), a = aaLuma(nw), b = aaLuma(ne), d = aaLuma(sw), e = aaLuma(se);
+  float lo = min(c, min(min(a, b), min(d, e))), hi = max(c, max(max(a, b), max(d, e)));
+  if (hi - lo < max(0.016, hi * 0.10)) return center;
+  vec2 direction = vec2(-((a + b) - (d + e)), (a + d) - (b + e));
+  float reduce = max((a + b + d + e) * 0.03125, 0.0078125);
+  direction =
+      clamp(direction / (min(abs(direction.x), abs(direction.y)) + reduce), vec2(-4.0), vec2(4.0)) *
+      px;
+  vec3 inner =
+      (texture2D(source, uv - direction / 6.0).rgb + texture2D(source, uv + direction / 6.0).rgb) *
+      0.5;
+  vec3 outer = inner * 0.5 + (texture2D(source, uv - direction * 0.5).rgb +
+                              texture2D(source, uv + direction * 0.5).rgb) *
+                                 0.25;
+  float resolved = aaLuma(outer);
+  return mix(center, resolved < lo || resolved > hi ? inner : outer, 0.85);
+}
+
 vec3 bbBlockLight(sampler2D lightmap, vec2 uv, float sky, float block) {
-    vec3 light = texture2D(lightmap, uv).rgb;
-    float known = max(sky, block);
-    if (max(light.r, max(light.g, light.b)) < 0.08 && known > 0.35)
-        light = max(light, vec3(0.62, 0.72, 0.84) * sky + vec3(1.0, 0.78, 0.46) * block);
-    return light;
+  vec3 light = texture2D(lightmap, uv).rgb;
+  float known = max(sky, block);
+  if (max(light.r, max(light.g, light.b)) < 0.08 && known > 0.35)
+    light = max(light, vec3(0.62, 0.72, 0.84) * sky + vec3(1.0, 0.78, 0.46) * block);
+  return light;
 }
 
 float linearDepth(float d, float n, float f) {
-    float z = d * 2.0 - 1.0;
-    return (2.0 * n * f) / max(f + n - z * (f - n), 0.00001);
+  float z = d * 2.0 - 1.0;
+  return (2.0 * n * f) / max(f + n - z * (f - n), 0.00001);
 }
 
 vec3 reconstructView(vec2 uv, float depth, mat4 invProjection) {
-    vec4 clip = vec4(uv * 2.0 - 1.0, depth * 2.0 - 1.0, 1.0);
-    vec4 view = invProjection * clip;
-    return view.xyz / max(abs(view.w), 0.00001);
+  vec4 clip = vec4(uv * 2.0 - 1.0, depth * 2.0 - 1.0, 1.0);
+  vec4 view = invProjection * clip;
+  return view.xyz / max(abs(view.w), 0.00001);
 }
 
 // Modelview maps (world.x - cam.x, world.y, world.z - cam.z). Y stays absolute.
 vec3 worldFromView(vec3 viewPos, mat4 invModelView, vec3 camera) {
-    vec4 rel = invModelView * vec4(viewPos, 1.0);
-    return vec3(rel.x + camera.x, rel.y, rel.z + camera.z);
+  vec4 rel = invModelView * vec4(viewPos, 1.0);
+  return vec3(rel.x + camera.x, rel.y, rel.z + camera.z);
 }
 
 vec3 decodeNormal(vec3 n) {
-    vec3 v = n * 2.0 - 1.0;
-    float m = dot(v, v);
-    return m > 0.04 ? normalize(v) : vec3(0.0, 1.0, 0.0);
+  vec3 v = n * 2.0 - 1.0;
+  float m = dot(v, v);
+  return m > 0.04 ? normalize(v) : vec3(0.0, 1.0, 0.0);
 }
 
 float hash12(vec2 p) {
-    vec3 p3 = fract(vec3(p.xyx) * 0.1031);
-    p3 += dot(p3, p3.yzx + 33.33);
-    return fract((p3.x + p3.y) * p3.z);
+  vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+  p3 += dot(p3, p3.yzx + 33.33);
+  return fract((p3.x + p3.y) * p3.z);
 }
 
 float hash13(vec3 p) {
-    p = fract(p * 0.1031);
-    p += dot(p, p.zyx + 31.32);
-    return fract((p.x + p.y) * p.z);
+  p = fract(p * 0.1031);
+  p += dot(p, p.zyx + 31.32);
+  return fract((p.x + p.y) * p.z);
 }
 
 float valueNoise(vec2 p) {
-    vec2 i = floor(p);
-    vec2 f = fract(p);
-    f = f * f * (3.0 - 2.0 * f);
-    float a = hash12(i);
-    float b = hash12(i + vec2(1.0, 0.0));
-    float c = hash12(i + vec2(0.0, 1.0));
-    float d = hash12(i + vec2(1.0, 1.0));
-    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+  vec2 i = floor(p);
+  vec2 f = fract(p);
+  f = f * f * (3.0 - 2.0 * f);
+  float a = hash12(i);
+  float b = hash12(i + vec2(1.0, 0.0));
+  float c = hash12(i + vec2(0.0, 1.0));
+  float d = hash12(i + vec2(1.0, 1.0));
+  return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
 }
 
 float valueNoise3(vec3 p) {
-    vec3 i = floor(p);
-    vec3 f = fract(p);
-    f = f * f * (3.0 - 2.0 * f);
-    float n000 = hash13(i);
-    float n100 = hash13(i + vec3(1.0, 0.0, 0.0));
-    float n010 = hash13(i + vec3(0.0, 1.0, 0.0));
-    float n110 = hash13(i + vec3(1.0, 1.0, 0.0));
-    float n001 = hash13(i + vec3(0.0, 0.0, 1.0));
-    float n101 = hash13(i + vec3(1.0, 0.0, 1.0));
-    float n011 = hash13(i + vec3(0.0, 1.0, 1.0));
-    float n111 = hash13(i + vec3(1.0, 1.0, 1.0));
-    float nx00 = mix(n000, n100, f.x);
-    float nx10 = mix(n010, n110, f.x);
-    float nx01 = mix(n001, n101, f.x);
-    float nx11 = mix(n011, n111, f.x);
-    return mix(mix(nx00, nx10, f.y), mix(nx01, nx11, f.y), f.z);
+  vec3 i = floor(p);
+  vec3 f = fract(p);
+  f = f * f * (3.0 - 2.0 * f);
+  float n000 = hash13(i);
+  float n100 = hash13(i + vec3(1.0, 0.0, 0.0));
+  float n010 = hash13(i + vec3(0.0, 1.0, 0.0));
+  float n110 = hash13(i + vec3(1.0, 1.0, 0.0));
+  float n001 = hash13(i + vec3(0.0, 0.0, 1.0));
+  float n101 = hash13(i + vec3(1.0, 0.0, 1.0));
+  float n011 = hash13(i + vec3(0.0, 1.0, 1.0));
+  float n111 = hash13(i + vec3(1.0, 1.0, 1.0));
+  float nx00 = mix(n000, n100, f.x);
+  float nx10 = mix(n010, n110, f.x);
+  float nx01 = mix(n001, n101, f.x);
+  float nx11 = mix(n011, n111, f.x);
+  return mix(mix(nx00, nx10, f.y), mix(nx01, nx11, f.y), f.z);
 }
 
 float fbm(vec3 p) {
-    float a = 0.5;
-    float s = 0.0;
-    s += a * valueNoise3(p); p = p * 2.03 + vec3(19.1, 7.7, 3.3); a *= 0.5;
-    s += a * valueNoise3(p); p = p * 2.02 + vec3(4.2, 11.4, 8.1); a *= 0.5;
-    s += a * valueNoise3(p);
-    return s;
+  float a = 0.5;
+  float s = 0.0;
+  s += a * valueNoise3(p);
+  p = p * 2.03 + vec3(19.1, 7.7, 3.3);
+  a *= 0.5;
+  s += a * valueNoise3(p);
+  p = p * 2.02 + vec3(4.2, 11.4, 8.1);
+  a *= 0.5;
+  s += a * valueNoise3(p);
+  return s;
 }
 
 // Shadow map is camera-centered. Vertices arrive as (world - camera.xz, world.y - camera.y).
-float shadowCompare(sampler2D shadowMap, vec3 world, vec3 camera, mat4 shadowModel, mat4 shadowProj, float bias) {
-    vec3 rel = vec3(world.x - camera.x, world.y, world.z - camera.z);
-    vec4 sc = shadowProj * shadowModel * vec4(rel, 1.0);
-    vec3 ndc = sc.xyz / max(abs(sc.w), 0.00001);
-    vec2 uv = ndc.xy * 0.5 + 0.5;
-    if (uv.x < 0.0 || uv.y < 0.0 || uv.x > 1.0 || uv.y > 1.0) return 1.0;
-    float z = ndc.z * 0.5 + 0.5;
-    if (z < 0.0 || z > 1.0) return 1.0;
-    float occluder = texture2D(shadowMap, uv).r;
-    return z - bias <= occluder ? 1.0 : 0.0;
+float shadowCompare(sampler2D shadowMap, vec3 world, vec3 camera, mat4 shadowModel, mat4 shadowProj,
+                    float bias) {
+  vec3 rel = vec3(world.x - camera.x, world.y, world.z - camera.z);
+  vec4 sc = shadowProj * shadowModel * vec4(rel, 1.0);
+  vec3 ndc = sc.xyz / max(abs(sc.w), 0.00001);
+  vec2 uv = ndc.xy * 0.5 + 0.5;
+  if (uv.x < 0.0 || uv.y < 0.0 || uv.x > 1.0 || uv.y > 1.0) return 1.0;
+  float z = ndc.z * 0.5 + 0.5;
+  if (z < 0.0 || z > 1.0) return 1.0;
+  float occluder = texture2D(shadowMap, uv).r;
+  return z - bias <= occluder ? 1.0 : 0.0;
 }
 
 // Four comparisons before interpolation retain thin cutout casters. Filtering
 // stored depths first would invent blockers between leaves and empty sky.
-float filteredShadow(sampler2D map,vec2 uv,float receiver,float texel) {
-    vec2 pixel=uv/texel-0.5,base=(floor(pixel)+0.5)*texel,f=fract(pixel);
-    float a=step(receiver,texture2D(map,base).r);
-    float b=step(receiver,texture2D(map,base+vec2(texel,0.0)).r);
-    float c=step(receiver,texture2D(map,base+vec2(0.0,texel)).r);
-    float d=step(receiver,texture2D(map,base+vec2(texel)).r);
-    return mix(mix(a,b,f.x),mix(c,d,f.x),f.y);
+float filteredShadow(sampler2D map, vec2 uv, float receiver, float texel) {
+  vec2 pixel = uv / texel - 0.5, base = (floor(pixel) + 0.5) * texel, f = fract(pixel);
+  float a = step(receiver, texture2D(map, base).r);
+  float b = step(receiver, texture2D(map, base + vec2(texel, 0.0)).r);
+  float c = step(receiver, texture2D(map, base + vec2(0.0, texel)).r);
+  float d = step(receiver, texture2D(map, base + vec2(texel)).r);
+  return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
 }
 
-float pcssShadow(sampler2D shadowMap,vec3 world,vec3 normal,vec3 sun,vec3 camera,mat4 shadowModel,mat4 shadowProj,float dither) {
-    float range=max(shadowDistance,32.0),texel=1.0/max(float(shadowMapResolution),1.0);
-    float ndotl=sat(dot(normal,normalize(sun)));
-    vec3 rel=vec3(world.x-camera.x,world.y,world.z-camera.z)+normal*0.012;
-    vec4 sc=shadowProj*shadowModel*vec4(rel,1.0);
-    vec3 ndc=sc.xyz/max(abs(sc.w),0.00001);
-    vec2 uv=ndc.xy*0.5+0.5;
-    float receiver=ndc.z*0.5+0.5;
-    if(min(uv.x,uv.y)<texel*8.0 || max(uv.x,uv.y)>1.0-texel*8.0 || receiver<=0.0 || receiver>=1.0) return 1.0;
-    // The engine's orthographic depth span is 7*range, its width is 2*range.
-    // Express bias and penumbra in metres so changing distance/resolution never
-    // changes the apparent size of the sun or detaches a foot from its shadow.
-    float bias=(0.018+0.045*(1.0-ndotl))/(7.0*range);
-    float blocker=0.0,count=0.0;
-    for(int i=0;i<8;i++) {
-        float a=float(i)*2.399963+dither*6.283185;
-        vec2 o=vec2(cos(a),sin(a))*sqrt((float(i)+0.5)/8.0)*texel*3.0;
-        float z=texture2D(shadowMap,uv+o).r;
-        if(z<receiver-bias) {blocker+=z;count+=1.0;}
+float pcssShadow(sampler2D shadowMap, vec3 world, vec3 normal, vec3 sun, vec3 camera,
+                 mat4 shadowModel, mat4 shadowProj, float dither) {
+  float range = max(shadowDistance, 32.0), texel = 1.0 / max(float(shadowMapResolution), 1.0);
+  float ndotl = sat(dot(normal, normalize(sun)));
+  vec3 rel = vec3(world.x - camera.x, world.y, world.z - camera.z) + normal * 0.012;
+  vec4 sc = shadowProj * shadowModel * vec4(rel, 1.0);
+  vec3 ndc = sc.xyz / max(abs(sc.w), 0.00001);
+  vec2 uv = ndc.xy * 0.5 + 0.5;
+  float receiver = ndc.z * 0.5 + 0.5;
+  if (min(uv.x, uv.y) < texel * 8.0 || max(uv.x, uv.y) > 1.0 - texel * 8.0 || receiver <= 0.0 ||
+      receiver >= 1.0)
+    return 1.0;
+  // The engine's orthographic depth span is 7*range, its width is 2*range.
+  // Express bias and penumbra in metres so changing distance/resolution never
+  // changes the apparent size of the sun or detaches a foot from its shadow.
+  float bias = (0.018 + 0.045 * (1.0 - ndotl)) / (7.0 * range);
+  float blocker = 0.0, count = 0.0;
+  for (int i = 0; i < 8; i++) {
+    float a = float(i) * 2.399963 + dither * 6.283185;
+    vec2 o = vec2(cos(a), sin(a)) * sqrt((float(i) + 0.5) / 8.0) * texel * 3.0;
+    float z = texture2D(shadowMap, uv + o).r;
+    if (z < receiver - bias) {
+      blocker += z;
+      count += 1.0;
     }
-    float separation=count>0.0 ? max(receiver-blocker/count,0.0)*7.0*range : 0.0;
-    // Solar angular radius ~0.267 degrees: contact hardening, not a fixed blur.
-    float radius=clamp(separation*0.00465/(2.0*range),texel*0.55,texel*6.0);
-    float sum=0.0;
-    for(int i=0;i<12;i++) {
-        float a=float(i)*2.399963+dither*6.283185;
-        vec2 o=vec2(cos(a),sin(a))*sqrt((float(i)+0.5)/12.0)*radius;
-        sum+=filteredShadow(shadowMap,uv+o,receiver-bias,texel);
-    }
-    return sum/12.0;
+  }
+  if (count == 0.0) return filteredShadow(shadowMap, uv, receiver - bias, texel);
+  float separation = max(receiver - blocker / count, 0.0) * 7.0 * range;
+  // Solar angular radius ~0.267 degrees: contact hardening, not a fixed blur.
+  // A small reconstruction footprint also removes the shadow-texel staircase
+  // at contact. Wider penumbrae still grow with caster/receiver separation.
+  float radius = clamp(separation * 0.00465 / (2.0 * range), texel * 1.15, texel * 7.0);
+  float sum = 0.0;
+  for (int i = 0; i < 12; i++) {
+    float a = float(i) * 2.399963 + dither * 6.283185;
+    vec2 o = vec2(cos(a), sin(a)) * sqrt((float(i) + 0.5) / 12.0) * radius;
+    sum += filteredShadow(shadowMap, uv + o, receiver - bias, texel);
+  }
+  return sum / 12.0;
 }
 
 vec4 rtTap(sampler2D tex, vec2 uv) { return texture2D(tex, uv); }
 
 // Depth-aware upsample from the half-resolution ray tracing targets.
 vec4 upsampleRT(sampler2D tex, vec2 uv, vec2 rtSize, sampler2D depthTex, float centerDepth) {
-    vec2 texel = 1.0 / max(rtSize, vec2(1.0));
-    vec4 sum = vec4(0.0);
-    float wsum = 0.0;
-    for (int y = 0; y < 2; y++) {
-        for (int x = 0; x < 2; x++) {
-            vec2 o = (vec2(float(x), float(y)) - 0.5) * texel;
-            vec2 suv = sat2(uv + o);
-            float d = texture2D(depthTex, suv).r;
-            float w = exp(-abs(d - centerDepth) / max(1.0-centerDepth,0.00005) * 50.0);
-            sum += rtTap(tex, suv) * w;
-            wsum += w;
-        }
+  vec2 texel = 1.0 / max(rtSize, vec2(1.0));
+  vec2 grid = uv * rtSize - 0.5;
+  vec2 base = floor(grid), fraction = fract(grid);
+  vec4 sum = vec4(0.0);
+  float wsum = 0.0;
+  for (int y = 0; y < 2; y++) {
+    for (int x = 0; x < 2; x++) {
+      vec2 corner = vec2(float(x), float(y));
+      vec2 suv = sat2((base + corner + 0.5) * texel);
+      vec2 bilinear = mix(1.0 - fraction, fraction, corner);
+      float d = texture2D(depthTex, suv).r;
+      float w = bilinear.x * bilinear.y *
+                exp(-abs(d - centerDepth) / max(1.0 - centerDepth, 0.00005) * 32.0);
+      sum += rtTap(tex, suv) * w;
+      wsum += w;
     }
-    if (wsum < 0.0001) return rtTap(tex, uv);
-    return sum / wsum;
+  }
+  if (wsum < 0.0001) return rtTap(tex, uv);
+  return sum / wsum;
 }
 
 // All pack lighting is linear HDR. Conversion to display space happens once in final.
 float daylightAmount(vec3 sun) { return smoothstep(-0.15, 0.12, sun.y); }
-float nightAmount(vec3 sun) { return 1.0-smoothstep(-0.16, 0.01, sun.y); }
-float goldenHour(vec3 sun) { return exp(-pow((sun.y-0.035)*4.4,2.0)); }
+float nightAmount(vec3 sun) { return 1.0 - smoothstep(-0.16, 0.01, sun.y); }
+float goldenHour(vec3 sun) { return exp(-pow((sun.y - 0.035) * 4.4, 2.0)); }
 vec3 sunlightColor(vec3 sun) {
-    return mix(vec3(1.90,1.82,1.65),vec3(1.82,0.65,0.22),goldenHour(sun));
+  return mix(vec3(1.90, 1.82, 1.65), vec3(1.82, 0.65, 0.22), goldenHour(sun));
 }
-vec3 linearAlbedo(vec3 texel,vec3 tint) {
-    return pow(max(texel*min(tint,vec3(1.0)),vec3(0.0)),vec3(2.2));
+vec3 linearAlbedo(vec3 texel, vec3 tint) {
+  return pow(max(texel * min(tint, vec3(1.0)), vec3(0.0)), vec3(2.2));
 }
 
 vec3 sunDiscColor(vec3 rd, vec3 sun, float daylight, float storm) {
-    float d=sat(dot(rd,normalize(sun)));
-    float disc=smoothstep(0.99935,0.99965,d);
-    float glow=pow(d,24.0)*0.12+pow(d,256.0)*0.35+pow(d,1024.0)*0.6;
-    return sunlightColor(sun)*(disc*8.0+glow)*smoothstep(-0.055,0.02,sun.y)*(1.0-storm*0.96);
+  float d = sat(dot(rd, normalize(sun)));
+  float disc = smoothstep(0.99935, 0.99965, d);
+  float glow = pow(d, 24.0) * 0.12 + pow(d, 256.0) * 0.35 + pow(d, 1024.0) * 0.6;
+  return sunlightColor(sun) * (disc * 8.0 + glow) * smoothstep(-0.055, 0.02, sun.y) *
+         (1.0 - storm * 0.96);
 }
 
 // Continuous blue-hour, daytime and sunset scattering, shared by fog and reflections.
 // The sun disk is separate so aerial perspective never paints a disk over terrain.
-vec3 skyScattering(vec3 dir,vec3 sun,float storm) {
-    float day=daylightAmount(sun);
-    float gold=goldenHour(sun)*(1.0-storm);
-    float elev=sat(dir.y);
-    float horizonBand=pow(1.0-elev,3.0);
-    float towardSun=pow(sat(dot(dir,normalize(sun))),3.0);
-    vec3 zenith=mix(vec3(0.0015,0.006,0.018),vec3(0.075,0.23,0.57),day);
-    zenith=mix(zenith,vec3(0.16,0.12,0.28),gold*0.55);
-    vec3 horizon=mix(vec3(0.012,0.037,0.068),vec3(0.42,0.65,0.86),day);
-    vec3 sunset=mix(vec3(0.48,0.24,0.30),vec3(1.15,0.50,0.115),towardSun);
-    horizon=mix(horizon,sunset,gold*0.92);
-    vec3 sky=mix(zenith,horizon,horizonBand);
-    sky+=vec3(0.9,0.38,0.085)*towardSun*gold*pow(1.0-elev,1.6)*0.36;
-    vec3 stormSky=mix(vec3(0.003,0.008,0.016),vec3(0.085,0.115,0.15),day);
-    stormSky*=mix(0.65,1.25,horizonBand);
-    sky=mix(sky,stormSky,storm*0.93);
-    vec3 moon=-normalize(sun);
-    float md=sat(dot(dir,moon));
-    sky+=vec3(0.008,0.026,0.046)*(pow(md,8.0)+pow(md,96.0)*1.8)*nightAmount(sun)*(1.0-storm);
-    return mix(sky,horizon*vec3(0.22,0.27,0.32),sat(-dir.y*3.0));
+vec3 skyScattering(vec3 dir, vec3 sun, float storm) {
+  float day = daylightAmount(sun);
+  float gold = goldenHour(sun) * (1.0 - storm);
+  float elev = sat(dir.y);
+  float horizonBand = pow(1.0 - elev, 3.0);
+  float towardSun = pow(sat(dot(dir, normalize(sun))), 3.0);
+  vec3 zenith = mix(vec3(0.0015, 0.006, 0.018), vec3(0.075, 0.23, 0.57), day);
+  zenith = mix(zenith, vec3(0.16, 0.12, 0.28), gold * 0.55);
+  vec3 horizon = mix(vec3(0.012, 0.037, 0.068), vec3(0.42, 0.65, 0.86), day);
+  vec3 sunset = mix(vec3(0.48, 0.24, 0.30), vec3(1.15, 0.50, 0.115), towardSun);
+  horizon = mix(horizon, sunset, gold * 0.92);
+  vec3 sky = mix(zenith, horizon, horizonBand);
+  sky += vec3(0.9, 0.38, 0.085) * towardSun * gold * pow(1.0 - elev, 1.6) * 0.36;
+  vec3 stormSky = mix(vec3(0.003, 0.008, 0.016), vec3(0.085, 0.115, 0.15), day);
+  stormSky *= mix(0.65, 1.25, horizonBand);
+  sky = mix(sky, stormSky, storm * 0.93);
+  vec3 moon = -normalize(sun);
+  float md = sat(dot(dir, moon));
+  sky += vec3(0.008, 0.026, 0.046) * (pow(md, 8.0) + pow(md, 96.0) * 1.8) * nightAmount(sun) *
+         (1.0 - storm);
+  return mix(sky, horizon * vec3(0.22, 0.27, 0.32), sat(-dir.y * 3.0));
 }
 
-vec3 atmosphere(vec3 rd,vec3 sun,float daylight,float storm,float time) {
-    vec3 dir=normalize(rd);
-    vec3 sky=skyScattering(dir,sun,storm)+sunDiscColor(dir,sun,daylight,storm);
-    sky+=vec3(0.32,0.43,0.62)*sat(bbLightning);
-    float night=nightAmount(sun)*(1.0-storm);
-    if (night>0.001) {
-        vec2 angular=vec2(atan(dir.z,dir.x)/6.2831853+0.5,asin(clamp(dir.y,-1.0,1.0))/3.1415927+0.5);
-        vec2 field=angular*vec2(760.0,380.0);
-        vec2 cell=floor(field);
-        float seed=hash12(cell);
-        vec2 center=vec2(hash12(cell+17.1),hash12(cell+39.7))*0.6+0.2;
-        float star=pow(sat(1.0-length(fract(field)-center)*3.5),2.0)*step(0.986,seed);
-        vec3 starColor=mix(vec3(0.52,0.73,1.0),vec3(1.0,0.82,0.65),hash12(cell+5.3));
-        sky+=starColor*star*night*smoothstep(-0.02,0.25,dir.y)*mix(0.3,1.4,hash12(cell+73.0));
-        float md=sat(dot(dir,-normalize(sun)));
-        sky+=vec3(0.65,0.85,1.0)*smoothstep(0.99945,0.9997,md)*night*3.0;
-    }
-    return sky;
+#include "stars.glsl"
+
+vec3 atmosphere(vec3 rd, vec3 sun, float daylight, float storm, float time) {
+  vec3 dir = normalize(rd);
+  vec3 sky = skyScattering(dir, sun, storm) + sunDiscColor(dir, sun, daylight, storm);
+  sky += vec3(0.32, 0.43, 0.62) * sat(bbLightning);
+  float night = nightAmount(sun) * (1.0 - storm);
+  if (night > 0.001) {
+    vec2 angular =
+        vec2(atan(dir.z, dir.x) / 6.2831853 + 0.5, asin(clamp(dir.y, -1.0, 1.0)) / 3.1415927 + 0.5);
+    vec2 field = angular * vec2(760.0, 380.0);
+    vec2 cell = floor(field);
+    float seed = hash12(cell);
+    vec2 center = vec2(hash12(cell + 17.1), hash12(cell + 39.7)) * 0.6 + 0.2;
+    float star = pow(sat(1.0 - length(fract(field) - center) * 3.5), 2.0) * step(0.986, seed);
+    vec3 starColor = mix(vec3(0.52, 0.73, 1.0), vec3(1.0, 0.82, 0.65), hash12(cell + 5.3));
+    sky += starColor * star * night * smoothstep(-0.02, 0.25, dir.y) *
+           mix(0.3, 1.4, hash12(cell + 73.0));
+    sky += constellationSky(dir, time) * night * smoothstep(-0.04, 0.2, dir.y);
+    float band = pow(sat(1.0 - abs(dot(dir, normalize(vec3(0.35, 0.62, -0.70))))), 26.0);
+    float dust = valueNoise3(dir * 38.0 + vec3(4.7, 1.9, 8.2));
+    sky += vec3(0.018, 0.021, 0.035) * band * (0.4 + dust) * night * smoothstep(0.0, 0.3, dir.y);
+    float md = sat(dot(dir, -normalize(sun)));
+    sky += vec3(0.65, 0.85, 1.0) * smoothstep(0.99945, 0.9997, md) * night * 3.0;
+  }
+  return sky;
 }
 
 // Cumulus billows with a soft eroded edge. Only occupied cells sample 3D detail.
-float cloudDensity(vec3 p,float time,float cover) {
-    vec2 flow=(p.xz+vec2(time*0.65,-time*0.22))/192.0;
-    vec2 grid=floor(flow-0.5);
-    float field=-1.0;
-    for(int x=0;x<2;x++) for(int z=0;z<2;z++) {
-        vec2 cell=grid+vec2(float(x),float(z));
-        float seed=hash12(cell+vec2(13.7,29.1));
-        // Broad weather regions make connected banks and open blue patches,
-        // rather than an evenly spaced sky full of identical cotton balls.
-        float weather=valueNoise(cell*0.31+vec2(17.3,8.1));
-        float coverage=mix(0.42,0.86,weather)+sat(cover-0.55)*0.6;
-        if(seed>coverage) continue;
-        float r=48.0+seed*47.0+sat(cover-0.55)*40.0;
-        vec2 center=cell+0.5+vec2(fract(seed*7.37)-0.5,fract(seed*13.13)-0.5)*0.28;
-        vec3 q=vec3((flow.x-center.x)*192.0,p.y-172.0-seed*12.0,(flow.y-center.y)*192.0);
-        vec3 main=q/vec3(r,r*0.26,r*(0.65+weather*0.35));
-        vec3 a=(q-vec3(-r*0.43,r*0.15,r*0.12))/vec3(r*0.61,r*0.38,r*0.55);
-        vec3 b=(q-vec3(r*0.31,r*0.19,-r*0.16))/vec3(r*0.53,r*0.42,r*0.56);
-        vec3 c=(q-vec3(r*0.08,r*0.31,r*0.19))/vec3(r*0.45,r*0.33,r*0.43);
-        float d=max(max(1.0-dot(main,main),1.0-dot(a,a)),max(1.0-dot(b,b),1.0-dot(c,c)));
-        field=max(field,d);
+float cloudDensity(vec3 p, float time, float cover) {
+  vec2 wind = vec2(0.72, 0.21) * time;
+  vec2 flow = (p.xz - wind) / 192.0;
+  float storm = stormCloudAmount(p.xz, sat((cover - 0.55) / 0.4));
+  vec2 grid = floor(flow - 0.5);
+  float field = -1.0;
+  for (int x = 0; x < 2; x++)
+    for (int z = 0; z < 2; z++) {
+      vec2 cell = grid + vec2(float(x), float(z));
+      float seed = hash12(cell + vec2(13.7, 29.1));
+      // Broad weather regions make connected banks and open blue patches,
+      // rather than an evenly spaced sky full of identical cotton balls.
+      float weather = valueNoise(cell * 0.31 + vec2(17.3, 8.1));
+      float coverage = mix(0.42, 0.86, weather) + storm * 0.30;
+      if (seed > coverage) continue;
+      float r = 48.0 + seed * 47.0 + storm * 38.0;
+      vec2 center = cell + 0.5 + vec2(fract(seed * 7.37) - 0.5, fract(seed * 13.13) - 0.5) * 0.28;
+      vec3 q =
+          vec3((flow.x - center.x) * 192.0, p.y - 172.0 - seed * 12.0, (flow.y - center.y) * 192.0);
+      vec3 main = q / vec3(r, r * 0.26, r * (0.65 + weather * 0.35));
+      vec3 a = (q - vec3(-r * 0.43, r * 0.15, r * 0.12)) / vec3(r * 0.61, r * 0.38, r * 0.55);
+      vec3 b = (q - vec3(r * 0.31, r * 0.19, -r * 0.16)) / vec3(r * 0.53, r * 0.42, r * 0.56);
+      vec3 c = (q - vec3(r * 0.08, r * 0.31, r * 0.19)) / vec3(r * 0.45, r * 0.33, r * 0.43);
+      float d =
+          max(max(1.0 - dot(main, main), 1.0 - dot(a, a)), max(1.0 - dot(b, b), 1.0 - dot(c, c)));
+      field = max(field, d);
     }
-    if(field< -0.25) return 0.0;
-    vec3 detail=p+vec3(time*0.65,0.0,-time*0.22);
-    field+=(valueNoise3(detail*0.075)-0.5)*0.60;
-    field+=(valueNoise3(detail*0.23)-0.5)*0.18;
-    return smoothstep(-0.04,0.60,field)*smoothstep(151.0,160.0,p.y);
+  if (field < -0.25) return 0.0;
+  vec3 detail = p - vec3(wind.x, 0.0, wind.y);
+  field += (valueNoise3(detail * 0.075) - 0.5) * 0.60;
+  field += (valueNoise3(detail * 0.23) - 0.5) * 0.18;
+  return smoothstep(-0.04, 0.60, field) * smoothstep(151.0, 160.0, p.y);
 }
 
-float cloudTransmittance(vec3 world,vec3 sun,float time,float storm) {
-    if(sun.y<0.06 || world.y>210.0) return 1.0;
-    float density=0.0;
-    for(int i=0;i<3;i++) {
-        float height=163.0+float(i)*14.0;
-        vec3 p=world+sun*max((height-world.y)/sun.y,0.0);
-        density+=cloudDensity(p,time,0.55+storm*0.4);
-    }
-    return exp(-density*0.8);
+float cloudTransmittance(vec3 world, vec3 sun, float time, float storm) {
+  if (sun.y < 0.06 || world.y > 210.0) return 1.0;
+  float density = 0.0;
+  for (int i = 0; i < 3; i++) {
+    float height = 163.0 + float(i) * 14.0;
+    vec3 p = world + sun * max((height - world.y) / sun.y, 0.0);
+    density += cloudDensity(p, time, 0.55 + storm * 0.4);
+  }
+  return exp(-density * 0.8);
 }
 
-vec3 marchClouds(vec3 color,vec3 ro,vec3 rd,float tmax,vec3 sun,float daylight,float storm,float time) {
-    if (abs(rd.y)<0.0001) return color;
-    float t0=(144.0-ro.y)/rd.y,t1=(242.0-ro.y)/rd.y;
-    float ta=max(min(t0,t1),0.0),tb=min(max(t0,t1),tmax);
-    if (tb<=ta || tmax<8.0) return color;
-    const int STEPS=48;
-    float dt=(tb-ta)/float(STEPS),transmit=1.0;
-    vec3 scatter=vec3(0.0);
-    float day=daylightAmount(sun),night=nightAmount(sun);
-    vec3 lightDir=normalize(sun.y> -0.02 ? sun : -sun);
-    vec3 direct=mix(sunlightColor(sun)*0.75,vec3(0.026,0.065,0.105),night)*(1.0-storm*0.8);
-    vec3 ambient=mix(vec3(0.005,0.016,0.032),vec3(0.18,0.25,0.37),day);
-    ambient=mix(ambient,ambient*0.42,storm)+vec3(0.3,0.4,0.55)*sat(bbLightning);
-    for (int i=0;i<STEPS;i++) {
-        float jitter=0.35+hash12(gl_FragCoord.xy)*0.3;
-        float t=ta+(float(i)+jitter)*dt;
-        vec3 p=ro+rd*t;
-        float d=cloudDensity(p,time,0.55+storm*0.4);
-        if (d>0.002) {
-            float light=0.0;
-            for (int s=0;s<3;s++)
-                light+=cloudDensity(p+lightDir*(6.0+float(s)*10.0),time,0.55+storm*0.4);
-            float beer=exp(-light*1.15);
-            float silver=pow(sat(dot(rd,lightDir)),12.0)*0.7;
-            float heightLight=smoothstep(150.0,205.0,p.y);
-            vec3 lit=direct*(0.12+beer*(0.95+silver))+ambient*mix(0.6,1.25,heightLight);
-            float absorb=exp(-d*dt*0.075);
-            scatter+=transmit*(1.0-absorb)*lit;
-            transmit*=absorb;
-            if (transmit<0.025) break;
-        }
+vec3 marchClouds(vec3 color, vec3 ro, vec3 rd, float tmax, vec3 sun, float daylight, float storm,
+                 float time) {
+  if (abs(rd.y) < 0.0001) return color;
+  float t0 = (144.0 - ro.y) / rd.y, t1 = (242.0 - ro.y) / rd.y;
+  float ta = max(min(t0, t1), 0.0), tb = min(max(t0, t1), tmax);
+  if (tb <= ta || tmax < 8.0) return color;
+  const int STEPS = 48;
+  float dt = (tb - ta) / float(STEPS), transmit = 1.0;
+  vec3 scatter = vec3(0.0);
+  float day = daylightAmount(sun), night = nightAmount(sun);
+  vec3 lightDir = normalize(sun.y > -0.02 ? sun : -sun);
+  vec3 direct =
+      mix(sunlightColor(sun) * 0.75, vec3(0.026, 0.065, 0.105), night) * (1.0 - storm * 0.8);
+  vec3 ambient = mix(vec3(0.005, 0.016, 0.032), vec3(0.18, 0.25, 0.37), day);
+  ambient = mix(ambient, ambient * 0.42, storm) + vec3(0.3, 0.4, 0.55) * sat(bbLightning);
+  for (int i = 0; i < STEPS; i++) {
+    // Spatially stratified samples conceal marching layers without flickering
+    // the cloud bank or tying its motion to walking/viewmodel animation.
+    float jitter = 0.35 + hash12(gl_FragCoord.xy) * 0.3;
+    float t = ta + (float(i) + jitter) * dt;
+    vec3 p = ro + rd * t;
+    float d = cloudDensity(p, time, 0.55 + storm * 0.4);
+    if (d > 0.002) {
+      float light = 0.0;
+      for (int s = 0; s < 3; s++)
+        light += cloudDensity(p + lightDir * (6.0 + float(s) * 10.0), time, 0.55 + storm * 0.4);
+      float beer = exp(-light * 1.15);
+      float silver = pow(sat(dot(rd, lightDir)), 12.0) * 0.7;
+      float heightLight = smoothstep(150.0, 205.0, p.y);
+      float localStorm = stormCloudAmount(p.xz, storm);
+      vec3 lit = direct * (0.12 + beer * (0.95 + silver)) * (1.0 - localStorm * 0.65) +
+                 ambient * mix(0.6, 1.25, heightLight) * (1.0 - localStorm * 0.4);
+      float absorb = exp(-d * dt * 0.075);
+      scatter += transmit * (1.0 - absorb) * lit;
+      transmit *= absorb;
+      if (transmit < 0.025) break;
     }
-    return color*transmit+scatter;
+  }
+  return color * transmit + scatter;
 }
 
 // Dielectric Fresnel for either side of an air/water interface. Above the
 // critical angle water-to-air transmission becomes total internal reflection.
 // Sparse world-anchored suspended particles, bounded by the water interface or
 // the opaque scene. Soft analytic discs avoid a noisy full-screen sparkle layer.
-vec3 waterMotes(vec3 ro,vec3 rd,float distance,float time) {
-    float endT=min(distance,28.0),brightness=0.0;
-    vec3 glow=vec3(0.0);
-    for(int i=0;i<20;i++) {
-        float t=endT*(float(i)+0.5)/20.0;
-        vec3 cell=floor((ro+rd*t)/2.2);
-        float seed=hash13(cell+13.7);
-        vec3 jitter=vec3(hash13(cell+3.1),hash13(cell+7.9),hash13(cell+17.3));
-        vec3 point=(cell+0.15+jitter*0.7)*2.2;
-        point.y+=sin(time*0.35+seed*19.0)*0.09;
-        float along=dot(point-ro,rd);
-        if(along<=0.25 || along>=distance) continue;
-        float radius=0.012+along*0.00065;
-        float separation=length(point-ro-rd*along);
-        float mote=(1.0-smoothstep(radius*0.1,radius,separation))*(0.25+seed*0.75);
-        if(mote>brightness) {
-            brightness=mote;
-            glow=vec3(0.20,0.48,0.75)*mote*exp(-vec3(0.14,0.05,0.025)*along);
-        }
+vec3 waterMotes(vec3 ro, vec3 rd, float distance, float time) {
+  float endT = min(distance, 28.0), brightness = 0.0;
+  vec3 glow = vec3(0.0);
+  for (int i = 0; i < 20; i++) {
+    float t = endT * (float(i) + 0.5) / 20.0;
+    vec3 cell = floor((ro + rd * t) / 2.2);
+    float seed = hash13(cell + 13.7);
+    vec3 jitter = vec3(hash13(cell + 3.1), hash13(cell + 7.9), hash13(cell + 17.3));
+    vec3 point = (cell + 0.15 + jitter * 0.7) * 2.2;
+    point.y += sin(time * 0.35 + seed * 19.0) * 0.09;
+    float along = dot(point - ro, rd);
+    if (along <= 0.25 || along >= distance) continue;
+    float radius = 0.012 + along * 0.00065;
+    float separation = length(point - ro - rd * along);
+    float mote = (1.0 - smoothstep(radius * 0.1, radius, separation)) * (0.25 + seed * 0.75);
+    if (mote > brightness) {
+      brightness = mote;
+      glow = vec3(0.20, 0.48, 0.75) * mote * exp(-vec3(0.14, 0.05, 0.025) * along);
     }
-    return glow;
+  }
+  return glow;
 }
 
-float dielectricFresnel(float cosine,float eta) {
-    float c=clamp(cosine,0.0001,1.0);
-    float sinT2=eta*eta*(1.0-c*c);
-    if (sinT2>=1.0) return 1.0;
-    float ct=sqrt(max(1.0-sinT2,0.0));
-    float rs=(eta*c-ct)/max(eta*c+ct,0.0001);
-    float rp=(c-eta*ct)/max(c+eta*ct,0.0001);
-    return (rs*rs+rp*rp)*0.5;
+float dielectricFresnel(float cosine, float eta) {
+  float c = clamp(cosine, 0.0001, 1.0);
+  float sinT2 = eta * eta * (1.0 - c * c);
+  if (sinT2 >= 1.0) return 1.0;
+  float ct = sqrt(max(1.0 - sinT2, 0.0));
+  float rs = (eta * c - ct) / max(eta * c + ct, 0.0001);
+  float rp = (c - eta * ct) / max(c + eta * ct, 0.0001);
+  return (rs * rs + rp * rp) * 0.5;
 }
 
-float fresnelSchlick(float ndotv) {
-    return mix(0.025,1.0,pow(sat(1.0-ndotv),5.0));
-}
+float fresnelSchlick(float ndotv) { return mix(0.025, 1.0, pow(sat(1.0 - ndotv), 5.0)); }
 
 vec3 grade(vec3 c) {
-    c=max(c,vec3(0.0))*0.9;
-    vec3 mapped=sat3((c*(2.51*c+0.03))/(c*(2.43*c+0.59)+0.14));
-    mapped=mix(vec3(luma(mapped)),mapped,1.045);
-    return pow(sat3(mapped),vec3(1.0/2.2));
+  c = max(c, vec3(0.0)) * 0.9;
+  vec3 mapped = sat3((c * (2.51 * c + 0.03)) / (c * (2.43 * c + 0.59) + 0.14));
+  // A restrained display grade preserves material colours without pushing
+  // already vivid texture-pack grass and shallow water toward neon hues.
+  mapped = mix(vec3(luma(mapped)), mapped, 0.94);
+  return pow(sat3(mapped), vec3(1.0 / 2.2));
 }
 
 vec3 displayDither(vec3 color, vec2 pixel) {
-    float a = fract(52.9829189 * fract(dot(pixel, vec2(0.06711056, 0.00583715))));
-    float b = fract(52.9829189 * fract(dot(pixel + vec2(37.0, 17.0), vec2(0.06711056, 0.00583715))));
-    return sat3(color + (a + b - 1.0) * (0.65 / 255.0));
+  float a = fract(52.9829189 * fract(dot(pixel, vec2(0.06711056, 0.00583715))));
+  float b = fract(52.9829189 * fract(dot(pixel + vec2(37.0, 17.0), vec2(0.06711056, 0.00583715))));
+  return sat3(color + (a + b - 1.0) * (0.65 / 255.0));
 }

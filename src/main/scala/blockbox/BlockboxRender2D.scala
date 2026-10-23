@@ -8,118 +8,120 @@ import org.lwjgl.opengl.GL15.*
 import scala.math.*
 
 object BlockboxRender2D:
-  def voxelPanel(p: UiRect,s: Float): Unit =
-    rect(p.x,p.y,p.w,p.h,0.09f,0.09f,0.09f,1)
-    rect(p.x+s,p.y+s,p.w-2*s,p.h-2*s,0.95f,0.95f,0.95f,1)
-    rect(p.x+3*s,p.y+3*s,p.w-4*s,p.h-4*s,0.35f,0.35f,0.35f,1)
-    rect(p.x+3*s,p.y+3*s,p.w-6*s,p.h-6*s,0.77f,0.77f,0.77f,1)
-    rect(p.x+s,p.y+p.h-2*s,p.w-2*s,s,0.23f,0.23f,0.23f,1)
-    rect(p.x+p.w-2*s,p.y+s,s,p.h-2*s,0.23f,0.23f,0.23f,1)
+  def voxelPanel(p: UiRect, s: Float): Unit =
+    rect(p.x, p.y, p.w, p.h, 0.09f, 0.09f, 0.09f, 1)
+    rect(p.x + s, p.y + s, p.w - 2 * s, p.h - 2 * s, 0.95f, 0.95f, 0.95f, 1)
+    rect(p.x + 3 * s, p.y + 3 * s, p.w - 4 * s, p.h - 4 * s, 0.35f, 0.35f, 0.35f, 1)
+    rect(p.x + 3 * s, p.y + 3 * s, p.w - 6 * s, p.h - 6 * s, 0.77f, 0.77f, 0.77f, 1)
+    rect(p.x + s, p.y + p.h - 2 * s, p.w - 2 * s, s, 0.23f, 0.23f, 0.23f, 1)
+    rect(p.x + p.w - 2 * s, p.y + s, s, p.h - 2 * s, 0.23f, 0.23f, 0.23f, 1)
 
-  def voxelSlot(p: UiRect,s: Float,hover: Boolean=false,selected: Boolean=false): Unit =
-    rect(p.x,p.y,p.w,p.h,0.24f,0.24f,0.24f,1)
-    rect(p.x+s,p.y+s,p.w-s,p.h-s,1f,1f,1f,1)
-    val v=if hover then 0.72f else 0.55f
-    rect(p.x+s,p.y+s,p.w-2*s,p.h-2*s,v,v,v,1)
+  def voxelSlot(p: UiRect, s: Float, hover: Boolean = false, selected: Boolean = false): Unit =
+    rect(p.x, p.y, p.w, p.h, 0.24f, 0.24f, 0.24f, 1)
+    rect(p.x + s, p.y + s, p.w - s, p.h - s, 1f, 1f, 1f, 1)
+    val v = if hover then 0.72f else 0.55f
+    rect(p.x + s, p.y + s, p.w - 2 * s, p.h - 2 * s, v, v, v, 1)
     if selected then
-      val e=s.max(1f)
-      rect(p.x-e,p.y-e,p.w+2*e,e,1,1,1,1); rect(p.x-e,p.y+p.h,p.w+2*e,e,1,1,1,1)
-      rect(p.x-e,p.y,e,p.h,1,1,1,1); rect(p.x+p.w,p.y,e,p.h,1,1,1,1)
-  private val textMeshCache = scala.collection.mutable.LinkedHashMap.empty[String, (java.nio.ByteBuffer, Int, Float, Float, Float, Float)]
+      val e = s.max(1f)
+      rect(p.x - e, p.y - e, p.w + 2 * e, e, 1, 1, 1, 1);
+      rect(p.x - e, p.y + p.h, p.w + 2 * e, e, 1, 1, 1, 1)
+      rect(p.x - e, p.y, e, p.h, 1, 1, 1, 1); rect(p.x + p.w, p.y, e, p.h, 1, 1, 1, 1)
+  private val textMeshCache = scala.collection.mutable.LinkedHashMap
+    .empty[String, (java.nio.ByteBuffer, Int, Float, Float, Float, Float)]
   private val maxTextMeshCacheEntries = 512
 
   private val glyphRows: Map[Char, Array[String]] = Map(
-    'A' -> Array("01110","10001","10001","11111","10001","10001","10001"),
-    'B' -> Array("11110","10001","10001","11110","10001","10001","11110"),
-    'C' -> Array("01111","10000","10000","10000","10000","10000","01111"),
-    'D' -> Array("11110","10001","10001","10001","10001","10001","11110"),
-    'E' -> Array("11111","10000","10000","11110","10000","10000","11111"),
-    'F' -> Array("11111","10000","10000","11110","10000","10000","10000"),
-    'G' -> Array("01111","10000","10000","10111","10001","10001","01111"),
-    'H' -> Array("10001","10001","10001","11111","10001","10001","10001"),
-    'I' -> Array("11111","00100","00100","00100","00100","00100","11111"),
-    'J' -> Array("00111","00010","00010","00010","10010","10010","01100"),
-    'K' -> Array("10001","10010","10100","11000","10100","10010","10001"),
-    'L' -> Array("10000","10000","10000","10000","10000","10000","11111"),
-    'M' -> Array("10001","11011","10101","10101","10001","10001","10001"),
-    'N' -> Array("10001","11001","10101","10011","10001","10001","10001"),
-    'O' -> Array("01110","10001","10001","10001","10001","10001","01110"),
-    'P' -> Array("11110","10001","10001","11110","10000","10000","10000"),
-    'Q' -> Array("01110","10001","10001","10001","10101","10010","01101"),
-    'R' -> Array("11110","10001","10001","11110","10100","10010","10001"),
-    'S' -> Array("01111","10000","10000","01110","00001","00001","11110"),
-    'T' -> Array("11111","00100","00100","00100","00100","00100","00100"),
-    'U' -> Array("10001","10001","10001","10001","10001","10001","01110"),
-    'V' -> Array("10001","10001","10001","10001","10001","01010","00100"),
-    'W' -> Array("10001","10001","10001","10101","10101","10101","01010"),
-    'X' -> Array("10001","10001","01010","00100","01010","10001","10001"),
-    'Y' -> Array("10001","10001","01010","00100","00100","00100","00100"),
-    'Z' -> Array("11111","00001","00010","00100","01000","10000","11111"),
-    'a' -> Array("00000","00000","01110","00001","01111","10001","01111"),
-    'b' -> Array("10000","10000","10110","11001","10001","10001","11110"),
-    'c' -> Array("00000","00000","01111","10000","10000","10000","01111"),
-    'd' -> Array("00001","00001","01101","10011","10001","10001","01111"),
-    'e' -> Array("00000","00000","01110","10001","11111","10000","01111"),
-    'f' -> Array("00110","01001","01000","11100","01000","01000","01000"),
-    'g' -> Array("00000","00000","01111","10001","01111","00001","01110"),
-    'h' -> Array("10000","10000","10110","11001","10001","10001","10001"),
-    'i' -> Array("00100","00000","01100","00100","00100","00100","01110"),
-    'j' -> Array("00010","00000","00110","00010","00010","10010","01100"),
-    'k' -> Array("10000","10000","10010","10100","11000","10100","10010"),
-    'l' -> Array("01100","00100","00100","00100","00100","00100","01110"),
-    'm' -> Array("00000","00000","11010","10101","10101","10101","10101"),
-    'n' -> Array("00000","00000","10110","11001","10001","10001","10001"),
-    'o' -> Array("00000","00000","01110","10001","10001","10001","01110"),
-    'p' -> Array("00000","00000","11110","10001","11110","10000","10000"),
-    'q' -> Array("00000","00000","01111","10001","01111","00001","00001"),
-    'r' -> Array("00000","00000","10110","11001","10000","10000","10000"),
-    's' -> Array("00000","00000","01111","10000","01110","00001","11110"),
-    't' -> Array("01000","01000","11100","01000","01000","01001","00110"),
-    'u' -> Array("00000","00000","10001","10001","10001","10011","01101"),
-    'v' -> Array("00000","00000","10001","10001","10001","01010","00100"),
-    'w' -> Array("00000","00000","10001","10001","10101","10101","01010"),
-    'x' -> Array("00000","00000","10001","01010","00100","01010","10001"),
-    'y' -> Array("00000","00000","10001","10001","01111","00001","01110"),
-    'z' -> Array("00000","00000","11111","00010","00100","01000","11111"),
-    '0' -> Array("01110","10001","10011","10101","11001","10001","01110"),
-    '1' -> Array("00100","01100","00100","00100","00100","00100","01110"),
-    '2' -> Array("01110","10001","00001","00010","00100","01000","11111"),
-    '3' -> Array("11110","00001","00001","01110","00001","00001","11110"),
-    '4' -> Array("00010","00110","01010","10010","11111","00010","00010"),
-    '5' -> Array("11111","10000","10000","11110","00001","00001","11110"),
-    '6' -> Array("01110","10000","10000","11110","10001","10001","01110"),
-    '7' -> Array("11111","00001","00010","00100","01000","01000","01000"),
-    '8' -> Array("01110","10001","10001","01110","10001","10001","01110"),
-    '9' -> Array("01110","10001","10001","01111","00001","00001","01110"),
-    '.' -> Array("00000","00000","00000","00000","00000","00110","00110"),
-    ',' -> Array("00000","00000","00000","00000","00110","00110","00100"),
-    ':' -> Array("00000","00110","00110","00000","00110","00110","00000"),
-    ';' -> Array("00000","00110","00110","00000","00110","00110","00100"),
-    '!' -> Array("00100","00100","00100","00100","00100","00000","00100"),
-    '?' -> Array("01110","10001","00001","00010","00100","00000","00100"),
-    '-' -> Array("00000","00000","00000","11111","00000","00000","00000"),
-    '_' -> Array("00000","00000","00000","00000","00000","00000","11111"),
-    '/' -> Array("00001","00010","00010","00100","01000","01000","10000"),
-    '\\' -> Array("10000","01000","01000","00100","00010","00010","00001"),
-    '(' -> Array("00010","00100","01000","01000","01000","00100","00010"),
-    ')' -> Array("01000","00100","00010","00010","00010","00100","01000"),
-    '[' -> Array("01110","01000","01000","01000","01000","01000","01110"),
-    ']' -> Array("01110","00010","00010","00010","00010","00010","01110"),
-    '+' -> Array("00000","00100","00100","11111","00100","00100","00000"),
-    '=' -> Array("00000","00000","11111","00000","11111","00000","00000"),
-    '%' -> Array("11001","11010","00010","00100","01000","01011","10011"),
-    '#' -> Array("01010","01010","11111","01010","11111","01010","01010"),
-    '*' -> Array("00000","10101","01110","11111","01110","10101","00000"),
-    '<' -> Array("00010","00100","01000","10000","01000","00100","00010"),
-    '>' -> Array("01000","00100","00010","00001","00010","00100","01000"),
-    '\'' -> Array("00100","00100","00000","00000","00000","00000","00000"),
-    '"' -> Array("01010","01010","00000","00000","00000","00000","00000"),
-    '&' -> Array("01100","10010","10100","01000","10101","10010","01101"),
-    '[' -> Array("01110","01000","01000","01000","01000","01000","01110"),
-    ']' -> Array("01110","00010","00010","00010","00010","00010","01110"),
-    '+' -> Array("00000","00100","00100","11111","00100","00100","00000"),
-    '|' -> Array("00100","00100","00100","00100","00100","00100","00100"),
-    '@' -> Array("01110","10001","10111","10101","10111","10000","01110")
+    'A' -> Array("01110", "10001", "10001", "11111", "10001", "10001", "10001"),
+    'B' -> Array("11110", "10001", "10001", "11110", "10001", "10001", "11110"),
+    'C' -> Array("01111", "10000", "10000", "10000", "10000", "10000", "01111"),
+    'D' -> Array("11110", "10001", "10001", "10001", "10001", "10001", "11110"),
+    'E' -> Array("11111", "10000", "10000", "11110", "10000", "10000", "11111"),
+    'F' -> Array("11111", "10000", "10000", "11110", "10000", "10000", "10000"),
+    'G' -> Array("01111", "10000", "10000", "10111", "10001", "10001", "01111"),
+    'H' -> Array("10001", "10001", "10001", "11111", "10001", "10001", "10001"),
+    'I' -> Array("11111", "00100", "00100", "00100", "00100", "00100", "11111"),
+    'J' -> Array("00111", "00010", "00010", "00010", "10010", "10010", "01100"),
+    'K' -> Array("10001", "10010", "10100", "11000", "10100", "10010", "10001"),
+    'L' -> Array("10000", "10000", "10000", "10000", "10000", "10000", "11111"),
+    'M' -> Array("10001", "11011", "10101", "10101", "10001", "10001", "10001"),
+    'N' -> Array("10001", "11001", "10101", "10011", "10001", "10001", "10001"),
+    'O' -> Array("01110", "10001", "10001", "10001", "10001", "10001", "01110"),
+    'P' -> Array("11110", "10001", "10001", "11110", "10000", "10000", "10000"),
+    'Q' -> Array("01110", "10001", "10001", "10001", "10101", "10010", "01101"),
+    'R' -> Array("11110", "10001", "10001", "11110", "10100", "10010", "10001"),
+    'S' -> Array("01111", "10000", "10000", "01110", "00001", "00001", "11110"),
+    'T' -> Array("11111", "00100", "00100", "00100", "00100", "00100", "00100"),
+    'U' -> Array("10001", "10001", "10001", "10001", "10001", "10001", "01110"),
+    'V' -> Array("10001", "10001", "10001", "10001", "10001", "01010", "00100"),
+    'W' -> Array("10001", "10001", "10001", "10101", "10101", "10101", "01010"),
+    'X' -> Array("10001", "10001", "01010", "00100", "01010", "10001", "10001"),
+    'Y' -> Array("10001", "10001", "01010", "00100", "00100", "00100", "00100"),
+    'Z' -> Array("11111", "00001", "00010", "00100", "01000", "10000", "11111"),
+    'a' -> Array("00000", "00000", "01110", "00001", "01111", "10001", "01111"),
+    'b' -> Array("10000", "10000", "10110", "11001", "10001", "10001", "11110"),
+    'c' -> Array("00000", "00000", "01111", "10000", "10000", "10000", "01111"),
+    'd' -> Array("00001", "00001", "01101", "10011", "10001", "10001", "01111"),
+    'e' -> Array("00000", "00000", "01110", "10001", "11111", "10000", "01111"),
+    'f' -> Array("00110", "01001", "01000", "11100", "01000", "01000", "01000"),
+    'g' -> Array("00000", "00000", "01111", "10001", "01111", "00001", "01110"),
+    'h' -> Array("10000", "10000", "10110", "11001", "10001", "10001", "10001"),
+    'i' -> Array("00100", "00000", "01100", "00100", "00100", "00100", "01110"),
+    'j' -> Array("00010", "00000", "00110", "00010", "00010", "10010", "01100"),
+    'k' -> Array("10000", "10000", "10010", "10100", "11000", "10100", "10010"),
+    'l' -> Array("01100", "00100", "00100", "00100", "00100", "00100", "01110"),
+    'm' -> Array("00000", "00000", "11010", "10101", "10101", "10101", "10101"),
+    'n' -> Array("00000", "00000", "10110", "11001", "10001", "10001", "10001"),
+    'o' -> Array("00000", "00000", "01110", "10001", "10001", "10001", "01110"),
+    'p' -> Array("00000", "00000", "11110", "10001", "11110", "10000", "10000"),
+    'q' -> Array("00000", "00000", "01111", "10001", "01111", "00001", "00001"),
+    'r' -> Array("00000", "00000", "10110", "11001", "10000", "10000", "10000"),
+    's' -> Array("00000", "00000", "01111", "10000", "01110", "00001", "11110"),
+    't' -> Array("01000", "01000", "11100", "01000", "01000", "01001", "00110"),
+    'u' -> Array("00000", "00000", "10001", "10001", "10001", "10011", "01101"),
+    'v' -> Array("00000", "00000", "10001", "10001", "10001", "01010", "00100"),
+    'w' -> Array("00000", "00000", "10001", "10001", "10101", "10101", "01010"),
+    'x' -> Array("00000", "00000", "10001", "01010", "00100", "01010", "10001"),
+    'y' -> Array("00000", "00000", "10001", "10001", "01111", "00001", "01110"),
+    'z' -> Array("00000", "00000", "11111", "00010", "00100", "01000", "11111"),
+    '0' -> Array("01110", "10001", "10011", "10101", "11001", "10001", "01110"),
+    '1' -> Array("00100", "01100", "00100", "00100", "00100", "00100", "01110"),
+    '2' -> Array("01110", "10001", "00001", "00010", "00100", "01000", "11111"),
+    '3' -> Array("11110", "00001", "00001", "01110", "00001", "00001", "11110"),
+    '4' -> Array("00010", "00110", "01010", "10010", "11111", "00010", "00010"),
+    '5' -> Array("11111", "10000", "10000", "11110", "00001", "00001", "11110"),
+    '6' -> Array("01110", "10000", "10000", "11110", "10001", "10001", "01110"),
+    '7' -> Array("11111", "00001", "00010", "00100", "01000", "01000", "01000"),
+    '8' -> Array("01110", "10001", "10001", "01110", "10001", "10001", "01110"),
+    '9' -> Array("01110", "10001", "10001", "01111", "00001", "00001", "01110"),
+    '.' -> Array("00000", "00000", "00000", "00000", "00000", "00110", "00110"),
+    ',' -> Array("00000", "00000", "00000", "00000", "00110", "00110", "00100"),
+    ':' -> Array("00000", "00110", "00110", "00000", "00110", "00110", "00000"),
+    ';' -> Array("00000", "00110", "00110", "00000", "00110", "00110", "00100"),
+    '!' -> Array("00100", "00100", "00100", "00100", "00100", "00000", "00100"),
+    '?' -> Array("01110", "10001", "00001", "00010", "00100", "00000", "00100"),
+    '-' -> Array("00000", "00000", "00000", "11111", "00000", "00000", "00000"),
+    '_' -> Array("00000", "00000", "00000", "00000", "00000", "00000", "11111"),
+    '/' -> Array("00001", "00010", "00010", "00100", "01000", "01000", "10000"),
+    '\\' -> Array("10000", "01000", "01000", "00100", "00010", "00010", "00001"),
+    '(' -> Array("00010", "00100", "01000", "01000", "01000", "00100", "00010"),
+    ')' -> Array("01000", "00100", "00010", "00010", "00010", "00100", "01000"),
+    '[' -> Array("01110", "01000", "01000", "01000", "01000", "01000", "01110"),
+    ']' -> Array("01110", "00010", "00010", "00010", "00010", "00010", "01110"),
+    '+' -> Array("00000", "00100", "00100", "11111", "00100", "00100", "00000"),
+    '=' -> Array("00000", "00000", "11111", "00000", "11111", "00000", "00000"),
+    '%' -> Array("11001", "11010", "00010", "00100", "01000", "01011", "10011"),
+    '#' -> Array("01010", "01010", "11111", "01010", "11111", "01010", "01010"),
+    '*' -> Array("00000", "10101", "01110", "11111", "01110", "10101", "00000"),
+    '<' -> Array("00010", "00100", "01000", "10000", "01000", "00100", "00010"),
+    '>' -> Array("01000", "00100", "00010", "00001", "00010", "00100", "01000"),
+    '\'' -> Array("00100", "00100", "00000", "00000", "00000", "00000", "00000"),
+    '"' -> Array("01010", "01010", "00000", "00000", "00000", "00000", "00000"),
+    '&' -> Array("01100", "10010", "10100", "01000", "10101", "10010", "01101"),
+    '[' -> Array("01110", "01000", "01000", "01000", "01000", "01000", "01110"),
+    ']' -> Array("01110", "00010", "00010", "00010", "00010", "00010", "01110"),
+    '+' -> Array("00000", "00100", "00100", "11111", "00100", "00100", "00000"),
+    '|' -> Array("00100", "00100", "00100", "00100", "00100", "00100", "00100"),
+    '@' -> Array("01110", "10001", "10111", "10101", "10111", "10000", "01110")
   )
 
   private def textFitPad(scale: Float): Float = (2f * scale).max(2f)
@@ -128,9 +130,9 @@ object BlockboxRender2D:
     if ch == ' ' then Array.fill(7)("00000")
     else glyphRows.getOrElse(ch, glyphRows.getOrElse(ch.toUpper, glyphRows('?')))
 
-  /** Builds quads in the same simple XY/stride-16 layout the old STB path used.
-    * The font itself is a crisp 5x7 pixel face, so UI text no longer looks like
-    * a thin debug overlay and scales cleanly at integer-ish GUI scales.
+  /** Builds quads in the same simple XY/stride-16 layout the old STB path used. The font itself is
+    * a crisp 5x7 pixel face, so UI text no longer looks like a thin debug overlay and scales
+    * cleanly at integer-ish GUI scales.
     */
   def textMetrics(text: String): (java.nio.ByteBuffer, Int, Float, Float, Float, Float) =
     val safe = Option(text).getOrElse("")
@@ -220,9 +222,18 @@ object BlockboxRender2D:
     glEnable(GL_BLEND)
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
     glColor4f(r, g, b, a)
-    glBegin(GL_QUADS); glVertex2f(x, y); glVertex2f(x + w, y); glVertex2f(x + w, y + h); glVertex2f(x, y + h); glEnd()
+    glBegin(GL_QUADS); glVertex2f(x, y); glVertex2f(x + w, y); glVertex2f(x + w, y + h);
+    glVertex2f(x, y + h); glEnd()
 
-  def gradientRect(x: Float, y: Float, w: Float, h: Float, top: (Float, Float, Float), bottom: (Float, Float, Float), a: Float): Unit =
+  def gradientRect(
+      x: Float,
+      y: Float,
+      w: Float,
+      h: Float,
+      top: (Float, Float, Float),
+      bottom: (Float, Float, Float),
+      a: Float
+  ): Unit =
     if w <= 0f || h <= 0f || a <= 0f then return
     glBindBuffer(GL_ARRAY_BUFFER, 0)
     glDisable(GL_TEXTURE_2D)
@@ -236,8 +247,8 @@ object BlockboxRender2D:
   def dimBackground(framebufferWidth: Int, framebufferHeight: Int): Unit =
     rect(0, 0, framebufferWidth, framebufferHeight, 0f, 0f, 0f, 0.55f)
 
-  /** Quiet voxel title backdrop. Deliberately simple: square celestial body,
-    * block clouds and stepped terrain. No neon rails, glass cards, or fake depth.
+  /** Quiet voxel title backdrop. Deliberately simple: square celestial body, block clouds and
+    * stepped terrain. No neon rails, glass cards, or fake depth.
     */
   def drawMenuBackdrop(framebufferWidth: Int, framebufferHeight: Int, time: Float): Unit =
     val w = framebufferWidth.toFloat
@@ -254,13 +265,14 @@ object BlockboxRender2D:
       glBegin(GL_QUAD_STRIP)
       var i = 0
       while i <= 48 do
-        val x = i*w/48f
-        val shape = abs(sin(i*0.21f+phase)).toFloat*0.65f + sin(i*0.53f+phase).toFloat*0.16f
-        glColor4f(r,g,b,1f); glVertex2f(x,baseY-shape*height); glVertex2f(x,h)
+        val x = i * w / 48f
+        val shape =
+          abs(sin(i * 0.21f + phase)).toFloat * 0.65f + sin(i * 0.53f + phase).toFloat * 0.16f
+        glColor4f(r, g, b, 1f); glVertex2f(x, baseY - shape * height); glVertex2f(x, h)
         i += 1
       glEnd()
-    ridge(h*0.66f,h*0.19f,0.43f,0.52f,0.55f,0.8f)
-    ridge(h*0.76f,h*0.15f,0.22f,0.36f,0.34f,2.7f)
+    ridge(h * 0.66f, h * 0.19f, 0.43f, 0.52f, 0.55f, 0.8f)
+    ridge(h * 0.76f, h * 0.15f, 0.22f, 0.36f, 0.34f, 2.7f)
     val unit = (h / 720f).max(0.5f).min(1.5f)
     val sunSize = 42f * unit
     val sunX = w * 0.76f
@@ -271,7 +283,16 @@ object BlockboxRender2D:
       rect(sunX + (sunSize - s) / 2f, sunY + (sunSize - s) / 2f, s, s, 1f, 0.92f, 0.70f, 0.022f)
       ring += 1
     rect(sunX, sunY, sunSize, sunSize, 1f, 0.93f, 0.62f, 1f)
-    rect(sunX + sunSize * 0.14f, sunY + sunSize * 0.14f, sunSize * 0.72f, sunSize * 0.72f, 1f, 0.98f, 0.84f, 1f)
+    rect(
+      sunX + sunSize * 0.14f,
+      sunY + sunSize * 0.14f,
+      sunSize * 0.72f,
+      sunSize * 0.72f,
+      1f,
+      0.98f,
+      0.84f,
+      1f
+    )
 
     // Slow block clouds. Their motion is subtle enough not to distract from text.
     val drift = ((time * 7f) % (w + 240f * unit)) - 120f * unit
@@ -288,44 +309,105 @@ object BlockboxRender2D:
     // Stepped silhouette. Fixed deterministic heights keep it from looking like
     // procedural UI decoration while still clearly belonging to a voxel game.
     val step = (42f * unit).max(28f)
-    val heights = Array(0.18f,0.24f,0.22f,0.31f,0.36f,0.30f,0.27f,0.34f,0.43f,0.39f,0.31f,0.28f,0.35f,0.30f,0.25f,0.33f,0.29f,0.22f)
+    val heights = Array(0.18f, 0.24f, 0.22f, 0.31f, 0.36f, 0.30f, 0.27f, 0.34f, 0.43f, 0.39f, 0.31f,
+      0.28f, 0.35f, 0.30f, 0.25f, 0.33f, 0.29f, 0.22f)
     var i = 0
     var x = 0f
     while x < w + step do
       val q = heights(i % heights.length)
       val top = h * (0.80f - q * 0.28f)
       val tone = 0.92f + ((i * 37) % 11) / 11f * 0.16f
-      gradientRect(x, top, step + 1f, h - top, (0.25f * tone, 0.37f * tone, 0.17f * tone), (0.12f, 0.19f, 0.09f), 1f)
+      gradientRect(
+        x,
+        top,
+        step + 1f,
+        h - top,
+        (0.25f * tone, 0.37f * tone, 0.17f * tone),
+        (0.12f, 0.19f, 0.09f),
+        1f
+      )
       val grass = (8f * unit).max(5f)
       rect(x, top, step + 1f, grass, 0.36f * tone, 0.52f * tone, 0.22f * tone, 1f)
       rect(x, top, step + 1f, (2f * unit).max(1f), 0.50f, 0.66f, 0.30f, 1f)
       rect(x, top + grass, step + 1f, (2f * unit).max(1f), 0.10f, 0.16f, 0.07f, 0.45f)
       if i % 5 == 1 then
-        rect(x + step * 0.30f, top - step * 0.95f, step * 0.32f, step * 0.95f, 0.29f, 0.20f, 0.12f, 1f)
-        rect(x + step * 0.30f, top - step * 0.95f, step * 0.08f, step * 0.95f, 0.36f, 0.26f, 0.16f, 1f)
-        rect(x + step * 0.05f, top - step * 1.35f, step * 0.82f, step * 0.55f, 0.16f, 0.34f, 0.13f, 1f)
-        rect(x + step * 0.05f, top - step * 1.35f, step * 0.82f, step * 0.12f, 0.24f, 0.44f, 0.18f, 1f)
-        rect(x + step * 0.05f, top - step * 0.90f, step * 0.82f, step * 0.10f, 0.10f, 0.24f, 0.09f, 1f)
+        rect(
+          x + step * 0.30f,
+          top - step * 0.95f,
+          step * 0.32f,
+          step * 0.95f,
+          0.29f,
+          0.20f,
+          0.12f,
+          1f
+        )
+        rect(
+          x + step * 0.30f,
+          top - step * 0.95f,
+          step * 0.08f,
+          step * 0.95f,
+          0.36f,
+          0.26f,
+          0.16f,
+          1f
+        )
+        rect(
+          x + step * 0.05f,
+          top - step * 1.35f,
+          step * 0.82f,
+          step * 0.55f,
+          0.16f,
+          0.34f,
+          0.13f,
+          1f
+        )
+        rect(
+          x + step * 0.05f,
+          top - step * 1.35f,
+          step * 0.82f,
+          step * 0.12f,
+          0.24f,
+          0.44f,
+          0.18f,
+          1f
+        )
+        rect(
+          x + step * 0.05f,
+          top - step * 0.90f,
+          step * 0.82f,
+          step * 0.10f,
+          0.10f,
+          0.24f,
+          0.09f,
+          1f
+        )
       x += step
       i += 1
     rect(0f, h * 0.91f, w, h * 0.09f, 0.16f, 0.12f, 0.08f, 1f)
     rect(0f, h * 0.91f, w, (3f * unit).max(2f), 0.09f, 0.07f, 0.05f, 1f)
 
   def drawPanel(x: Float, y: Float, w: Float, h: Float, scale: Float): Unit =
-    val e = (2f*scale).max(1f)
-    rect(x+5f*scale,y+7f*scale,w,h,0.01f,0.02f,0.025f,0.40f)
-    rect(x-e,y-e,w+e*2f,h+e*2f,0.025f,0.045f,0.05f,0.98f)
-    gradientRect(x,y,w,h,(0.095f,0.13f,0.14f),(0.060f,0.085f,0.095f),0.97f)
-    rect(x+e,y+e,w-e*2f,e,0.28f,0.37f,0.36f,0.75f)
-    rect(x+e,y+e,e,h-e*2f,0.17f,0.23f,0.24f,0.65f)
-    rect(x+e,y+h-e,w-e*2f,e,0.035f,0.05f,0.055f,0.95f)
+    val e = (2f * scale).max(1f)
+    rect(x + 5f * scale, y + 7f * scale, w, h, 0.01f, 0.02f, 0.025f, 0.40f)
+    rect(x - e, y - e, w + e * 2f, h + e * 2f, 0.025f, 0.045f, 0.05f, 0.98f)
+    gradientRect(x, y, w, h, (0.095f, 0.13f, 0.14f), (0.060f, 0.085f, 0.095f), 0.97f)
+    rect(x + e, y + e, w - e * 2f, e, 0.28f, 0.37f, 0.36f, 0.75f)
+    rect(x + e, y + e, e, h - e * 2f, 0.17f, 0.23f, 0.24f, 0.65f)
+    rect(x + e, y + h - e, w - e * 2f, e, 0.035f, 0.05f, 0.055f, 0.95f)
 
-  def drawSlotFrame(x: Float, y: Float, size: Float, selected: Boolean, hover: Boolean, scale: Float): Unit =
+  def drawSlotFrame(
+      x: Float,
+      y: Float,
+      size: Float,
+      selected: Boolean,
+      hover: Boolean,
+      scale: Float
+  ): Unit =
     val e = (2f * scale).max(1f)
     val inner = if hover then 0.24f else 0.17f
     // Recessed inventory-slot bevel: dark top/left, light bottom/right.
     rect(x - e, y - e, size + e * 2f, size + e * 2f, 0.10f, 0.10f, 0.10f, 0.98f)
-    rect(x, y, size, size, inner*0.78f, inner, inner*1.05f, 0.98f)
+    rect(x, y, size, size, inner * 0.78f, inner, inner * 1.05f, 0.98f)
     rect(x, y, size, e, 0.18f, 0.18f, 0.18f, 0.98f)
     rect(x, y, e, size, 0.17f, 0.17f, 0.17f, 0.98f)
     rect(x, y + size - e, size, e, 0.60f, 0.60f, 0.60f, 0.92f)
@@ -342,39 +424,122 @@ object BlockboxRender2D:
     val trackH = (12f * scale).max(8f)
     val knobW = (10f * scale).max(7f)
     val knobH = (20f * scale).max(14f)
-    rect(x - 1f * scale, y - 1f * scale, w + 2f * scale, trackH + 2f * scale, 0.08f, 0.08f, 0.08f, 1f)
+    rect(
+      x - 1f * scale,
+      y - 1f * scale,
+      w + 2f * scale,
+      trackH + 2f * scale,
+      0.08f,
+      0.08f,
+      0.08f,
+      1f
+    )
     rect(x, y, w, trackH, 0.23f, 0.23f, 0.23f, 1f)
     val fillW = (w - knobW).max(1f) * v
-    rect(x + 1f * scale, y + 1f * scale, (fillW + knobW * 0.5f).min(w - 2f * scale), trackH - 2f * scale, 0.48f, 0.70f, 0.33f, 0.90f)
+    rect(
+      x + 1f * scale,
+      y + 1f * scale,
+      (fillW + knobW * 0.5f).min(w - 2f * scale),
+      trackH - 2f * scale,
+      0.48f,
+      0.70f,
+      0.33f,
+      0.90f
+    )
     val kx = x + fillW
-    rect(kx - 1f * scale, y - 5f * scale, knobW + 2f * scale, knobH + 2f * scale, 0.08f, 0.08f, 0.08f, 1f)
+    rect(
+      kx - 1f * scale,
+      y - 5f * scale,
+      knobW + 2f * scale,
+      knobH + 2f * scale,
+      0.08f,
+      0.08f,
+      0.08f,
+      1f
+    )
     rect(kx, y - 4f * scale, knobW, knobH, 0.72f, 0.72f, 0.72f, 1f)
     rect(kx + 1f * scale, y - 3f * scale, knobW - 2f * scale, 2f * scale, 0.92f, 0.92f, 0.92f, 0.9f)
 
-  def drawButton(x: Float, y: Float, w: Float, h: Float, label: String, accent: Boolean, hover: Boolean, scale: Float, framebufferWidth: Int, framebufferHeight: Int): Unit =
-    val e = (2f*scale).max(1f)
-    rect(x,y+3f*scale,w,h,0.015f,0.025f,0.03f,0.65f)
-    val border = if hover then (0.65f,0.79f,0.65f) else if accent then (0.37f,0.59f,0.40f) else (0.23f,0.32f,0.32f)
-    rect(x-e,y-e,w+e*2f,h+e*2f,border._1,border._2,border._3,1f)
-    val base = if accent then (0.24f,0.39f,0.26f) else (0.13f,0.19f,0.20f)
+  def drawButton(
+      x: Float,
+      y: Float,
+      w: Float,
+      h: Float,
+      label: String,
+      accent: Boolean,
+      hover: Boolean,
+      scale: Float,
+      framebufferWidth: Int,
+      framebufferHeight: Int
+  ): Unit =
+    val e = (2f * scale).max(1f)
+    rect(x, y + 3f * scale, w, h, 0.015f, 0.025f, 0.03f, 0.65f)
+    val border = if hover then (0.65f, 0.79f, 0.65f)
+    else if accent then (0.37f, 0.59f, 0.40f)
+    else (0.23f, 0.32f, 0.32f)
+    rect(x - e, y - e, w + e * 2f, h + e * 2f, border._1, border._2, border._3, 1f)
+    val base = if accent then (0.24f, 0.39f, 0.26f) else (0.13f, 0.19f, 0.20f)
     val lift = if hover then 0.065f else 0f
-    gradientRect(x,y,w,h,(base._1+lift+0.05f,base._2+lift+0.06f,base._3+lift+0.05f),(base._1+lift-0.035f,base._2+lift-0.04f,base._3+lift-0.035f),1f)
-    rect(x+e,y+e,w-e*2f,e,0.80f,0.92f,0.78f,if hover then 0.32f else 0.17f)
-    rect(x+e,y+e*2f,e,h-e*3.5f,0.80f,0.92f,0.78f,if hover then 0.12f else 0.06f)
-    rect(x+e,y+h-e*1.5f,w-e*2f,e*1.5f,0.0f,0.02f,0.02f,0.50f)
-    centeredTextBox(x+8f*scale,y+2f*scale,w-16f*scale,h-4f*scale,label,0.95f,0.96f,0.90f,(2.05f*scale).min(h/8.5f),scale,framebufferWidth,framebufferHeight)
+    gradientRect(
+      x,
+      y,
+      w,
+      h,
+      (base._1 + lift + 0.05f, base._2 + lift + 0.06f, base._3 + lift + 0.05f),
+      (base._1 + lift - 0.035f, base._2 + lift - 0.04f, base._3 + lift - 0.035f),
+      1f
+    )
+    rect(x + e, y + e, w - e * 2f, e, 0.80f, 0.92f, 0.78f, if hover then 0.32f else 0.17f)
+    rect(x + e, y + e * 2f, e, h - e * 3.5f, 0.80f, 0.92f, 0.78f, if hover then 0.12f else 0.06f)
+    rect(x + e, y + h - e * 1.5f, w - e * 2f, e * 1.5f, 0.0f, 0.02f, 0.02f, 0.50f)
+    centeredTextBox(
+      x + 8f * scale,
+      y + 2f * scale,
+      w - 16f * scale,
+      h - 4f * scale,
+      label,
+      0.95f,
+      0.96f,
+      0.90f,
+      (2.05f * scale).min(h / 8.5f),
+      scale,
+      framebufferWidth,
+      framebufferHeight
+    )
 
-  def drawBubbleIcon(x: Float,y: Float,size: Float,popping: Boolean): Unit =
-    val p=size/9f
-    val pattern=if popping then Array("000000000","000001000","010000010","000110000","001001010","000110000","010000000","000000100","000000000")
-      else Array("000111000","001000100","010000010","100000001","100000001","100000001","010000010","001000100","000111000")
-    for row <- pattern.indices; col <- 0 until 9 if pattern(row)(col)=='1' do
-      rect(x+(col+0.5f)*p,y+(row+0.5f)*p,p,p,0.01f,0.07f,0.13f,0.8f)
-      rect(x+col*p,y+row*p,p,p,0.42f,0.83f,1f,1f)
+  def drawBubbleIcon(x: Float, y: Float, size: Float, popping: Boolean): Unit =
+    val p = size / 9f
+    val pattern = if popping then
+      Array(
+        "000000000",
+        "000001000",
+        "010000010",
+        "000110000",
+        "001001010",
+        "000110000",
+        "010000000",
+        "000000100",
+        "000000000"
+      )
+    else
+      Array(
+        "000111000",
+        "001000100",
+        "010000010",
+        "100000001",
+        "100000001",
+        "100000001",
+        "010000010",
+        "001000100",
+        "000111000"
+      )
+    for row <- pattern.indices; col <- 0 until 9 if pattern(row)(col) == '1' do
+      rect(x + (col + 0.5f) * p, y + (row + 0.5f) * p, p, p, 0.01f, 0.07f, 0.13f, 0.8f)
+      rect(x + col * p, y + row * p, p, p, 0.42f, 0.83f, 1f, 1f)
     if !popping then
-      rect(x+2*p,y+2*p,2*p,p,0.92f,0.99f,1f,1f)
-      rect(x+2*p,y+3*p,p,p,0.78f,0.95f,1f,1f)
-      rect(x+5*p,y+6*p,2*p,p,0.12f,0.49f,0.78f,1f)
+      rect(x + 2 * p, y + 2 * p, 2 * p, p, 0.92f, 0.99f, 1f, 1f)
+      rect(x + 2 * p, y + 3 * p, p, p, 0.78f, 0.95f, 1f, 1f)
+      rect(x + 5 * p, y + 6 * p, 2 * p, p, 0.12f, 0.49f, 0.78f, 1f)
 
   def drawHeartIcon(x: Float, y: Float, size: Float, fillFrac: Float, bgAlpha: Float): Unit =
     val s = size.max(10f)
@@ -416,7 +581,8 @@ object BlockboxRender2D:
       ry += 1
 
   def renderCrosshair(framebufferWidth: Int, framebufferHeight: Int): Unit =
-    glDisable(GL_DEPTH_TEST); glDisable(GL_CULL_FACE); setupOrtho(framebufferWidth, framebufferHeight)
+    glDisable(GL_DEPTH_TEST); glDisable(GL_CULL_FACE);
+    setupOrtho(framebufferWidth, framebufferHeight)
     val cx = framebufferWidth / 2f; val cy = framebufferHeight / 2f
     val s = ((framebufferHeight / 720f).max(0.75f)).min(2f)
     val gap = (4f * s).toInt.toFloat; val len = (8f * s).toInt.toFloat
@@ -444,8 +610,9 @@ object BlockboxRender2D:
     glLineWidth(1f)
 
   def renderUnderwaterOverlay(framebufferWidth: Int, framebufferHeight: Int, time: Float): Unit =
-    if UnderwaterEffect.render(framebufferWidth,framebufferHeight,time,1f) then return
-    glDisable(GL_DEPTH_TEST); glDisable(GL_CULL_FACE); setupOrtho(framebufferWidth, framebufferHeight)
+    if UnderwaterEffect.render(framebufferWidth, framebufferHeight, time, 1f) then return
+    glDisable(GL_DEPTH_TEST); glDisable(GL_CULL_FACE);
+    setupOrtho(framebufferWidth, framebufferHeight)
     val w = framebufferWidth.toFloat
     val h = framebufferHeight.toFloat
     val wave = (sin(time * 1.35f).toFloat * 0.018f + 0.21f).max(0.12f).min(0.34f)
@@ -458,7 +625,11 @@ object BlockboxRender2D:
     rect(0, 0, w, h * 0.07f, 0f, 0.10f, 0.22f, vignette * 0.62f)
     rect(0, h * 0.93f, w, h * 0.07f, 0f, 0.10f, 0.22f, vignette * 0.70f)
 
-  def mainMenuLayout(framebufferWidth: Int, framebufferHeight: Int, scale: Float): (Float, Float, Float, Array[Float], Float, Float, Float, Float, Float) =
+  def mainMenuLayout(
+      framebufferWidth: Int,
+      framebufferHeight: Int,
+      scale: Float
+  ): (Float, Float, Float, Array[Float], Float, Float, Float, Float, Float) =
     val w = framebufferWidth.toFloat
     val h = framebufferHeight.toFloat
     val cx = w / 2f
@@ -480,7 +651,16 @@ object BlockboxRender2D:
     val bx = cx - buttonW / 2f
     val y0 = firstY
     val y1 = y0 + buttonH + gap + labelH + gap
-    val ys = Array(y0, y1, y1 + (buttonH + gap), y1 + (buttonH + gap) * 2f, y1 + (buttonH + gap) * 3f, y1 + (buttonH + gap) * 4f, y1 + (buttonH + gap) * 5f, y1 + (buttonH + gap) * 6f)
+    val ys = Array(
+      y0,
+      y1,
+      y1 + (buttonH + gap),
+      y1 + (buttonH + gap) * 2f,
+      y1 + (buttonH + gap) * 3f,
+      y1 + (buttonH + gap) * 4f,
+      y1 + (buttonH + gap) * 5f,
+      y1 + (buttonH + gap) * 6f
+    )
     (bx, buttonW, buttonH, ys, titleX, titleY, titleW, titleH, scale)
 
   private def titleGlyph(c: Char): Array[String] = c match
@@ -497,8 +677,8 @@ object BlockboxRender2D:
     n = (n ^ (n >>> 13)) * 1274126177
     ((n ^ (n >>> 16)) & 0xffff).toFloat / 65535f
 
-  /** Bold block letters built like a voxel structure: an extruded dark side, a textured
-    * stone face with bevelled outer edges, and grass growing on every upward-facing ledge.
+  /** Bold block letters built like a voxel structure: an extruded dark side, a textured stone face
+    * with bevelled outer edges, and grass growing on every upward-facing ledge.
     */
   def drawPixelLogo(cx: Float, y: Float, text: String, maxW: Float, maxH: Float): Unit =
     if text == null || text.isEmpty then return
@@ -510,7 +690,8 @@ object BlockboxRender2D:
       if ch == ' ' then column += 4
       else
         val glyph = titleGlyph(ch)
-        for row <- 0 until 7; c <- 0 until 6 if glyph(row).charAt(c) == '1' do cells += ((column + c, row))
+        for row <- 0 until 7; c <- 0 until 6 if glyph(row).charAt(c) == '1' do
+          cells += ((column + c, row))
         column += 7
     val cols = (column - 1).max(1)
     val filled = cells.toSet
@@ -518,21 +699,41 @@ object BlockboxRender2D:
     val depth = 0.62f
     val cell = (maxW / (cols + depth * 0.55f)).min(maxH / (7f + depth)).max(1.5f)
     val x0 = cx - (cols + depth * 0.55f) * cell / 2f
-    for (c, r) <- cells do rect(x0 + (c + depth * 0.55f + 0.30f) * cell, y + (r + depth + 0.42f) * cell, cell, cell, 0f, 0f, 0f, 0.30f)
+    for (c, r) <- cells do
+      rect(
+        x0 + (c + depth * 0.55f + 0.30f) * cell,
+        y + (r + depth + 0.42f) * cell,
+        cell,
+        cell,
+        0f,
+        0f,
+        0f,
+        0.30f
+      )
     val steps = (depth * cell / 1.2f).toInt.max(3).min(16)
     var k = steps
     while k >= 1 do
       val t = k.toFloat / steps
       val shade = 0.31f - t * 0.17f
       for (c, r) <- cells do
-        rect(x0 + c * cell + t * depth * 0.55f * cell, y + r * cell + t * depth * cell, cell + 0.5f, cell + 0.5f, shade, shade * 0.94f, shade * 0.89f, 1f)
+        rect(
+          x0 + c * cell + t * depth * 0.55f * cell,
+          y + r * cell + t * depth * cell,
+          cell + 0.5f,
+          cell + 0.5f,
+          shade,
+          shade * 0.94f,
+          shade * 0.89f,
+          1f
+        )
       k -= 1
     val half = cell / 2f
     val edge = (cell * 0.13f).max(1f)
     for (c, r) <- cells do
       val px = x0 + c * cell; val py = y + r * cell
       for sy <- 0 until 2; sx <- 0 until 2 do
-        val v = 0.91f - (r * 2 + sy) / 13f * 0.25f + logoNoise(c * 2 + sx, r * 2 + sy) * 0.08f - 0.04f
+        val v =
+          0.91f - (r * 2 + sy) / 13f * 0.25f + logoNoise(c * 2 + sx, r * 2 + sy) * 0.08f - 0.04f
         rect(px + sx * half, py + sy * half, half + 0.5f, half + 0.5f, v, v * 0.97f, v * 0.92f, 1f)
       if !at(c - 1, r) then rect(px, py, edge, cell, 1f, 1f, 1f, 0.20f)
       if !at(c + 1, r) then rect(px + cell - edge, py, edge, cell, 0f, 0f, 0f, 0.20f)
@@ -543,9 +744,21 @@ object BlockboxRender2D:
           rect(px + sx * half, py, half + 0.5f, cell * (0.27f + drip), 0.36f, 0.63f, 0.25f, 1f)
         rect(px, py, cell + 0.5f, edge, 0.58f, 0.84f, 0.40f, 1f)
 
-  def renderTextBuf(buf: java.nio.ByteBuffer, quads: Int, x: Float, y: Float, r: Float, g: Float, b: Float, scale: Float, framebufferWidth: Int, framebufferHeight: Int): Unit =
+  def renderTextBuf(
+      buf: java.nio.ByteBuffer,
+      quads: Int,
+      x: Float,
+      y: Float,
+      r: Float,
+      g: Float,
+      b: Float,
+      scale: Float,
+      framebufferWidth: Int,
+      framebufferHeight: Int
+  ): Unit =
     buf.rewind()
-    glDisable(GL_DEPTH_TEST); glDisable(GL_CULL_FACE); glDisable(GL_TEXTURE_2D); setupOrtho(framebufferWidth, framebufferHeight)
+    glDisable(GL_DEPTH_TEST); glDisable(GL_CULL_FACE); glDisable(GL_TEXTURE_2D);
+    setupOrtho(framebufferWidth, framebufferHeight)
     glBindBuffer(GL_ARRAY_BUFFER, 0)
     glDisableClientState(GL_COLOR_ARRAY); glDisableClientState(GL_TEXTURE_COORD_ARRAY)
     glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
@@ -555,15 +768,29 @@ object BlockboxRender2D:
     glEnableClientState(GL_VERTEX_ARRAY); glVertexPointer(2, GL_FLOAT, 16, buf)
     glDrawArrays(GL_QUADS, 0, quads * 4); glDisableClientState(GL_VERTEX_ARRAY); glPopMatrix()
 
-  def renderText(x: Float, y: Float, text: String, r: Float, g: Float, b: Float, scale: Float, framebufferWidth: Int, framebufferHeight: Int): Unit =
+  def renderText(
+      x: Float,
+      y: Float,
+      text: String,
+      r: Float,
+      g: Float,
+      b: Float,
+      scale: Float,
+      framebufferWidth: Int,
+      framebufferHeight: Int
+  ): Unit =
     if text == null || text.isEmpty then return
     val lineH = 12f * scale
-    if x >= framebufferWidth - 4f || x + 2f < 0 || y >= framebufferHeight - 2f || y + lineH < 0 then return
+    if x >= framebufferWidth - 4f || x + 2f < 0 || y >= framebufferHeight - 2f || y + lineH < 0 then
+      return
     // The built-in face advances six logical pixels per glyph. The old 9px
     // estimate truncated labels far earlier than necessary and made menus feel
     // cramped even when there was ample room.
-    val maxChars = ((framebufferWidth - x - textFitPad(scale) - 12f).max(4f) / (6f * scale).max(1f)).toInt
-    val display = if maxChars <= 0 then "" else if maxChars >= text.length then text else text.take(maxChars.max(4) - 3) + "..."
+    val maxChars =
+      ((framebufferWidth - x - textFitPad(scale) - 12f).max(4f) / (6f * scale).max(1f)).toInt
+    val display = if maxChars <= 0 then ""
+    else if maxChars >= text.length then text
+    else text.take(maxChars.max(4) - 3) + "..."
     if display.isEmpty then return
     val (buf, quads, _, _, _, _) = textMetrics(display)
     if quads <= 0 then return
@@ -585,7 +812,18 @@ object BlockboxRender2D:
           if textWidth(text.take(mid), scale) <= target then lo = mid else hi = mid - 1
         text.take(lo.max(0)) + suffix
 
-  def centeredTextFit(cx: Float, y: Float, text: String, r: Float, g: Float, b: Float, scale: Float, maxWidth: Float, framebufferWidth: Int, framebufferHeight: Int): Unit =
+  def centeredTextFit(
+      cx: Float,
+      y: Float,
+      text: String,
+      r: Float,
+      g: Float,
+      b: Float,
+      scale: Float,
+      maxWidth: Float,
+      framebufferWidth: Int,
+      framebufferHeight: Int
+  ): Unit =
     if text == null || text.isEmpty then return
     val (buf, quads, minX, maxX, minY, _) = textMetrics(text)
     if quads <= 0 then return
@@ -595,30 +833,109 @@ object BlockboxRender2D:
     val left = cx - rawW * eff / 2f - minX * eff
     val top = y - minY * eff
     val so = (1.25f * eff).max(0.75f)
-    renderTextBuf(buf, quads, left + so, top + so, 0f, 0f, 0f, eff, framebufferWidth, framebufferHeight)
+    renderTextBuf(
+      buf,
+      quads,
+      left + so,
+      top + so,
+      0f,
+      0f,
+      0f,
+      eff,
+      framebufferWidth,
+      framebufferHeight
+    )
     renderTextBuf(buf, quads, left, top, r, g, b, eff, framebufferWidth, framebufferHeight)
 
-  def centeredText(cx: Float, y: Float, text: String, r: Float, g: Float, b: Float, scale: Float, framebufferWidth: Int, framebufferHeight: Int): Unit =
+  def centeredText(
+      cx: Float,
+      y: Float,
+      text: String,
+      r: Float,
+      g: Float,
+      b: Float,
+      scale: Float,
+      framebufferWidth: Int,
+      framebufferHeight: Int
+  ): Unit =
     val safeW = (math.min(cx, framebufferWidth.toFloat - cx) * 2f - 12f).max(24f)
     centeredTextFit(cx, y, text, r, g, b, scale, safeW, framebufferWidth, framebufferHeight)
 
-  def centeredTextBox(x: Float, y: Float, w: Float, h: Float, text: String, r: Float, g: Float, b: Float, scale: Float, uiScale: Float, framebufferWidth: Int, framebufferHeight: Int): Unit =
+  def centeredTextBox(
+      x: Float,
+      y: Float,
+      w: Float,
+      h: Float,
+      text: String,
+      r: Float,
+      g: Float,
+      b: Float,
+      scale: Float,
+      uiScale: Float,
+      framebufferWidth: Int,
+      framebufferHeight: Int
+  ): Unit =
     if text == null || text.isEmpty then return
     val (buf, quads, minX, maxX, minY, maxY) = textMetrics(text)
     if quads <= 0 then return
     val rawW = (maxX - minX).max(1f) + textFitPad(scale)
     val rawH = (maxY - minY).max(1f)
-    val eff = scale.min((w - 20f * uiScale).max(8f) / rawW).min((h - 8f * uiScale).max(8f) / rawH).max(0.30f)
+    val eff = scale
+      .min((w - 20f * uiScale).max(8f) / rawW)
+      .min((h - 8f * uiScale).max(8f) / rawH)
+      .max(0.30f)
     val tx = x + w / 2f - rawW * eff / 2f - minX * eff
     val ty = y + h / 2f - rawH * eff / 2f - minY * eff
     val so = (1.20f * eff).max(0.65f)
-    renderTextBuf(buf, quads, tx + so, ty + so, 0f, 0f, 0f, eff, framebufferWidth, framebufferHeight)
+    renderTextBuf(
+      buf,
+      quads,
+      tx + so,
+      ty + so,
+      0f,
+      0f,
+      0f,
+      eff,
+      framebufferWidth,
+      framebufferHeight
+    )
     renderTextBuf(buf, quads, tx, ty, r, g, b, eff, framebufferWidth, framebufferHeight)
 
-  def renderTextShadow(x: Float, y: Float, text: String, r: Float, g: Float, b: Float, scale: Float, framebufferWidth: Int, framebufferHeight: Int): Unit =
+  def renderTextShadow(
+      x: Float,
+      y: Float,
+      text: String,
+      r: Float,
+      g: Float,
+      b: Float,
+      scale: Float,
+      framebufferWidth: Int,
+      framebufferHeight: Int
+  ): Unit =
     val o = (1.30f * scale).max(0.85f)
     renderText(x + o, y + o, text, 0f, 0f, 0f, scale, framebufferWidth, framebufferHeight)
     renderText(x, y, text, r, g, b, scale, framebufferWidth, framebufferHeight)
 
-  def renderTextShadowFit(x: Float, y: Float, text: String, r: Float, g: Float, b: Float, scale: Float, maxWidth: Float, framebufferWidth: Int, framebufferHeight: Int): Unit =
-    renderTextShadow(x, y, fitText(text, scale, maxWidth), r, g, b, scale, framebufferWidth, framebufferHeight)
+  def renderTextShadowFit(
+      x: Float,
+      y: Float,
+      text: String,
+      r: Float,
+      g: Float,
+      b: Float,
+      scale: Float,
+      maxWidth: Float,
+      framebufferWidth: Int,
+      framebufferHeight: Int
+  ): Unit =
+    renderTextShadow(
+      x,
+      y,
+      fitText(text, scale, maxWidth),
+      r,
+      g,
+      b,
+      scale,
+      framebufferWidth,
+      framebufferHeight
+    )
