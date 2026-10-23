@@ -440,7 +440,24 @@ object ShaderPipelineTest:
       assert(pipeline.selectPack("ultra"))
       try
         import scala.jdk.CollectionConverters.*
-        for row <- Files.readAllLines(output.resolve("biome-locations.csv")).asScala.drop(1) do
+        val locationsFile = output.resolve("biome-locations.csv")
+        if !Files.isRegularFile(locationsFile) then
+          val fixtures = Vector(
+            ("Badlands", -8064, -5120),
+            ("RockyCoast", -8192, -6528),
+            ("DuneDesert", -7936, 2944),
+            ("SnowyTaiga", -8192, -6400),
+            ("RedwoodForest", -8192, -4992),
+            ("WillowMarsh", -8192, -6784),
+            ("AutumnGrove", -8192, -4864)
+          )
+          Files.writeString(
+            locationsFile,
+            "seed,biome,x,y,z\n" + fixtures
+              .map((name, x, z) => s"8675309,$name,$x,${gen.heightAt(x, z)},$z")
+              .mkString("\n") + "\n"
+          )
+        for row <- Files.readAllLines(locationsFile).asScala.drop(1) do
           val fields = row.split(','); val x = fields(2).toInt; val y = fields(3).toInt;
           val z = fields(4).toInt
           val cx = Math.floorDiv(x, 16); val cz = Math.floorDiv(z, 16)
@@ -1341,6 +1358,27 @@ object ShaderPipelineTest:
       val b = BufferUtils.createByteBuffer(width * height * 4)
       glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, b)
       Array.tabulate(width * height * 4)(i => b.get(i) & 255)
+    pipeline.cacheUniformValues = false
+    val startUploads = pipeline.scalarUploads
+    frame("survival-uniform-control", Vec3(0, 43, 14), 0, 13, 0)
+    val uncached = pixels()
+    val uncachedUploads = pipeline.scalarUploads - startUploads
+    pipeline.cacheUniformValues = true
+    val cachedStart = pipeline.scalarUploads
+    frame("survival-uniform-cached", Vec3(0, 43, 14), 0, 13, 0)
+    val cached = pixels()
+    val cachedUploads = pipeline.scalarUploads - cachedStart
+    assert(
+      java.util.Arrays.equals(uncached, cached),
+      "uniform upload caching preserves every gameplay pixel"
+    )
+    assert(
+      cachedUploads < uncachedUploads,
+      s"redundant uniform calls reduced: $cachedUploads / $uncachedUploads"
+    )
+    println(
+      s"[uniform-cache] identical pixels; scalar/sampler uploads $uncachedUploads -> $cachedUploads"
+    )
     set(game, "antiAliasing", false)
     frame("survival-aa-off", Vec3(0, 43, 14), 0, 13, 0)
     val aliased = pixels()
@@ -1456,6 +1494,63 @@ object ShaderPipelineTest:
     val zombie = ZombieSystem.Zombie(1, Vec3(-2, 40, -2)); zombie.yaw = 160; zombie.gait = 0.8f;
     zombie.stride = 0.5f
     mobs += zombie
+    set(game, "worldClock", 150.0)
+    val itemEntities = get[DroppedItems](game, "droppedItems")
+    itemEntities.clear()
+    frame("survival-dropped-items-control", Vec3(0, 41.9f, 13), 0, 12, 0)
+    val withoutItems = pixels()
+    for (item, index) <- Seq(
+        Block.Sand,
+        Block.Dirt,
+        Block.Torch,
+        Block.IronSword,
+        Block.DiamondGem
+      ).zipWithIndex
+    do
+      itemEntities
+        .spawn(
+          item,
+          if index < 3 then 20 else 1,
+          Vec3(-4f + index * 1.8f, 40.13f, 8),
+          Vec3(0, 0, 0)
+        )
+        .foreach { e => e.age = 1.5f; e.grounded = true }
+    frame("survival-dropped-items", Vec3(0, 41.9f, 13), 0, 12, 0)
+    val withItems = pixels()
+    itemEntities.entities.values.foreach { e =>
+      val (sx, sy, _) = project
+        .invoke(game, e.pos + Vec3(0, 0.1f, 0))
+        .asInstanceOf[Option[(Float, Float, Float)]]
+        .getOrElse(throw AssertionError(s"dropped item fixture must be visible: ${e.pos}"))
+      val litPixels = (for
+        y <- (height - sy.toInt - 24).max(0) until (height - sy.toInt + 24).min(height)
+        x <- (sx.toInt - 24).max(0) until (sx.toInt + 24).min(width)
+      yield
+        val i = (y * width + x) * 4
+        val change = (0 until 3).map(c => math.abs(withItems(i + c) - withoutItems(i + c))).sum
+        change > 12 && (0 until 3).map(c => withItems(i + c)).sum > 150
+      ).count(identity)
+      assert(
+        litPixels > 3,
+        s"dropped ${e.block} samples light above the floor: $litPixels lit pixels"
+      )
+    }
+    val particles = game.getClass.getDeclaredMethod(
+      "spawnBlockBreakParticles",
+      java.lang.Integer.TYPE,
+      java.lang.Integer.TYPE,
+      java.lang.Integer.TYPE,
+      classOf[Block]
+    )
+    particles.setAccessible(true);
+    particles.invoke(game, Int.box(0), Int.box(40), Int.box(8), Block.Stone)
+    frame("survival-billboard-particles", Vec3(0, 41.9f, 13), 0, 12, 0)
+    set(game, "crouchAmount", 1f); set(game, "playerCrouching", true)
+    dry.crouch = 1f; dry.crouching = true
+    frame("survival-crouch-camera", Vec3(0, 41.9f, 13), 0, 12, 0)
+    set(game, "crouchAmount", 0f); set(game, "playerCrouching", false)
+    dry.crouch = 0f; dry.crouching = false
+    itemEntities.clear()
     set(game, "worldClock", 850.0)
     frame("survival-zombie-night", Vec3(0, 41.8f, 6), 0, 1, 0)
     set(game, "worldClock", 150.0)
@@ -1614,13 +1709,21 @@ object ShaderPipelineTest:
       java.lang.Boolean.TYPE
     )
     grip.setAccessible(true)
-    for (name, heading) <- Seq(("front", 180f), ("three-quarter", 220f), ("side", 270f)) do
+    for (name, heading, crouched, zombie) <- Seq(
+        ("front", 180f, false, false),
+        ("three-quarter", 220f, false, false),
+        ("side", 270f, false, false),
+        ("crouch-front", 180f, true, false),
+        ("crouch-side", 270f, true, false),
+        ("zombie", 220f, false, true)
+      )
+    do
       glBindFramebuffer(GL_FRAMEBUFFER, 0); glViewport(0, 0, width, height)
       glClearColor(0.12f, 0.18f, 0.20f, 1); glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
       BlockboxRender2D.resetGlArraysAndBuffers(); glUseProgram(0)
       glEnable(GL_DEPTH_TEST); glDepthMask(true); glDisable(GL_BLEND); glDisable(GL_FOG);
       glDisable(GL_CULL_FACE)
-      glMatrixMode(GL_PROJECTION); glLoadIdentity(); glOrtho(-3.1, 3.1, -0.10, 2.85, 0.1, 20)
+      glMatrixMode(GL_PROJECTION); glLoadIdentity(); glOrtho(-3.65, 3.65, -0.10, 2.85, 0.1, 20)
       glMatrixMode(GL_MODELVIEW); glLoadIdentity(); glRotatef(8f, 1, 0, 0)
       BlockboxPlayerModel.beginLighting(viewSpace = false)
       for (item, i) <- Seq(
@@ -1642,14 +1745,16 @@ object ShaderPipelineTest:
           i,
           item
         )
-        val held = Some(() => { grip.invoke(game, item, (1f, 1f, 1f), Boolean.box(false)); () })
+        player.crouch = if crouched then 1f else 0f; player.crouching = crouched
+        val held = Some(() => { grip.invoke(game, item, (1f, 1f, 1f), Boolean.box(zombie)); () })
         BlockboxPlayerModel.render(
           player,
           Vec3(0, 0, 0),
           PlayerAppearance.shirts(i),
           (1f, 1f, 1f),
           0f,
-          held
+          held,
+          zombie = zombie
         )
       BlockboxPlayerModel.endLighting()
       capture(output.resolve("third-person-tools-" + name + ".png"), width, height);

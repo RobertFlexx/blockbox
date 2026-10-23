@@ -248,7 +248,7 @@ object SurvivalTest:
         assert((swimmer.pos - before).lengthSquared < 0.025f, "buoyancy never teleports a swimmer")
         if i * step > 6f then { low = low.min(swimmer.pos.y); high = high.max(swimmer.pos.y) }
       assert(
-        abs(swimmer.pos.y - 3.75f) < 0.025f && high - low < 0.035f,
+        abs(swimmer.pos.y - (4f + WaterSurface.fullHeight - 1.25f)) < 0.025f && high - low < 0.035f,
         s"stable waterline at $step: $low..$high"
       )
       assert(
@@ -436,7 +436,7 @@ object SurvivalTest:
 
   def adventures(): Unit =
     val journal = FieldJournal()
-    assert(journal.entries.length == 18 && journal.pageCount == 3)
+    assert(journal.entries.length == 19 && journal.pageCount == 4)
     journal.track(15)
     assert(journal.currentObjective.exists(_.title == "Across the water"))
     journal.travel(Float.NaN, true); journal.travel(Float.PositiveInfinity, false);
@@ -452,7 +452,7 @@ object SurvivalTest:
     )
     assert(journal.claim(0, _ => 64).contains((Block.Planks, 16)))
     assert(journal.claim(0, _ => 64).isEmpty, "each objective reward can be collected only once")
-    assert(journal.claim(18, _ => 64).isEmpty && journal.claim(-1, _ => 64).isEmpty)
+    assert(journal.claim(19, _ => 64).isEmpty && journal.claim(-1, _ => 64).isEmpty)
     assert(journal.claim(1, _ => 64).isEmpty, "unfinished objectives cannot grant rewards")
     for _ <- 0 until 12 do journal.placedBlock(Block.Torch)
     journal.smelted(Block.Glass, 8)
@@ -460,14 +460,17 @@ object SurvivalTest:
     for _ <- 0 until 19 do journal.travel(8, true)
     for _ <- 0 until 20 do journal.defeatedZombie()
     journal.collected(Block.DiamondSword, 1)
+    for _ <- 0 until 3 do journal.salvagedCache()
     assert(
       journal.entries.drop(12).forall(_.completed),
       "building, crafting, exploration, swimming and combat advance the new objectives"
     )
     val raw = ByteArrayOutputStream(); val out = DataOutputStream(raw)
-    journal.write(out); journal.writeProgress(out); journal.writeAdventure(out)
+    journal.write(out); journal.writeProgress(out); journal.writeAdventure(out);
+    journal.writeDiscoveries(out)
     val restored = FieldJournal(); val in = DataInputStream(ByteArrayInputStream(raw.toByteArray))
-    restored.read(in); restored.readProgress(in); restored.readAdventure(in)
+    restored.read(in); restored.readProgress(in); restored.readAdventure(in);
+    restored.readDiscoveries(in)
     assert(restored.entries == journal.entries && restored.rewardClaimed(0))
     assert(
       restored.claim(0, _ => 64).isEmpty,

@@ -26,6 +26,10 @@ final class FieldJournal:
   private var victories = 0
   private var claimed = 0
   private var tracked = 0
+  private var caches = 0
+  def salvagedCache(): Unit = caches = (caches + 1).min(3)
+  def writeDiscoveries(out: DataOutputStream): Unit = out.writeInt(caches)
+  def readDiscoveries(in: DataInputStream): Unit = caches = in.readInt().max(0).min(3)
 
   def observe(biome: Int, depth: Int, survival: Boolean, count: Block => Int): Unit =
     if biome >= 0 && biome < TerrainBiome.values.length then biomes += biome
@@ -90,7 +94,8 @@ final class FieldJournal:
     (Block.RainbowBlock, 8),
     (Block.Glass, 16),
     (Block.GoldIngot, 4),
-    (Block.RainbowBlock, 16)
+    (Block.RainbowBlock, 16),
+    (Block.GoldIngot, 8)
   )
   def reward(index: Int): Option[(Block, Int)] = rewards.lift(index)
   def rewardClaimed(index: Int): Boolean =
@@ -180,6 +185,12 @@ final class FieldJournal:
       "Craft a diamond tool or weapon to complete your workshop.",
       pickTier.min(4),
       4
+    ),
+    JournalEntry(
+      "Salvage the old world",
+      "Find ruined masonry and break 3 sealed supply caches.",
+      caches,
+      3
     )
   )
 

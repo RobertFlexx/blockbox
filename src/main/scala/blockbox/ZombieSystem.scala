@@ -301,18 +301,25 @@ object ZombieSystem:
     if desired.lengthSquared > 0.001f then
       z.yaw += angleDelta(z.yaw, z.targetYaw).max(-180f * dt).min(180f * dt)
     z.bodyYaw += angleDelta(z.bodyYaw, z.yaw) * (1f - exp(-dt * 10f).toFloat)
-    val step = z.moveVelocity * dt
+    val step = (z.moveVelocity + Vec3(z.velocity.x, 0, z.velocity.z)) * dt
     def move(dx: Float, dz: Float): Boolean =
       val next = z.pos + Vec3(dx, 0, dz)
       val nx = floor(next.x + signum(dx) * 0.28f).toInt;
       val nz = floor(next.z + signum(dz) * 0.28f).toInt
       val y = floor(z.pos.y).toInt
       val support = (1 to 2).exists(d => at(nx, y - d, nz).solid)
-      val safe = wet || !z.grounded || support || at(nx, y, nz) == Block.Water
+      val safe =
+        wet || !z.grounded || support || z.velocity.x * z.velocity.x + z.velocity.z * z.velocity.z > 0.01f || at(
+          nx,
+          y,
+          nz
+        ) == Block.Water
       if safe && at(nx, y, nz) != Block.Cactus && !collides(next, at) then { z.pos = next; true }
       else false
     if !move(step.x, 0) then z.moveVelocity = Vec3(0, 0, z.moveVelocity.z)
     if !move(0, step.z) then z.moveVelocity = Vec3(z.moveVelocity.x, 0, 0)
+    val drag = exp(-dt * (if wet then 4f else 7f)).toFloat
+    z.velocity = Vec3(z.velocity.x * drag, z.velocity.y, z.velocity.z * drag)
     if desired.lengthSquared > 0.1f && (z.pos - before).lengthSquared < 0.00001f then z.stuck += dt
     else z.stuck = 0f
     if z.stuck > 0.45f then { z.routeTimer = 0f; z.stuck = 0f }

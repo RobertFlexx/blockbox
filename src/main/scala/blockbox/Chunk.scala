@@ -369,7 +369,7 @@ final class Chunk(
     val buildRevision = meshRevision
     val opaqueVerts = FloatMeshBuilder(65536); val cutoutVerts = FloatMeshBuilder(8192)
     val translucentVerts = FloatMeshBuilder(8192); val waterVerts = FloatMeshBuilder(16384)
-    val flatWaterFaces = scala.collection.mutable.HashMap.empty[Int, Int]
+    val flatWaterFaces = scala.collection.mutable.HashMap.empty[Float, Int]
     val cs = Terrain.chunkSize
     val height = Terrain.worldHeight
     val smooth = smoothLightingEnabled
@@ -443,8 +443,7 @@ final class Chunk(
         val raw = localWaterRawLevel(nlx, ny, nlz)
         // Generated/static water has raw level 0. Draw it as a full flat block-top
         // surface so all natural oceans, rivers, ponds and lakes share one exact
-        // plane. Do not use 0.94 or mixed freshwater heights here; tiny offsets plus
-        // transparency caused the visible sheet/step artifacts in large beaches.
+        // plane. Every natural body shares this same slightly recessed surface.
         fy + WaterSurface.height(raw)
     def waterCornerY(cells: Array[(Int, Int, Int)], fy: Float, fallback: Float): Float =
       var sum = 0f
@@ -607,7 +606,7 @@ final class Chunk(
     def frostedColumn(lx: Int, lz: Int, y: Int): Boolean =
       val i = lz * cs + lx
       if frostColumns(i) == 0 then
-        val biome = gen.biomeAt(baseX + lx, baseZ + lz, y)
+        val biome = gen.biomeAt(baseX + lx, baseZ + lz, gen.heightAt(baseX + lx, baseZ + lz))
         frostColumns(i) =
           if biome == TerrainBiome.SnowyTaiga || biome == TerrainBiome.SnowyTundra || biome == TerrainBiome.JaggedPeaks
           then 2
@@ -692,6 +691,8 @@ final class Chunk(
                 case 2 => (1f - tu, 1f - tv)
                 case 3 => (1f - tv, tu)
                 case _ => (tu, tv)
+            else if block == Block.Grass && kind == FaceKind.Top && !overlay then
+              TerrainUv.rotate(tu, tv, TerrainUv.rotation(baseX + lx, baseZ + lz))
             else if isLogBlock && LogAxis.swapsUv(kind, logAxis) then (tv, tu)
             else (tu, tv)
             val (u, v) = if overlay then atlasRef.grassOverlayUv(tu2, tv2)
@@ -830,8 +831,10 @@ final class Chunk(
               ),
               FaceKind.Top
             )
-            if nwTop == fy + 1f && neTop == nwTop && seTop == nwTop && swTop == nwTop then
-              flatWaterFaces.update(y + 1, flatWaterFaces.getOrElse(y + 1, 0) + 1)
+            if math.abs(
+                nwTop - (fy + WaterSurface.fullHeight)
+              ) < 0.0001f && neTop == nwTop && seTop == nwTop && swTop == nwTop
+            then flatWaterFaces.update(nwTop, flatWaterFaces.getOrElse(nwTop, 0) + 1)
           // Close every exposed side, including static water. Interior faces stay culled.
           if shouldDrawWaterSide(lx, y, lz, lx + 1, y, lz) then
             addFace(

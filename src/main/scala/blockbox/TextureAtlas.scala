@@ -121,6 +121,7 @@ final class TextureAtlas(texturePack: TexturePack, anisotropicFiltering: Boolean
           for row <- art; i <- row.indices do
             val (r, g, b, a) = row(i)
             row(i) = ((r * tr).round, (g * tg).round, (b * tb).round, a)
+    if block == Block.Grass && face == FaceKind.Top then TerrainUv.tileGrass(art)
     art
 
   private def proceduralPixel(block: Block, face: FaceKind, px: Int, py: Int): Pixel =

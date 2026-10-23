@@ -395,6 +395,23 @@ private object BlockboxProceduralAudioEngine:
     furnaceTarget = 0f; furnaceRequested.set(false)
 
 trait BlockboxAudio:
+  protected def soundEvent(action: BlockboxSounds.Action, block: Block, variant: Int): Unit = ()
+  protected def playSpatialSound(
+      action: BlockboxSounds.Action,
+      block: Block,
+      variant: Int,
+      gain: Float,
+      pan: Float
+  ): Unit =
+    if soundEnabled && gain > 0.002f then
+      BlockboxProceduralAudioEngine.play(
+        action,
+        BlockboxSounds.material(block),
+        variant,
+        gain,
+        1f,
+        pan
+      )
   protected def prepareAudio(): Unit = BlockboxProceduralAudioEngine.prepare()
   protected def soundEnabled: Boolean
   private val soundSequence = java.util.concurrent.atomic.AtomicInteger(0)
@@ -418,6 +435,7 @@ trait BlockboxAudio:
         pitch,
         pan
       )
+      soundEvent(action, block, Math.floorMod(sequence, 64))
 
   protected def playPlaceSound(): Unit = effect(BlockboxSounds.Action.Ui, Block.Wood, 0.75f)
   protected def playPlaceSound(block: Block): Unit =

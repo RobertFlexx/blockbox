@@ -4,8 +4,9 @@ package blockbox
   * open-water edge, so a surface cannot lift away from its enclosing volume.
   */
 object WaterSurface:
+  val fullHeight = 0.97f
   def height(level: Int): Float =
-    if level <= 0 || level >= 8 then 1f else 0.36f + 0.52f * level.max(1) / 7f
+    if level <= 0 || level >= 8 then fullHeight else 0.36f + 0.52f * level.max(1) / 7f
 
   def waveWeight(x: Int, y: Int, z: Int, water: (Int, Int, Int) => Boolean): Float =
     // Four cells share a corner. A missing cell pins that corner to the bank.

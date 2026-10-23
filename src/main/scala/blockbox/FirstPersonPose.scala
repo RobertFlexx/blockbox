@@ -63,10 +63,10 @@ object FirstPersonPose:
   def attachment(block: Block): Attachment =
     if block == Block.Torch then Attachment(Vec3(0f, -0.30f, -0.055f), Vec3(-28f, 0f, 0f), 0.72f)
     // In the resting forearm frame these Euler angles put the broad face in a
-    // vertical plane and the shaft ahead of the fist, slightly downward/inward.
+    // vertical plane and the shaft rising ahead of the fist, as in the world model.
     // The handle's diagonal in the source art is included in this rotation.
     else if ToolSystem.isTool(block) then
-      Attachment(Vec3(0f, -0.31f, -0.055f), Vec3(-36f, 60f, -65f), 0.80f)
+      Attachment(Vec3(0f, -0.31f, -0.055f), Vec3(0f, 55f, 15f), 0.80f)
     else if Block.isItem(block) then Attachment(Vec3(0f, -0.31f, -0.07f), Vec3(-70f, 0f, 0f), 0.55f)
     else Attachment(Vec3(0f, -0.30f, -0.32f), Vec3(0f, 20f, 0f), 0.30f)
 
@@ -76,7 +76,7 @@ object FirstPersonPose:
     */
   def zombieAttachment(block: Block): Attachment =
     if ToolSystem.isTool(block) then
-      Attachment(Vec3(0f, -0.31f, -0.055f), Vec3(-90f, 25f, 25f), 0.80f)
+      Attachment(Vec3(0f, -0.31f, -0.055f), Vec3(-90f, 55f, 15f), 0.80f)
     else attachment(block)
 
   /** Vanilla applyItemArmTransform and applyItemArmAttackTransform, then the held thing's display

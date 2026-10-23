@@ -6,6 +6,7 @@ import java.util.concurrent.atomic.AtomicReference
 import scala.collection.mutable.ArrayBuffer
 
 @main def runGameSystemsTests(): Unit =
+  InteractionSystemsTest.run()
   GameSystemsTest.layouts()
   GameSystemsTest.journal()
   GameSystemsTest.terrain()
@@ -17,7 +18,9 @@ import scala.collection.mutable.ArrayBuffer
   ModdingTest.run()
   if sys.env.get("BLOCKBOX_SKIP_SOCKET_TESTS").contains("1") then
     println("Live multiplayer tests skipped: BLOCKBOX_SKIP_SOCKET_TESTS=1")
-  else GameSystemsTest.network()
+  else
+    GameSystemsTest.network()
+    InteractionSystemsTest.multiplayer()
   println("GameSystemsTest: all enabled tests passed")
 
 object GameSystemsTest:
@@ -388,6 +391,7 @@ object GameSystemsTest:
       for i <- 0 until 100 do server.broadcastBlockChange(1000 + i, 60, 0, Block.Planks.id)
       assert(awaitValue("snapshot join")(joined.get()), alice.errorMessage)
       assert(alice.isConnected)
+      val firstWorld = clientMessage(alice, "WORLD|")
       val environment = clientMessage(alice, "ENV|")
       assert(BlockboxNet.parseEnvironment(BlockboxNet.packet(environment)).rain() == 0.6f)
       val syncedTorch = BlockboxNet.parseBlock(
@@ -499,5 +503,57 @@ object GameSystemsTest:
       assert(!duplicate.connect("Alice", ModRuntime.VanillaHash))
       assert(duplicate.errorMessage.contains("already"))
       duplicate.disconnect()
+      while bob.pollMessage().nonEmpty do ()
+      alice.send(
+        BlockboxNet.pos(
+          "Alice",
+          14.5f,
+          65f,
+          -8.5f,
+          111,
+          19,
+          0,
+          BlockboxNet.MAX_PLAYERS,
+          Block.Stone.ordinal,
+          true
+        )
+      )
+      val crouch = BlockboxNet.parsePosition(
+        BlockboxNet.packet(clientMessage(bob, "POS|Alice|")),
+        BlockboxNet.MAX_PLAYERS
+      )
+      assert(crouch.crouching && crouch.x == 14.5f, "crouching is authenticated and replicated")
+      alice.disconnect()
+      awaitValue("Alice leaves") { server.pollMessage().filter(_ == "LEFT|Alice") }
+      val returning = GameClient("127.0.0.1", server.localPort)
+      try
+        assert(returning.connect("Alice", ModRuntime.VanillaHash), returning.errorMessage)
+        val world = clientMessage(returning, "WORLD|").split('\u007c')
+        assert(
+          world(2).toFloat == 14.5f && world(3).toFloat == 65f && world(4).toFloat == -8.5f,
+          "returning guests keep their position in this world/session"
+        )
+        assert(world(8) == firstWorld.split('\u007c')(8))
+        assert(clientMessage(returning, "RESUME|") == "RESUME|111.0|19.0|1")
+        returning.send("SFX|0|1|2")
+        assert(awaitValue("directional sound event") {
+          server.pollMessage().filter(_.startsWith("AUDIO|"))
+        } == "AUDIO|Alice|0|1|2")
+        returning.send(s"TOSS|123|${Block.Stone.ordinal}|3")
+        assert(awaitValue("authenticated toss") {
+          server.pollMessage().filter(_.startsWith("TOSS|"))
+        } == s"TOSS|Alice|123|${Block.Stone.ordinal}|3")
+        server.finishToss("Alice", 123, accepted = true)
+        assert(clientMessage(returning, "TOSSACK|") == "TOSSACK|123|1")
+        returning.send(s"TOSS|123|${Block.Stone.ordinal}|3")
+        assert(
+          clientMessage(returning, "TOSSACK|") == "TOSSACK|123|1",
+          "replayed toss is idempotent"
+        )
+        returning.send("PICK|1|64")
+        assert(awaitValue("authenticated pickup") {
+          server.pollMessage().filter(_.startsWith("PICK|"))
+        } == "PICK|Alice|1|64")
+      finally returning.disconnect()
     finally
       alice.disconnect(); bob.disconnect(); server.stop()

@@ -114,7 +114,11 @@ object PresentationTest:
         mesh.nonEmpty && mesh.length <= 24 && mesh.length % 3 == 0,
         "bounded cached scenery mesh"
       )
-      assert(mesh.forall(v => v.x >= 0 && v.x <= 1 && v.y >= 0 && v.y <= 1 && v.z >= 0 && v.z <= 1))
+      assert(
+        mesh.forall(v =>
+          v.x >= 0 && v.x <= 1 && v.y >= WaterSurface.fullHeight - 1f && v.y <= 1 && v.z >= 0 && v.z <= 1
+        )
+      )
       assert(mesh.forall(v => abs(v.nx * v.nx + v.ny * v.ny + v.nz * v.nz - 1) < 0.001f))
       val alpha = for x <- 0 until 16; y <- 0 until 16
       yield BlockboxTextures.pixel(block, FaceKind.North, x, y).get._4
@@ -186,7 +190,7 @@ object PresentationTest:
     )
     for item <- Seq(Block.IronSword, Block.IronPickaxe, Block.IronShovel, Block.IronAxe) do
       val grip = FirstPersonPose.zombieAttachment(item)
-      val shaft = rotate(rotate(Vec3(0.707f, 0.707f, 0), grip.rotation), Vec3(86, 0, 0))
+      val shaft = rotate(rotate(Vec3(0.707f, 0.707f, 0), grip.rotation), Vec3(90, 0, 0))
       assert(
         shaft.y > 0.85f && shaft.z < 0.1f,
         "equipped zombie tools rise upright from an extended fist"
@@ -212,15 +216,15 @@ object PresentationTest:
     assert(!insideFist(held(fx, fy, fz)), "the burning end clears the hand")
     for item <- Seq(Block.IronSword, Block.IronPickaxe, Block.StoneAxe, Block.IronShovel) do
       val attachment = FirstPersonPose.attachment(item)
-      val shaft = rotate(rotate(Vec3(0.7f, 0.7f, 0), attachment.rotation), Vec3(36, 0, 0))
-      assert(shaft.z < -0.35f, "third-person tools extend forward from the wrist")
-      assert(shaft.x > 0.35f, "the tool projects ahead and outside the fist, clearing the torso")
+      val shaft = rotate(rotate(Vec3(0.7f, 0.7f, 0), attachment.rotation), Vec3(12, 0, 0))
+      assert(shaft.z < -0.10f, "third-person tools extend forward from the wrist")
+      assert(shaft.x > 0.20f, "the tool projects ahead and outside the fist, clearing the torso")
       assert(
-        shaft.y < 0 && shaft.y > -0.45f,
-        "tools angle down ahead of the grip instead of lying flat across it"
+        shaft.y > 0.80f,
+        "tools rise from the fist in a readable Minecraft-style grip"
       )
-      val normal = rotate(rotate(Vec3(0, 0, 1), attachment.rotation), Vec3(36, 0, 0))
-      assert(abs(normal.y) < 0.01f, "the tool's broad face stays vertical in the resting hand")
+      val normal = rotate(rotate(Vec3(0, 0, 1), attachment.rotation), Vec3(12, 0, 0))
+      assert(abs(normal.y) < 0.16f, "the tool's broad face stays vertical in the resting hand")
     val pickPose = FirstPersonPose.itemPose(Block.DiamondPickaxe, 0, 0, 1)
     val swordPose = FirstPersonPose.itemPose(Block.DiamondSword, 0, 0, 1)
     assert(swordPose == pickPose, "all tools share the same hand/display basis")

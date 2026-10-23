@@ -80,12 +80,20 @@ object BlockboxTextures:
       case Block.AcaciaLeaves => Some(leaves(x, y, 54, holes = 0.30f, cell = 2))
       case Block.Cactus       =>
         Some(if vertical then cactusTop(x, y, face == FaceKind.Top) else cactusSide(x, y))
-      case Block.Furnace    => Some(furnace(x, y, face, lit = false))
-      case Block.FurnaceLit => Some(furnace(x, y, face, lit = true))
-      case Block.Reeds      => Some(reeds(x, y))
-      case Block.LilyPad    => Some(lilyPad(x, y))
-      case Block.LeafLitter => Some(leafLitter(x, y))
-      case _                => None
+      case Block.Furnace     => Some(furnace(x, y, face, lit = false))
+      case Block.FurnaceLit  => Some(furnace(x, y, face, lit = true))
+      case Block.Reeds       => Some(reeds(x, y))
+      case Block.LilyPad     => Some(lilyPad(x, y))
+      case Block.LeafLitter  => Some(leafLitter(x, y))
+      case Block.SupplyCrate =>
+        val band = x <= 1 || x >= 14 || y <= 1 || y >= 14
+        val brace = abs(x - y) <= 1 || abs(x + y - 15) <= 1
+        val latch = face == FaceKind.North && x >= 6 && x <= 9 && y >= 6 && y <= 10
+        Some(if latch then rgb(if x == 6 || y == 6 then 0xa49c78 else 0x5a594b)
+        else if band then rgb(if (x + y) % 3 == 0 then 0x6b4a2b else 0x805930)
+        else if brace then rgb(0x9a713e)
+        else rgb(if x % 4 == 0 then 0x4f3726 else 0x704c2c))
+      case _ => None
 
   private def reeds(x: Int, y: Int): Pixel =
     val stems = Array((3, 3), (7, 1), (11, 5), (14, 4))

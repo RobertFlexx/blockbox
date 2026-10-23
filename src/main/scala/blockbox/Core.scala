@@ -129,6 +129,7 @@ enum Block(
   case Reeds extends Block(false, (0.40f, 0.57f, 0.22f), false, false, true)
   case LilyPad extends Block(false, (0.20f, 0.43f, 0.18f), false, false, true)
   case LeafLitter extends Block(false, (0.66f, 0.34f, 0.12f), false, false, true)
+  case SupplyCrate extends Block(true, (0.53f, 0.35f, 0.18f))
   def solid: Boolean =
     val d = CustomBlocks.raw(this)
     if d == null then baseSolid else d.solid
@@ -246,3 +247,6 @@ final case class RemotePlayer(
   var swing: Float = 0f
   var hurt: Float = 0f
   var mode: GameMode = GameMode.Survival
+  var crouching = false
+  var crouch = 0f
+  def eyePosition: Vec3 = PlayerStance.eye(pos, crouch)

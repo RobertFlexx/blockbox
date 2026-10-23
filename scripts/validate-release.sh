@@ -63,7 +63,9 @@ if [[ -n "${BLOCKBOX_SCALA_TOOLCHAIN:-}" ]]; then
   mapfile -t scala_sources < <(find src/main/scala src/test/scala -type f -name '*.scala' | sort)
   "$BLOCKBOX_SCALA_TOOLCHAIN/bin/scalac" -classpath "$tmp/scala-classes:$helper_jar:$BLOCKBOX_TEST_CLASSPATH" -d "$tmp/scala-classes" "${scala_sources[@]}"
   say 'running gameplay regression tests'
-  java -cp "$tmp/scala-classes:$helper_jar:$BLOCKBOX_TEST_CLASSPATH" blockbox.runGameSystemsTests
+  java -Djava.awt.headless=true \
+    -Dorg.lwjgl.librarypath="${BLOCKBOX_TEST_NATIVE_PATH:-$ROOT/.lwjgl/3.4.1+2/x64}" \
+    -cp "$tmp/scala-classes:$helper_jar:$BLOCKBOX_TEST_CLASSPATH" blockbox.runGameSystemsTests
   if [[ "${BLOCKBOX_RUN_ENGINE_RENDER_TESTS:-0}" == "1" ]]; then
     say 'rendering real engine frames and testing HDR, resolution scaling and reload recovery'
     EGL_PLATFORM=surfaceless java -Djava.awt.headless=true -Dorg.lwjgl.opengl.contextAPI=EGL \
@@ -74,7 +76,10 @@ elif command -v scala-cli > /dev/null 2>&1; then
   say 'compiling the complete Scala project and regression tests against the Java helper jar'
   scala-cli compile src/main/scala src/test/scala --server=false --extra-jar "$helper_jar"
   say 'running gameplay regression tests'
-  scala-cli run src/main/scala src/test/scala --server=false --extra-jar "$helper_jar" --main-class blockbox.runGameSystemsTests
+  scala-cli run src/main/scala src/test/scala --server=false --extra-jar "$helper_jar" \
+    --java-opt -Djava.awt.headless=true \
+    --java-opt "-Dorg.lwjgl.librarypath=${BLOCKBOX_TEST_NATIVE_PATH:-$ROOT/.lwjgl/3.4.1+2/x64}" \
+    --main-class blockbox.runGameSystemsTests
   if [[ "${BLOCKBOX_RUN_ENGINE_RENDER_TESTS:-0}" == "1" ]]; then
     say 'rendering real engine frames and testing HDR, resolution scaling and reload recovery'
     EGL_PLATFORM=surfaceless scala-cli run src/main/scala src/test/scala --server=false --extra-jar "$helper_jar" \

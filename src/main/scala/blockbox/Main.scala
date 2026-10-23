@@ -66,6 +66,10 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
   @volatile private var yaw = 0f
   @volatile private var pitch = 0f
   // Presentation-only first-person response; physics/network camera stays deterministic.
+  private var playerCrouching = false
+  private var crouchAmount = 0f
+  private var lastNetworkCrouching = false
+  private def eyePosition: Vec3 = PlayerStance.eye(camera, crouchAmount)
   private var viewFovOffset = 0f
   private var cameraBobPhase = 0f
   private var cameraBobAmount = 0f
@@ -154,7 +158,8 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
     Block.Torch,
     Block.Reeds,
     Block.LilyPad,
-    Block.LeafLitter
+    Block.LeafLitter,
+    Block.SupplyCrate
   )
   protected val inventory = Array.fill(Block.values.length)(0)
   protected val backpackBlocks: Array[Block] = Array.fill(27)(Block.Air)
@@ -195,11 +200,11 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
   // arrive before the matching chunk has streamed in, so keep them here and apply them when
   // that chunk is created. This prevents seed-correct clients from looking different just
   // because old local chunk saves or early packets were used/lost.
-  private val pendingNetworkBlocks = scala.collection.mutable.HashMap.empty[(Int, Int, Int), Block]
+  private val pendingNetworkBlocks = new ChunkBlockMap[Block]
   // Every BLOC packet seen during a multiplayer session is kept here, even after the
   // target chunk unloads. Without this, client-only worlds regenerated from seed and
   // lost remote edits when walking away and returning.
-  private val networkBlockOverrides = scala.collection.mutable.HashMap.empty[(Int, Int, Int), Block]
+  private val networkBlockOverrides = new ChunkBlockMap[Block]
   private val networkWaterLevelOverrides =
     scala.collection.mutable.HashMap.empty[(Int, Int, Int), Byte]
   // Minecraft-style log orientation (LogAxis id) for network block changes. Kept in
@@ -285,6 +290,27 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
   private var combatCooldown = 0f
   private val lastCombatHit = scala.collection.mutable.HashMap.empty[String, Double]
   private var playerKnockback = Vec3(0, 0, 0)
+  private val droppedItems = DroppedItems()
+  private var itemSyncTimer = 0f
+  private var itemSnapshotSerial = 0L
+  private var itemIncomingSerial = -1L
+  private var itemIncomingCount = 0
+  private val itemIncomingRows = ArrayBuffer.empty[String]
+  private var pickupRequestTimer = 0f
+  private val appliedItemOffers = collection.mutable.HashSet.empty[Long]
+  private val pendingTosses = collection.mutable.HashMap.empty[Long, (Block, Int)]
+  private val failedTosses = collection.mutable.HashSet.empty[Long]
+  private final case class GuestCarry(
+      bytes: Array[Byte],
+      journal: FieldJournal,
+      applied: Set[Long],
+      pending: Map[Long, (Block, Int)],
+      failed: Set[Long]
+  )
+  private val guestCarry = collection.mutable.LinkedHashMap.empty[String, GuestCarry]
+  private var guestSessionKey = ""
+  private var environmentTimeError = 0.0
+
   private val entityWaterPlane = BufferUtils.createDoubleBuffer(4)
   private val airSupply = AirSupply()
   protected var playerHealth = 20f
@@ -470,6 +496,8 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
     worldClock = 150.0; timeOverride = None
     rainStrength = 0f; wetness = 0f; stormCloudCover = 0f; lightningFlash = 0f
     zombies.clear(); zombieSerial = 0; zombieSpawnTimer = 2f; airSupply.reset();
+    droppedItems.clear(); appliedItemOffers.clear(); pendingTosses.clear(); failedTosses.clear()
+    playerCrouching = false; crouchAmount = 0f
     RainRenderer.reset()
     lastCombatHit.clear(); combatCooldown = 0f; playerKnockback = Vec3(0, 0, 0)
     localRain = 0f; localCloud = 0f; localWetness = 0f; localLightning = 0f
@@ -580,7 +608,7 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
         maxCloudRenderDistance
       )
       fogDensity = propFloat(props, "fogDensity", fogDensity, 0.6f, 3.0f)
-      fov = propFloat(props, "fov", fov, 50f, 100f)
+      fov = propFloat(props, "fov", fov, 50f, 120f)
       fastMove = propBool(props, "fastMove", fastMove)
       vsync = propBool(props, "vsync", vsync)
       soundEnabled = propBool(props, "soundEnabled", soundEnabled)
@@ -1118,7 +1146,11 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
     lastTime = now
     completePendingJoin()
     if activeWorldSession && (screen == Screen.Playing || screen == Screen.FurnaceUI || shouldRunMultiplayerBackgroundTick)
-    then worldClock += lastFrameTime * modManager.rules.get("timeScale")
+    then
+      worldClock += lastFrameTime * modManager.rules.get("timeScale")
+      if isClientOnlyMultiplayer && environmentReceived then
+        val correction = (environmentTimeError * 0.9).max(-0.15).min(0.15) * lastFrameTime
+        worldClock += correction; environmentTimeError -= correction
     publishedEnvironment = environmentMessage
     publishedRules = modManager.rules.snapshot
     publishedOps = oppedPlayerNames.toVector
@@ -1327,6 +1359,8 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
             else if key == GLFW_KEY_UP then showPreviousChatHistory()
             else if key == GLFW_KEY_DOWN then showNextChatHistory()
           else if key == GLFW_KEY_ESCAPE then leaveGame(Screen.Paused)
+          else if key == GLFW_KEY_Q then
+            dropHeldStack(down(GLFW_KEY_LEFT_CONTROL) || down(GLFW_KEY_RIGHT_CONTROL))
           else if key == GLFW_KEY_E then
             if gameMode == GameMode.Creative then openCatalog() else openInventory()
           else if key == GLFW_KEY_SLASH || key == GLFW_KEY_T then
@@ -1441,7 +1475,7 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
           renderDistance = next
           syncChunks()
       case "fog"    => fogDensity = 0.6f + value * 2.4f
-      case "fov"    => fov = 50f + value * 50f
+      case "fov"    => fov = 50f + value * 70f
       case "clouds" =>
         cloudRenderDistance =
           (minCloudRenderDistance + value * (maxCloudRenderDistance - minCloudRenderDistance)).round
@@ -2046,7 +2080,8 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
         modManager.serverModpackList,
         () => publishedEnvironment,
         () => publishedRules,
-        () => heldHotbarBlock.id & 0xff
+        () => heldHotbarBlock.id & 0xff,
+        () => playerCrouching
       )
       gameServer = server
       verifyLocalServer(server.localPort) match
@@ -2146,6 +2181,20 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
         joinStatusMessage = s"Synchronizing the world... ${gameClient.pendingMessages} updates left"
 
   private def stopNetworking(): Unit =
+    if gameClient != null && guestSessionKey.nonEmpty then
+      val bytes = new java.io.ByteArrayOutputStream()
+      val out = new java.io.DataOutputStream(bytes)
+      writeWorldExtras(out); out.flush()
+      guestCarry(guestSessionKey) = GuestCarry(
+        bytes.toByteArray,
+        fieldJournal,
+        appliedItemOffers.toSet,
+        pendingTosses.toMap,
+        failedTosses.toSet
+      )
+      while guestCarry.size > 16 do guestCarry.remove(guestCarry.head._1)
+    guestSessionKey = ""
+    appliedItemOffers.clear(); pendingTosses.clear(); failedTosses.clear()
     pendingJoin = null; joinResult = null; applyingJoin = false
     if gameClient != null then gameClient.disconnect(); gameClient = null
     if gameServer != null then gameServer.stop(); gameServer = null
@@ -2435,6 +2484,10 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
     meta.writeInt(0x46555231) // FUR1: position of this player's active furnace.
     meta.writeBoolean(furnacePosition.nonEmpty)
     furnacePosition.foreach { (x, y, z) => meta.writeInt(x); meta.writeInt(y); meta.writeInt(z) }
+    meta.writeInt(0x49544d31) // ITM1: dropped world items, appended to legacy tails.
+    meta.writeUTF(droppedItems.saveSnapshot)
+    meta.writeInt(0x43434831) // CCH1: ruin salvage objective.
+    fieldJournal.writeDiscoveries(meta)
     meta.flush()
     raw.toByteArray
 
@@ -2582,6 +2635,10 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
                     val x = meta.readInt(); val y = meta.readInt(); val z = meta.readInt()
                     require(y >= 0 && y < Terrain.worldHeight, "Invalid furnace position")
                     furnacePosition = Some((x, y, z))
+                if meta.available() >= 4 && meta.readInt() == 0x49544d31 then
+                  droppedItems.receive(meta.readUTF(), interpolate = false)
+                if meta.available() >= 4 && meta.readInt() == 0x43434831 then
+                  fieldJournal.readDiscoveries(meta)
           storedChunks.foreach((cx, cz) => loadChunkIfSaved(cx, cz))
       )
       true
@@ -2771,6 +2828,7 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
     if handleLostConnection() then return
     processNetworkMessages()
     smoothRemotePlayers(dt)
+    updateDroppedItems(dt)
     syncChunks()
     // Keep the camera neighborhood deterministic. If the local terrain is not
     // ready, build the 5x5 ring right now instead of rendering a sky-only void.
@@ -2828,7 +2886,12 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
     if down(GLFW_KEY_A) then move -= right
     val moving = move.lengthSquared > 0.001f
     val sprinting = moving && (down(GLFW_KEY_LEFT_CONTROL) || down(GLFW_KEY_RIGHT_CONTROL))
-    val crouching = onGround && moving && (down(GLFW_KEY_LEFT_SHIFT) || down(GLFW_KEY_RIGHT_SHIFT))
+    val wantsCrouch = !flyEnabled && onGround && blockAt(
+      camera - Vec3(0, 0.8f, 0)
+    ) != Block.Water && (down(GLFW_KEY_LEFT_SHIFT) || down(GLFW_KEY_RIGHT_SHIFT))
+    playerCrouching = wantsCrouch || (playerCrouching && collidesPlayer(camera, crouched = false))
+    crouchAmount = PlayerStance.approach(crouchAmount, playerCrouching, dt)
+    val crouching = playerCrouching
     gameMode match
       case GameMode.Creative =>
         val spaceDown = down(GLFW_KEY_SPACE)
@@ -2992,7 +3055,7 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
       -dt * 16f
     ).toFloat)) % 360f
     viewmodelPitch = approachExp(viewmodelPitch, pitch, 16f, dt)
-    val obstruction = FirstPersonPose.obstruction(camera, yaw, pitch, getWorldBlock)
+    val obstruction = FirstPersonPose.obstruction(eyePosition, yaw, pitch, getWorldBlock)
     viewmodelObstruction = approachExp(
       viewmodelObstruction,
       obstruction,
@@ -3022,6 +3085,7 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
     processNetworkMessages()
     updateWeather(dt)
     smoothRemotePlayers(dt)
+    updateDroppedItems(dt)
     syncChunks()
     if !centerChunkReady then forceCameraChunkRing(0)
     processChunkWorkMainThread(0, 8)
@@ -3523,10 +3587,11 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
       if step > 0f && velocity.y == 0f then return
       remaining -= step
 
-  private def collidesPlayer(pos: Vec3): Boolean =
+  private def collidesPlayer(pos: Vec3, crouched: Boolean = playerCrouching): Boolean =
     val half = 0.32f
     val minX = floor(pos.x - half).toInt; val maxX = floor(pos.x + half).toInt
-    val minY = floor(pos.y - 1.62f).toInt; val maxY = floor(pos.y + 0.20f).toInt
+    val minY = floor(pos.y - 1.62f).toInt;
+    val maxY = floor(pos.y + 0.20f - (if crouched then PlayerStance.heightDrop else 0f)).toInt
     val minZ = floor(pos.z - half).toInt; val maxZ = floor(pos.z + half).toInt
     (minX to maxX).exists(x =>
       (minY to maxY).exists(y => (minZ to maxZ).exists(z => activeBlockAt(x, y, z).solid))
@@ -3575,6 +3640,7 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
     activeBlockAt(floor(pos.x).toInt, floor(pos.y).toInt, floor(pos.z).toInt)
 
   private def isUnderwater: Boolean =
+    val camera = eyePosition
     val x = floor(camera.x).toInt; val y = floor(camera.y).toInt; val z = floor(camera.z).toInt
     activeBlockAt(x, y, z) == Block.Water && (activeBlockAt(
       x,
@@ -3640,12 +3706,14 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
           ) > 0 || (occlusionChanged && hasLightNear(x, y, z))
         then dirtyLightChunksAt(x, z)
         if gameClient == null then
-          if oldBlock == Block.Torch && block == Block.Water then refundTorch(refundTo)
+          if oldBlock == Block.Torch && block == Block.Water then
+            spawnDrop(Block.Torch, 1, Vec3(x + 0.5f, y + 0.3f, z + 0.5f))
           removeUnsupportedTorchesAround(x, y, z, refundTo)
           val above = activeBlockAt(x, y + 1, z)
           if FloraModel.contains(above) && !FloraModel.supported(above, x, y + 1, z, activeBlockAt)
           then
             setActiveBlock(x, y + 1, z, Block.Air)
+            spawnDrop(above, 1, Vec3(x + 0.5f, y + 1.2f, z + 0.5f))
             sendBlockNetwork(x, y + 1, z, Block.Air.id)
     }
 
@@ -3670,13 +3738,6 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
       )
     )
 
-  private def refundTorch(recipient: Option[String]): Unit =
-    if gameMode == GameMode.Survival then
-      recipient.filterNot(_.equalsIgnoreCase(playerName)) match
-        case Some(name) if gameServer != null =>
-          gameServer.sendTo(name, s"GIVE|${networkSafeName(name)}|${Block.Torch.ordinal}|1")
-        case _ => gainItem(Block.Torch, 1)
-
   private def removeUnsupportedTorchesAround(
       x: Int,
       y: Int,
@@ -3698,7 +3759,7 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
       then
         setActiveBlock(tx, ty, tz, Block.Air)
         spawnBlockBreakParticles(tx, ty, tz, Block.Torch)
-        refundTorch(refundTo)
+        spawnDrop(Block.Torch, 1, Vec3(tx + 0.5f, ty + 0.3f, tz + 0.5f))
         sendBlockNetwork(tx, ty, tz, Block.Air.id)
     }
 
@@ -3744,17 +3805,133 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
               waterFlowQueue.clear()
               waterFlowQueued.clear()
               clearLoadedChunks(saveFirst = false)
+            guestSessionKey =
+              s"$seed:${if parts.length >= 9 then parts(8) else ""}:${playerName.toLowerCase(java.util.Locale.ROOT)}"
+            appliedItemOffers.clear(); pendingTosses.clear(); failedTosses.clear()
+            guestCarry.get(guestSessionKey).foreach { state =>
+              readWorldExtras(
+                new java.io.DataInputStream(new java.io.ByteArrayInputStream(state.bytes))
+              )
+              fieldJournal = state.journal; appliedItemOffers ++= state.applied;
+              pendingTosses ++= state.pending; failedTosses ++= state.failed
+            }
+            droppedItems.clear()
             camera = Vec3(sx, sy, sz)
             fallPeakY = camera.y
             velocity = Vec3(0f, 0f, 0f); onGround = false
             syncChunks()
             addChatMessage("Joined host world")
+        else if line.startsWith("AUDIO|") && gameServer != null then
+          if parts.length == 5 then
+            val actor = networkSafeName(parts(1))
+            remotePlayers.get(actor).foreach { player =>
+              val action = BlockboxSounds.Action.fromOrdinal(parts(2).toInt)
+              val at = player.targetPos - Vec3(0, 1.25f, 0)
+              val support = activeBlockAt(
+                floor(at.x).toInt,
+                floor(player.targetPos.y - 1.7f).toInt,
+                floor(at.z).toInt
+              )
+              val material = if action == BlockboxSounds.Action.Splash then Block.Water
+              else if support != Block.Air then support
+              else Block.fromOrdinal(parts(3).toInt)
+              broadcastActionSound(actor, action, material, parts(4).toInt, at)
+            }
+        else if line.startsWith("SOUND|") && isClientOnlyMultiplayer then
+          if parts.length == 8 then
+            val at = Vec3(
+              parseNetworkFloat(parts(5)),
+              parseNetworkFloat(parts(6)),
+              parseNetworkFloat(parts(7))
+            )
+            hearActionSound(
+              networkSafeName(parts(1)),
+              BlockboxSounds.Action.fromOrdinal(parts(2).toInt),
+              Block.fromOrdinal(parts(3).toInt),
+              parts(4).toInt,
+              at
+            )
+        else if line.startsWith("TOSS|") && gameServer != null then
+          if parts.length == 5 then
+            val actor = networkSafeName(parts(1)); val request = parts(2).toLong
+            gameServer.tossResult(actor, request) match
+              case Some(done) => gameServer.finishToss(actor, request, done)
+              case None       =>
+                val block = Block.fromOrdinal(parts(3).toInt); val count = parts(4).toInt
+                val accepted = remotePlayers.get(actor).exists { player =>
+                  val origin = player.eyePosition - Vec3(0, 0.25f, 0)
+                  val direction =
+                    BlockboxRaycast.viewDirection(player.targetYaw, player.targetPitch)
+                  droppedItems
+                    .spawn(block, count, origin, direction * 3.5f + Vec3(0, 1.2f, 0), actor)
+                    .nonEmpty
+                }
+                gameServer.finishToss(actor, request, accepted); itemSyncTimer = 0f
+        else if line.startsWith("TOSSACK|") && isClientOnlyMultiplayer then
+          if parts.length == 3 then
+            val request = parts(1).toLong
+            pendingTosses.get(request).foreach { (block, count) =>
+              if parts(2) == "1" then pendingTosses.remove(request)
+              else if inventoryRoomFor(block) >= count then
+                gainItem(block, count); pendingTosses.remove(request)
+              else if failedTosses.add(request) then
+                addChatMessage("Make inventory space to recover the dropped stack")
+            }
+        else if line.startsWith("PICK|") && gameServer != null then
+          if parts.length == 4 then
+            val actor = networkSafeName(parts(1))
+            remotePlayers.get(actor).foreach { player =>
+              droppedItems
+                .reserve(actor, parts(2).toInt, parts(3).toInt, player.targetPos - Vec3(0, 1.0f, 0))
+                .foreach(sendItemOffer)
+            }
+        else if line.startsWith("ITEMACK|") && gameServer != null then
+          if parts.length == 4 then
+            droppedItems.resolve(networkSafeName(parts(1)), parts(2).toLong, parts(3) == "1");
+            itemSyncTimer = 0f
+        else if line.startsWith("ITEMOFFER|") && isClientOnlyMultiplayer then
+          if parts.length == 4 then
+            val id = parts(1).toLong; val block = Block.fromOrdinal(parts(2).toInt);
+            val count = parts(3).toInt
+            require(id > 0 && DroppedItems.valid(block) && count > 0 && count <= 64)
+            val already = appliedItemOffers(id)
+            val accept = already || inventoryRoomFor(block) >= count
+            if accept && !already then
+              gainItem(block, count); appliedItemOffers += id
+              while appliedItemOffers.size > 1024 do appliedItemOffers.remove(appliedItemOffers.min)
+              playSpatialSound(BlockboxSounds.Action.Ui, block, 0, 0.18f, 0)
+            gameClient.send(s"ITEMACK|$id|${if accept then 1 else 0}")
+            pickupRequestTimer = 0f
+        else if line.startsWith("ITEMBEGIN|") && isClientOnlyMultiplayer then
+          if parts.length == 3 then
+            itemIncomingSerial = parts(1).toLong; itemIncomingCount = parts(2).toInt
+            require(itemIncomingCount >= 0 && itemIncomingCount <= DroppedItems.maxEntities + 64)
+            itemIncomingRows.clear()
+        else if line.startsWith("ITEMPART|") && isClientOnlyMultiplayer then
+          if parts.length == 3 && parts(1).toLong == itemIncomingSerial then
+            itemIncomingRows ++= parts(2).split(';').filter(_.nonEmpty)
+            require(itemIncomingRows.length <= itemIncomingCount)
+        else if line.startsWith("ITEMEND|") && isClientOnlyMultiplayer then
+          if parts.length == 2 && parts(1).toLong == itemIncomingSerial then
+            require(itemIncomingRows.length == itemIncomingCount)
+            droppedItems.receive("ITEMS|" + itemIncomingRows.mkString(";"), interpolate = true)
+            itemIncomingSerial = -1; itemIncomingRows.clear()
+        else if line.startsWith("RESUME|") && isClientOnlyMultiplayer then
+          if parts.length == 4 then
+            yaw = parseNetworkFloat(parts(1));
+            pitch = parseNetworkFloat(parts(2)).max(-89f).min(89f)
+            playerCrouching = parts(3) == "1"; crouchAmount = if playerCrouching then 1f else 0f
+            pendingTosses.filterNot((id, _) => failedTosses(id)).foreach {
+              case (id, (block, count)) =>
+                gameClient.send(s"TOSS|$id|${block.ordinal}|$count")
+            }
         else if line.startsWith("ENV|") then
           if gameServer == null then
             val env = BlockboxNet.parseEnvironment(BlockboxNet.packet(line))
             val error = env.time.toDouble - worldClock
-            worldClock = if !environmentReceived || abs(error) > 2.0 then env.time.toDouble
-            else worldClock + error * 0.35
+            if !environmentReceived || abs(error) > 2.0 then
+              worldClock = env.time.toDouble; environmentTimeError = 0.0
+            else environmentTimeError = error
             timeOverride = if env.timeOverride < 0f then None else Some(env.timeOverride)
             rainStrength = env.rain; wetness = env.wetness; stormCloudCover = env.cloudCover
             weatherWind = env.wind
@@ -3792,9 +3969,12 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
                 .forall(_.isFinite)
             then zombieVoice(event, variant, pos)
         else if line.startsWith("ZDAMAGE|") && isClientOnlyMultiplayer then
-          if parts.length == 2 then
-            val amount = parts(1).toFloat
-            if amount.isFinite && amount >= 0 && amount <= 8 then damagePlayer(amount, "zombie")
+          if parts.length == 4 then
+            val amount = parts(1).toFloat; val dx = parts(2).toFloat; val dz = parts(3).toFloat
+            if amount.isFinite && amount >= 0 && amount <= 8 && dx.isFinite && dz.isFinite && dx * dx + dz * dz <= 25
+            then applyCombatDamage(amount, "zombie", Vec3(dx, 0, dz))
+        else if line == "ZKILL" && isClientOnlyMultiplayer then fieldJournal.defeatedZombie()
+        else if line == "CACHEFOUND" && isClientOnlyMultiplayer then fieldJournal.salvagedCache()
         else if line.startsWith("ZLOOT|") && isClientOnlyMultiplayer then
           if parts.length == 3 then
             val item = Block.fromOrdinal(parts(1).toInt); val count = parts(2).toInt
@@ -3875,7 +4055,17 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
               ) && (e.block != Block.Torch || mount
                 .supported(edit.x, edit.y, edit.z, activeBlockAt))
             )
-            val accepted = loaded && (allowBreak || allowPlace)
+            val proposedLoot = modManager.drops.getOrElse(old, ToolSystem.drop(old))
+            val additionalLoot = if old == Block.SupplyCrate then
+              SupplyCaches.contents(worldSeed, edit.x, edit.y, edit.z)
+            else Vector.empty
+            val hasDropRoom =
+              !allowBreak || !broken.exists(_.dropItem) || proposedLoot._1 == Block.Air ||
+                droppedItems.canDropAll(
+                  Vector(proposedLoot) ++ additionalLoot,
+                  Vec3(edit.x + 0.5f, edit.y + 0.5f, edit.z + 0.5f)
+                )
+            val accepted = loaded && (allowBreak || allowPlace) && hasDropRoom
             if accepted then
               setActiveBlock(
                 edit.x,
@@ -3916,11 +4106,23 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
                   torchMountAt(edit.x, edit.y, edit.z).id
                 )
               )
+            if accepted then
+              broadcastActionSound(
+                sender,
+                if edit.blockId == 0 then BlockboxSounds.Action.Break
+                else BlockboxSounds.Action.Place,
+                if edit.blockId == 0 then old else Block.fromOrdinal(edit.blockId),
+                Math.floorMod(edit.x ^ edit.y ^ edit.z, 64),
+                Vec3(edit.x + 0.5f, edit.y + 0.6f, edit.z + 0.5f)
+              )
             val (loot, count) =
               if accepted && broken.exists(_.dropItem) && ToolSystem
                   .canHarvest(old, remotePlayers.get(sender).map(_.heldBlock).getOrElse(Block.Air))
               then modManager.drops.getOrElse(old, ToolSystem.drop(old))
               else (Block.Air, 0)
+            if loot != Block.Air && count > 0 then
+              spawnDrop(loot, count, Vec3(edit.x + 0.5f, edit.y + 0.5f, edit.z + 0.5f))
+              if old == Block.SupplyCrate then salvageCache(sender, edit.x, edit.y, edit.z)
             gameServer.sendTo(
               sender,
               s"EDIT_RESULT|${edit.x}|${edit.y}|${edit.z}|${if accepted then 1 else 0}|${loot.ordinal}|$count"
@@ -3935,8 +4137,7 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
             )
             pendingPlayerEdits.remove(key).foreach { case (spent, amount, drops) =>
               if parts(4) == "0" && amount > 0 then gainItem(spent, amount)
-              else if parts(4) == "1" && drops && count > 0 then
-                gainItem(Block.fromOrdinal(lootId), count)
+            // The host awards accepted breaks through physical item entities.
             }
         else if line.startsWith("BLOC|") then
           if parts.length >= 5 then
@@ -4061,6 +4262,7 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
                     colorId,
                     held
                   )
+              remotePlayers.get(name).foreach(_.crouching = parts.length >= 10 && parts(9) == "1")
         else if line.startsWith("TPOS|") then
           if parts.length >= 5 then
             val name = networkSafeName(parts(1))
@@ -4099,6 +4301,8 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
             rememberPlayerColor(name, colorId)
             if name != playerName then addChatMessage(s"$name joined the game")
             if gameServer != null then
+              droppedItems.forPlayer(name).foreach(sendItemOffer)
+              itemSyncTimer = 0f
               gameServer.broadcast(s"GMODE|$playerName|${gameMode.ordinal}")
               remotePlayers.valuesIterator.foreach(p =>
                 gameServer.broadcast(s"GMODE|${p.name}|${p.mode.ordinal}")
@@ -4166,6 +4370,7 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
       if abs(headOffset) > 65f then rp.bodyYaw = rp.yaw - headOffset.max(-65f).min(65f)
       rp.swing = (rp.swing - dt * 3.4f).max(0f)
       rp.hurt = (rp.hurt - dt * 2f).max(0f)
+      rp.crouch = PlayerStance.approach(rp.crouch, rp.crouching, dt)
     }
 
   private def sendPlayerPositionNetwork(): Unit =
@@ -4177,7 +4382,7 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
       ) > 0.22f
       val keepaliveDue = now - lastPosKeepalive >= 0.75
       val heldId = heldHotbarBlock.id & 0xff
-      val heldChanged = heldId != lastNetworkHeldBlock
+      val heldChanged = heldId != lastNetworkHeldBlock || lastNetworkCrouching != playerCrouching
       // Moving players update at up to 20 Hz. A hotbar change is sent on the same
       // frame, so the other client shows the new block with no extra wait.
       if heldChanged || (now - lastPosSend >= 0.05 && (moved || turned || keepaliveDue)) then
@@ -4187,12 +4392,15 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
         lastNetworkSentYaw = yaw
         lastNetworkSentPitch = pitch
         lastNetworkHeldBlock = heldId
+        lastNetworkCrouching = playerCrouching
         val msg =
           "POS|" + networkEscape(playerName) + "|" + networkFloat(camera.x) + "|" + networkFloat(
             camera.y
           ) + "|" + networkFloat(camera.z) + "|" + networkFloat(yaw) + "|" + networkFloat(
             pitch
-          ) + "|" + localColorId.toString + "|" + heldId.toString
+          ) + "|" + localColorId.toString + "|" + heldId.toString + "|" + (if playerCrouching then
+                                                                             "1"
+                                                                           else "0")
         if gameClient != null && gameClient.isConnected then gameClient.send(msg)
         else if gameServer != null then gameServer.broadcast(msg)
       if gameServer != null && now - lastMultiplayerHeartbeat >= 2.0 then
@@ -4303,6 +4511,7 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
       case Screen.HostGame  => renderHostGame()
 
   private def renderWorld(): Unit =
+    val camera = eyePosition
     if !centerChunkReady then
       forceCameraChunkRing(0)
       processChunkWorkMainThread(0, 8)
@@ -4339,7 +4548,7 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
     val far = sqrt(
       farBlocks.toDouble * farBlocks + verticalRange.toDouble * verticalRange
     ) + Terrain.chunkSize * 2
-    val top = tan(toRadians((fov + dynamicFov).max(45f).min(110f)) / 2.0) * near
+    val top = tan(toRadians((fov + dynamicFov).max(45f).min(130f)) / 2.0) * near
     glFrustum(-top * aspect, top * aspect, -top, top, near, far)
     glMatrixMode(GL_MODELVIEW); glLoadIdentity()
     // Walking sway belongs to the viewmodel. Keep this camera identical for
@@ -4478,6 +4687,7 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
             glClientActiveTexture(GL_TEXTURE0)
             renderRemotePlayers3D()
             renderZombies3D()
+            renderDroppedItems()
           }
           resetGlArraysAndBuffers()
           glEnable(GL_TEXTURE_2D); activeAtlas.bind()
@@ -4506,6 +4716,7 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
     glClientActiveTexture(GL_TEXTURE0)
     renderRemotePlayers3D()
     renderZombies3D()
+    renderDroppedItems()
     restoreChunkRenderState(isUnder, fogR, fogG, fogB)
     glEnable(GL_TEXTURE_2D); activeAtlas.bind()
     glEnableClientState(GL_VERTEX_ARRAY); glEnableClientState(GL_COLOR_ARRAY);
@@ -4857,9 +5068,15 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
         .update(z, dt, targets, exposed, rain, activeBlockAt, waterLevelAt, zombiePlanning)
         .foreach { attack =>
           emitZombieVoice(z, 2)
-          if attack.name == playerName then damagePlayer(attack.damage, "zombie")
+          val target = if attack.name == playerName then camera
+          else remotePlayers.get(attack.name).map(_.targetPos).getOrElse(z.pos)
+          val delta = Vec3(target.x - z.pos.x, 0, target.z - z.pos.z)
+          val push = (if delta.lengthSquared > 0.001f then delta.normalized
+                      else BlockboxRaycast.viewDirection(z.yaw, 0)) * 4.2f
+          if attack.name == playerName then applyCombatDamage(attack.damage, "zombie", push)
           else if gameServer != null then
-            gameServer.sendTo(attack.name, s"ZDAMAGE|${attack.damage}")
+            gameServer.sendTo(attack.name, s"ZDAMAGE|${attack.damage}|${push.x}|${push.z}")
+            gameServer.broadcast(s"HURT|${attack.name}")
         }
       if z.health < beforeHealth then emitZombieVoice(z, if z.health <= 0 then 3 else 1)
     }
@@ -4876,13 +5093,15 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
     val mobs = zombies
       .filter(_.health > 0)
       .flatMap(z =>
-        ZombieSystem.rayDistance(camera, viewDirection, z, blockDistance).map(d => (d, Left(z.id)))
+        ZombieSystem
+          .rayDistance(eyePosition, viewDirection, z, blockDistance)
+          .map(d => (d, Left(z.id)))
       )
     val players = remotePlayers.valuesIterator
       .filter(_.mode == GameMode.Survival)
       .flatMap(p =>
         CombatSystem
-          .rayPlayer(camera, viewDirection, p.pos, blockDistance)
+          .rayPlayer(eyePosition, viewDirection, p.pos, blockDistance, p.crouch)
           .map(d => (d, Right(p.name)))
       )
       .toVector
@@ -4900,12 +5119,174 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
               else hitPlayer(playerName, name)
         true
 
+  private def salvageCache(actor: String, x: Int, y: Int, z: Int): Unit =
+    SupplyCaches.contents(worldSeed, x, y, z).foreach { (item, count) =>
+      spawnDrop(item, count, Vec3(x + 0.5f, y + 0.5f, z + 0.5f))
+    }
+    if actor == playerName then fieldJournal.salvagedCache()
+    else if gameServer != null then gameServer.sendTo(actor, "CACHEFOUND")
+
+  private def spawnDrop(block: Block, count: Int, position: Vec3): Unit =
+    var remaining = count.max(0)
+    while remaining > 0 do
+      val amount = remaining.min(64)
+      droppedItems.spawn(block, amount, position)
+      remaining -= amount
+    itemSyncTimer = 0f
+
+  private def dropHeldStack(all: Boolean): Unit =
+    val slot = selectedBlock.max(0).min(hotbarBlocks.length - 1)
+    val block = hotbarBlocks(slot)
+    val count = if gameMode == GameMode.Creative then (if all then 64 else 1)
+    else if all then hotbarCounts(slot)
+    else hotbarCounts(slot).min(1)
+    if DroppedItems.valid(block) && count > 0 && pendingTosses.size < 8 then
+      val direction = viewDirection
+      val origin = eyePosition - Vec3(0, 0.25f, 0)
+      if isClientOnlyMultiplayer then
+        sendPlayerPositionNetwork()
+        val id = System.nanoTime().max(1)
+        pendingTosses(id) = (block, count)
+        gameClient.send(s"TOSS|$id|${block.ordinal}|$count")
+        if gameMode == GameMode.Survival then consumeSelectedHotbar(count)
+      else if droppedItems
+          .spawn(block, count, origin, direction * 3.5f + Vec3(0, 1.2f, 0), playerName)
+          .nonEmpty
+      then
+        if gameMode == GameMode.Survival then consumeSelectedHotbar(count)
+        itemSyncTimer = 0f
+
+  private def sendItemOffer(offer: DroppedItems.Offer): Unit =
+    if gameServer != null then
+      gameServer.sendTo(
+        offer.player,
+        s"ITEMOFFER|${offer.id}|${offer.block.ordinal}|${offer.count}"
+      )
+    itemSyncTimer = 0f
+
+  private def updateDroppedItems(dt: Float): Unit =
+    failedTosses.toVector.foreach { request =>
+      pendingTosses.get(request).foreach { (block, count) =>
+        if inventoryRoomFor(block) >= count then
+          gainItem(block, count); pendingTosses.remove(request); failedTosses.remove(request)
+      }
+    }
+    if isClientOnlyMultiplayer then
+      droppedItems.entities.valuesIterator.foreach { e =>
+        e.pos += (e.target - e.pos) * (1f - exp(-dt * 18f).toFloat)
+        e.age += dt; e.delay = (e.delay - dt).max(0)
+      }
+      pickupRequestTimer -= dt
+      if pickupRequestTimer <= 0f && gameMode == GameMode.Survival then
+        droppedItems.entities.valuesIterator
+          .find(e =>
+            e.delay <= 0 && (e.pos - (camera - Vec3(
+              0,
+              1f,
+              0
+            ))).lengthSquared < 3.6f && inventoryRoomFor(e.block) > 0
+          )
+          .foreach { e =>
+            gameClient.send(s"PICK|${e.id}|${inventoryRoomFor(e.block).min(e.count)}")
+            pickupRequestTimer = 0.20f
+          }
+    else
+      droppedItems.update(
+        dt,
+        activeBlockAt,
+        p => loadedChunkForBlock(floor(p.x).toInt, floor(p.z).toInt).nonEmpty
+      )
+      if gameMode == GameMode.Survival then
+        droppedItems.entities.values.toVector.foreach { e =>
+          if e.delay <= 0 && (e.pos - (camera - Vec3(0, 1f, 0))).lengthSquared < 3.6f then
+            val room = inventoryRoomFor(e.block)
+            if room > 0 then
+              droppedItems
+                .reserve(playerName, e.id, room.min(e.count), camera - Vec3(0, 1f, 0))
+                .foreach { offer =>
+                  gainItem(offer.block, offer.count);
+                  droppedItems.resolve(playerName, offer.id, accepted = true)
+                  playSpatialSound(BlockboxSounds.Action.Ui, offer.block, 0, 0.18f, 0)
+                }
+        }
+      itemSyncTimer -= dt
+      if gameServer != null && itemSyncTimer <= 0 then
+        itemSnapshotSerial += 1
+        DroppedItems
+          .messages(droppedItems.snapshot, itemSnapshotSerial)
+          .foreach(gameServer.broadcast)
+        itemSyncTimer = 0.15f
+
+  private def renderDroppedItems(): Unit =
+    val visible = droppedItems.entities.valuesIterator
+      .filter(e => (e.pos - camera).lengthSquared < 48f * 48f)
+      .toVector
+    if visible.isEmpty then return
+    resetGlArraysAndBuffers()
+    glEnable(GL_DEPTH_TEST); glDisable(GL_CULL_FACE)
+    // Small soft contact shadows anchor resting items, including unshaded mode.
+    glDisable(GL_TEXTURE_2D); glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glDepthMask(false)
+    visible
+      .filter(e =>
+        e.grounded || getWorldBlock(
+          floor(e.pos.x).toInt,
+          floor(e.pos.y - 0.15f).toInt,
+          floor(e.pos.z).toInt
+        ).solid
+      )
+      .foreach { e =>
+        val y = floor(e.pos.y - 0.15f).toFloat + 1.003f
+        glBegin(GL_TRIANGLE_FAN); glColor4f(0, 0, 0, 0.16f)
+        glVertex3f(e.pos.x - camera.x, y, e.pos.z - camera.z)
+        for i <- 0 to 16 do
+          val a = i * Pi * 2 / 16
+          glColor4f(0, 0, 0, 0f)
+          glVertex3f(
+            e.pos.x - camera.x + cos(a).toFloat * 0.24f,
+            y,
+            e.pos.z - camera.z + sin(a).toFloat * 0.24f
+          )
+        glEnd()
+      }
+    glDepthMask(true); glDisable(GL_BLEND)
+    val shaded = shadersEnabled && shaderPipeline != null && shaderPipeline.beginEntityLighting()
+    BlockboxPlayerModel.beginLighting(viewSpace = false, shaderColor = shaded)
+    glEnable(GL_ALPHA_TEST); glAlphaFunc(GL_GREATER, 0.1f)
+    visible.foreach { e =>
+      val point = e.pos + Vec3(0, 0.10f + sin(e.age * 2.4f + e.id).toFloat * 0.035f, 0)
+      if shaded then entityLightLevels(point, sampleBelow = 0f)
+      val light = if shaded then (1f, 1f, 1f) else lightColorAt(point.x, point.y, point.z)
+      glPushMatrix(); glTranslatef(point.x - camera.x, point.y, point.z - camera.z)
+      glRotatef((e.age * 42f + e.id * 37f) % 360, 0, 1, 0)
+      val copies =
+        if e.count > 32 then 4 else if e.count > 16 then 3 else if e.count > 1 then 2 else 1
+      for copy <- 0 until copies do
+        glPushMatrix()
+        glTranslatef(copy * 0.018f, copy * 0.018f, copy * 0.025f)
+        if Block.isItem(e.block) then
+          glScalef(0.42f, 0.42f, 0.42f)
+          val center = ItemModel.centerFromGrip; glTranslatef(center.x, center.y, center.z)
+          ItemModel.render(e.block, light)
+        else if e.block == Block.Torch then
+          glScalef(0.5f, 0.5f, 0.5f); drawHeldTorch(light, inFist = false)
+        else if FloraModel.contains(e.block) then
+          glScalef(0.45f, 0.45f, 0.45f); drawHeldFlora(e.block, light)
+        else drawHeldBlockCube(e.block, 0.25f, light)
+        glPopMatrix()
+      glPopMatrix()
+    }
+    glDisable(GL_ALPHA_TEST); BlockboxPlayerModel.endLighting()
+    if shaded then shaderPipeline.endEntityLighting()
+
   private def combatant(name: String): Option[(Vec3, Float, Float, Block, GameMode)] =
-    if name == playerName then Some((camera, yaw, pitch, heldHotbarBlock, gameMode))
+    if name == playerName then Some((eyePosition, yaw, pitch, heldHotbarBlock, gameMode))
     else
       remotePlayers
         .get(name)
-        .map(p => (p.targetPos, p.targetYaw, p.targetPitch, p.heldBlock, p.mode))
+        .map(p =>
+          (PlayerStance.eye(p.targetPos, p.crouch), p.targetYaw, p.targetPitch, p.heldBlock, p.mode)
+        )
 
   private def acceptCombatHit(attacker: String): Boolean =
     val now = System.nanoTime() * 1e-9
@@ -4942,21 +5323,24 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
           val loot = if z.heldItem != Block.Air && zombieRng.nextFloat() < 0.15f then z.heldItem
           else if zombieRng.nextFloat() < 0.12f then Block.IronIngot
           else Block.CoalLump
-          if attacker == playerName then
-            gainItem(loot, 1)
-            fieldJournal.defeatedZombie()
-          else if gameServer != null then gameServer.sendTo(attacker, s"ZLOOT|${loot.ordinal}|1")
+          spawnDrop(loot, 1, z.pos + Vec3(0, 0.5f, 0))
+          if attacker == playerName then fieldJournal.defeatedZombie()
+          else if gameServer != null then gameServer.sendTo(attacker, "ZKILL")
 
   private def hitPlayer(attacker: String, victim: String): Unit =
     if attacker == victim then return
     for (from, ry, rp, held, _) <- combatant(attacker); (target, _, _, _, mode) <- combatant(victim)
     do
+      val targetCrouch = if victim == playerName then crouchAmount
+      else remotePlayers.get(victim).map(_.crouch).getOrElse(0f)
+      val canonicalTarget = target + Vec3(0, PlayerStance.eyeDrop * targetCrouch, 0)
       if mode == GameMode.Survival && CombatSystem.canHit(
           from,
           ry,
           rp,
-          target,
-          activeBlockAt
+          canonicalTarget,
+          activeBlockAt,
+          targetCrouch
         ) && acceptCombatHit(attacker)
       then
         val push = Vec3(target.x - from.x, 0, target.z - from.z).normalized * 4.2f
@@ -4979,6 +5363,62 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
       movePlayer(playerKnockback.x * dt, 0, playerKnockback.z * dt)
       playerKnockback = playerKnockback * exp(-dt * 7f).toFloat
     else playerKnockback = Vec3(0, 0, 0)
+
+  override protected def soundEvent(
+      action: BlockboxSounds.Action,
+      block: Block,
+      variant: Int
+  ): Unit =
+    if multiplayerMode && Set(
+        BlockboxSounds.Action.Step,
+        BlockboxSounds.Action.Land,
+        BlockboxSounds.Action.Splash
+      ).contains(action)
+    then
+      if gameClient != null then gameClient.send(s"SFX|${action.ordinal}|${block.ordinal}|$variant")
+      else broadcastActionSound(playerName, action, block, variant, camera - Vec3(0, 1.25f, 0))
+
+  private def broadcastActionSound(
+      actor: String,
+      action: BlockboxSounds.Action,
+      block: Block,
+      variant: Int,
+      position: Vec3
+  ): Unit =
+    if gameServer != null then
+      gameServer.broadcast(
+        s"SOUND|${networkSafeName(actor)}|${action.ordinal}|${block.ordinal}|$variant|${position.x}|${position.y}|${position.z}"
+      )
+      if actor != playerName then hearActionSound(actor, action, block, variant, position)
+
+  private def hearActionSound(
+      actor: String,
+      action: BlockboxSounds.Action,
+      block: Block,
+      variant: Int,
+      position: Vec3
+  ): Unit =
+    if actor != playerName then
+      val delta = position - eyePosition
+      val distance = sqrt(delta.lengthSquared).toFloat
+      val radius = if action == BlockboxSounds.Action.Step then 22f else 32f
+      if distance < radius then
+        val end = eyePosition + delta * ((distance - 0.8f).max(0f) / distance.max(0.001f))
+        val mix = SpatialAudio.mix(
+          eyePosition,
+          yaw,
+          position,
+          radius,
+          !ZombieSystem.visible(eyePosition, end, activeBlockAt),
+          isUnderwater
+        )
+        playSpatialSound(
+          action,
+          block,
+          variant,
+          mix.gain * (if action == BlockboxSounds.Action.Step then 0.55f else 0.85f),
+          mix.pan
+        )
 
   private def zombieVoice(event: Int, variant: Int, where: Vec3): Unit =
     val delta = where - camera
@@ -5020,6 +5460,7 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
       heldHotbarBlock
     )
     local.gait = cameraBobPhase; local.stride = cameraBobAmount; local.swing = viewmodelKick
+    local.crouching = playerCrouching; local.crouch = crouchAmount
     val ownItem = if heldHotbarBlock == Block.Air then None
     else Some(() => drawHeldItemAtGrip(heldHotbarBlock, (1, 1, 1)))
     BlockboxPlayerModel.render(
@@ -5054,9 +5495,9 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
     }
     BlockboxPlayerModel.endLighting()
 
-  private def entityLightLevels(eye: Vec3): Unit =
+  private def entityLightLevels(eye: Vec3, sampleBelow: Float = 0.6f): Unit =
     val (sky, block) =
-      lightLevelsAt(floor(eye.x).toInt, floor(eye.y - 0.6f).toInt, floor(eye.z).toInt)
+      lightLevelsAt(floor(eye.x).toInt, floor(eye.y - sampleBelow).toInt, floor(eye.z).toInt)
     org.lwjgl.opengl.GL13.glMultiTexCoord2f(GL_TEXTURE1, block * 16f, sky * 16f)
 
   private def renderZombies3D(): Unit =
@@ -5122,7 +5563,7 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
     if sceneShaded then shaderPipeline.endEntityLighting()
 
   private def projectWorldToScreen(pos: Vec3): Option[(Float, Float, Float)] =
-    val rel = pos - camera
+    val rel = pos - eyePosition
     val yr = toRadians(yaw).toFloat
     val pr = toRadians(pitch).toFloat
     val cy = cos(yr).toFloat; val sy = sin(yr).toFloat
@@ -5133,7 +5574,8 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
     val z2 = sp * rel.y + cp * z1
     if z2 >= -0.12f then return None
     val aspect = framebufferWidth.toFloat / framebufferHeight.toFloat.max(1f)
-    val tanHalf = tan(toRadians(fov) / 2.0).toFloat
+    val dynamicFov = if screen == Screen.Playing then viewFovOffset else 0f
+    val tanHalf = tan(toRadians((fov + dynamicFov).max(45f).min(130f)) / 2.0).toFloat
     val ndcX = (x1 / -z2) / (tanHalf * aspect)
     val ndcY = (y2 / -z2) / tanHalf
     if ndcX < -1.35f || ndcX > 1.35f || ndcY < -1.35f || ndcY > 1.35f then None
@@ -5149,7 +5591,7 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
       }.reverse
     do
       if now - rp.lastSeen <= 8.0 then
-        projectWorldToScreen(rp.pos + Vec3(0f, 0.72f, 0f)).foreach { case (sx, sy, dist) =>
+        projectWorldToScreen(rp.eyePosition + Vec3(0f, 0.72f, 0f)).foreach { case (sx, sy, dist) =>
           val label = rp.name
           val scale = (1.22f - dist * 0.008f).max(0.86f).min(1.18f) * uiScale.max(0.92f)
           val tw = textWidth(label, scale)
@@ -6152,6 +6594,12 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
 
   private def renderCrosshair(): Unit =
     BlockboxRender2D.renderCrosshair(framebufferWidth, framebufferHeight)
+    if combatCooldown > 0f then
+      val s = uiScale; val width = 16f * s
+      val x = framebufferWidth * 0.5f - width * 0.5f; val y = framebufferHeight * 0.5f + 12f * s
+      val ready = (1f - combatCooldown / CombatSystem.cooldown.toFloat).max(0).min(1)
+      rect(x, y, width, 2f * s, 0.04f, 0.04f, 0.04f, 0.65f)
+      rect(x, y, width * ready, 2f * s, 0.9f, 0.9f, 0.85f, 0.9f)
 
   private def renderUnderwaterOverlay(): Unit =
     if !UnderwaterEffect.render(framebufferWidth, framebufferHeight, gameTime, waterDepthAt(camera))
@@ -6517,10 +6965,8 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
     glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
     glEnable(GL_TEXTURE_2D); activeAtlas.bind();
     glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE)
-    // One immediate-mode batch for the whole debris cloud. The old implementation did
-    // glBegin/glEnd per particle, which amplified driver overhead exactly when many
-    // blocks were being mined. Three crossed textured shards give much better volume
-    // while keeping submission to a single batch.
+    // One camera-facing quad per particle, in one batch (a third of the old geometry).
+    val (right, up) = ParticleBillboard.axes(yaw, pitch)
     glBegin(GL_QUADS)
     blockParticles.foreach { p =>
       val lifeFrac = (p.life / p.maxLife).max(0f).min(1f)
@@ -6528,7 +6974,8 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
       val alpha = (lifeFrac * 1.25f).min(1f) * fadeIn.max(0.35f)
       val s0 = p.size * (0.72f + lifeFrac * 0.28f)
       val c = cos(p.rotation).toFloat; val sn = sin(p.rotation).toFloat
-      val rx = c * s0; val rz = sn * s0
+      val horizontal = (right * c + up * sn) * s0
+      val vertical = (up * c - right * sn) * s0
       val px = p.pos.x - camera.x; val py = p.pos.y; val pz = p.pos.z - camera.z
       val uv00 = activeAtlas.uv(p.block, p.face, p.u0, p.v0)
       val uv10 = activeAtlas.uv(p.block, p.face, p.u1, p.v0)
@@ -6537,18 +6984,11 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
       val shade = p.brightness * (0.78f + lifeFrac * 0.22f)
       val (lr, lg, lb) = lightColorAt(p.pos.x, p.pos.y, p.pos.z)
       glColor4f(shade * p.tint._1 * lr, shade * p.tint._2 * lg, shade * p.tint._3 * lb, alpha)
-      glTexCoord2f(uv00._1, uv00._2); glVertex3f(px - rx, py - s0, pz - rz)
-      glTexCoord2f(uv10._1, uv10._2); glVertex3f(px + rx, py - s0, pz + rz)
-      glTexCoord2f(uv11._1, uv11._2); glVertex3f(px + rx, py + s0, pz + rz)
-      glTexCoord2f(uv01._1, uv01._2); glVertex3f(px - rx, py + s0, pz - rz)
-      glTexCoord2f(uv00._1, uv00._2); glVertex3f(px - rz, py - s0 * 0.82f, pz + rx)
-      glTexCoord2f(uv10._1, uv10._2); glVertex3f(px + rz, py - s0 * 0.82f, pz - rx)
-      glTexCoord2f(uv11._1, uv11._2); glVertex3f(px + rz, py + s0 * 0.82f, pz - rx)
-      glTexCoord2f(uv01._1, uv01._2); glVertex3f(px - rz, py + s0 * 0.82f, pz + rx)
-      glTexCoord2f(uv00._1, uv00._2); glVertex3f(px - s0 * 0.72f, py, pz - s0 * 0.72f)
-      glTexCoord2f(uv10._1, uv10._2); glVertex3f(px + s0 * 0.72f, py, pz - s0 * 0.72f)
-      glTexCoord2f(uv11._1, uv11._2); glVertex3f(px + s0 * 0.72f, py, pz + s0 * 0.72f)
-      glTexCoord2f(uv01._1, uv01._2); glVertex3f(px - s0 * 0.72f, py, pz + s0 * 0.72f)
+      def vertex(uv: (Float, Float), dx: Float, dy: Float): Unit =
+        val offset = horizontal * dx + vertical * dy
+        glTexCoord2f(uv._1, uv._2); glVertex3f(px + offset.x, py + offset.y, pz + offset.z)
+      vertex(uv00, -1, -1); vertex(uv10, 1, -1)
+      vertex(uv11, 1, 1); vertex(uv01, -1, 1)
     }
     glEnd()
     glColor4f(1f, 1f, 1f, 1f); glBindTexture(GL_TEXTURE_2D, 0); glDepthMask(true);
@@ -7285,7 +7725,7 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
             Some(
               (renderDistance - minRenderDistance).toFloat / (maxRenderDistance - minRenderDistance)
             )
-          case "fov"    => Some((fov - 50f) / 50f)
+          case "fov"    => Some((fov - 50f) / 70f)
           case "fog"    => Some((fogDensity - 0.6f) / 2.4f)
           case "clouds" =>
             Some(
@@ -7985,7 +8425,7 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
         ).exists(b => !TorchMount.canSupport(b))
       then
         setActiveBlock(x, y, z, Block.Air)
-        refundTorch(None)
+        spawnDrop(Block.Torch, 1, Vec3(x + 0.5f, y + 0.3f, z + 0.5f))
         sendBlockNetwork(x, y, z, Block.Air.id)
     }
 
@@ -8167,16 +8607,12 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
           waterLevels.remove((wx, wy, wz))
         changed = true
 
-    val overrideKeys = networkBlockOverrides.keys.filter { case (wx, _, wz) =>
-      chunkCoordBlock(wx) == cx && chunkCoordBlock(wz) == cz
-    }.toList
+    val overrideKeys = networkBlockOverrides.positionsInChunk(cx, cz)
     overrideKeys.foreach { case (wx, wy, wz) =>
       networkBlockOverrides.get((wx, wy, wz)).foreach(block => applyOne(wx, wy, wz, block))
     }
 
-    val pendingKeys = pendingNetworkBlocks.keys.filter { case (wx, _, wz) =>
-      chunkCoordBlock(wx) == cx && chunkCoordBlock(wz) == cz
-    }.toList
+    val pendingKeys = pendingNetworkBlocks.positionsInChunk(cx, cz)
     pendingKeys.foreach { case (wx, wy, wz) =>
       pendingNetworkBlocks.remove((wx, wy, wz)).foreach { block =>
         networkBlockOverrides((wx, wy, wz)) = block
@@ -8188,30 +8624,31 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
     }
     if changed then refreshChunkAndNeighbors(cx, cz)
 
+  private var streamRadius = -1
+  private var streamOffsets = Vector.empty[(Int, Int)]
   private def loadChunks(ccx: Int, ccz: Int): Unit =
     val worldRadius = renderDistanceBlocks + Terrain.chunkSize
     val radiusSq = worldRadius * worldRadius
     val chunkRadius = (worldRadius / 16) + 2
-    val maxPerFrame = if chunks.isEmpty then 6
-    else if renderDistance >= 14 then 2
-    else if renderDistance >= 10 then 3
-    else 4
-    val wanted = collection.mutable.Set.empty[(Int, Int)]
+    // Keep workers supplied independently of host frame rate, with a bounded queue.
+    val maxPerFrame = (64 - pendingChunkCreates.size()).max(0).min(12)
     var loaded = 0
-    for ring <- 0 to chunkRadius; dx <- -ring to ring; dz <- -ring to ring do
-      if abs(dx) == ring || abs(dz) == ring then
-        val wx = (ccx + dx) * 16 + 8; val wz = (ccz + dz) * 16 + 8
-        val cx = ccx + dx; val cz = ccz + dz
-        val dxb = wx - ccx * 16; val dzb = wz - ccz * 16
-        if dxb * dxb + dzb * dzb <= radiusSq then
-          wanted += ((cx, cz))
-          if !chunks.contains((cx, cz)) && loaded < maxPerFrame then
-            // Saved-chunk reads and procedural generation both happen on chunk workers.
-            // The old path did Files.exists + full chunk reads here on the frame thread.
-            if requestChunkCreate(cx, cz) then loaded += 1
-          else if chunks.contains((cx, cz)) then
-            val chunk = chunks((cx, cz))
-            if !chunk.hasMesh && !chunk.meshReady then queueChunkMesh(chunk)
+    if streamRadius != chunkRadius then
+      streamRadius = chunkRadius
+      streamOffsets = (for dx <- -chunkRadius to chunkRadius; dz <- -chunkRadius to chunkRadius
+      yield (dx, dz)).sortBy(p => (p._1 * p._1 + p._2 * p._2)).toVector
+    for (dx, dz) <- streamOffsets do
+      val wx = (ccx + dx) * 16 + 8; val wz = (ccz + dz) * 16 + 8
+      val cx = ccx + dx; val cz = ccz + dz
+      val dxb = wx - ccx * 16; val dzb = wz - ccz * 16
+      if dxb * dxb + dzb * dzb <= radiusSq then
+        if !chunks.contains((cx, cz)) && loaded < maxPerFrame then
+          // Saved-chunk reads and procedural generation both happen on chunk workers.
+          // The old path did Files.exists + full chunk reads here on the frame thread.
+          if requestChunkCreate(cx, cz) then loaded += 1
+        else if chunks.contains((cx, cz)) then
+          val chunk = chunks((cx, cz))
+          if !chunk.hasMesh && !chunk.meshReady then queueChunkMesh(chunk)
     // Retain a small halo beyond the actual load/draw radius. Crossing a chunk
     // boundary should not immediately serialize and destroy the chunk behind you,
     // only to load it again two seconds later when you turn around. This dramatically
@@ -8428,10 +8865,7 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
         chunks.get(key) match
           case Some(chunk) =>
             if !chunk.isDisposed && !chunk.hasMesh then queueChunkMesh(chunk)
-          case None =>
-            if canUseLocalChunkSaves && loadChunkIfSaved(cx, cz) then
-              chunks.get(key).foreach(queueChunkMesh)
-            else requestChunkCreate(cx, cz)
+          case None => requestChunkCreate(cx, cz)
         dz += 1
       dx += 1
 
@@ -8439,7 +8873,7 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
     BlockboxRaycast.viewDirection(yaw, pitch)
 
   private def raycast(maxDistance: Float = modManager.rules.get("reach")): Option[RayHit] =
-    BlockboxRaycast.raycast(camera, viewDirection, maxDistance, activeBlockAt, torchMountAt)
+    BlockboxRaycast.raycast(eyePosition, viewDirection, maxDistance, activeBlockAt, torchMountAt)
 
   private def sendBlockNetwork(x: Int, y: Int, z: Int, blockId: Byte, logAxis: Int = 0): Unit =
     if multiplayerMode then
@@ -8481,17 +8915,32 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
           val (loot, quantity) = modManager.drops.getOrElse(block, ToolSystem.drop(block))
           val needsDropRoom =
             event.dropItem && gameMode == GameMode.Survival && loot != Block.Air && block != Block.Water
-          if needsDropRoom && inventoryRoomFor(loot) < quantity then
-            addChatMessage("Inventory full")
+          val stacks = Vector(loot -> quantity) ++ (if block == Block.SupplyCrate then
+                                                      SupplyCaches.contents(worldSeed, x, y, z)
+                                                    else Vector.empty)
+          if needsDropRoom && !isClientOnlyMultiplayer && !droppedItems.canDropAll(
+              stacks,
+              Vec3(x + 0.5f, y + 0.5f, z + 0.5f)
+            )
+          then addChatMessage("Pick up nearby dropped items before mining more")
           else
             if event.dropItem && gameMode == GameMode.Survival && loot != Block.Air && block != Block.Air && block != Block.Water && !isClientOnlyMultiplayer
-            then gainItem(loot, quantity)
+            then
+              spawnDrop(loot, quantity, Vec3(x + 0.5f, y + 0.5f, z + 0.5f))
+              if block == Block.SupplyCrate then salvageCache(playerName, x, y, z)
             if isClientOnlyMultiplayer then
               pendingPlayerEdits((x, y, z)) =
                 (Block.Air, 0, event.dropItem && gameMode == GameMode.Survival)
             if block != Block.Air && block != Block.Water then
               spawnBlockBreakParticles(x, y, z, block)
             playBreakSound(block)
+            broadcastActionSound(
+              playerName,
+              BlockboxSounds.Action.Break,
+              block,
+              Math.floorMod(x ^ y ^ z, 64),
+              Vec3(x + 0.5f, y + 0.6f, z + 0.5f)
+            )
             setActiveBlock(x, y, z, Block.Air)
             dirtyChunkAt(x, z)
             triggerSandFallAbove(x, y, z)
@@ -8536,6 +8985,13 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
                 val placedAxis =
                   if Block.isLog(finalBlock) then LogAxis.fromNormal(hit.normal) else LogAxis.Y
                 playPlaceSound(finalBlock)
+                broadcastActionSound(
+                  playerName,
+                  BlockboxSounds.Action.Place,
+                  finalBlock,
+                  Math.floorMod(x ^ y ^ z, 64),
+                  Vec3(x + 0.5f, y + 0.6f, z + 0.5f)
+                )
                 setActiveBlock(x, y, z, finalBlock, placedAxis, mount.getOrElse(TorchMount.Floor))
                 if isClientOnlyMultiplayer then
                   pendingPlayerEdits((x, y, z)) =

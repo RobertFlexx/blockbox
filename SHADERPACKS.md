@@ -4,9 +4,9 @@ blockbox can load glsl shader packs. they are not a full iris/optifine clone. if
 
 three packs ship with the game. `default` is the quiet one. `ultra` is the high-quality raster pack (soft shadows, volumetric clouds, reflective water, god rays). `ray-traced` is that same grade plus hardware ray-traced sunlight, occlusion, one bounce and reflections on a GPU that can do them; it falls back to `ultra`'s shadow maps otherwise.
 
-`ultra` is selected in `shaderpacks/active.txt`, so normal gameplay uses the same
-renderer as the quality previews. The Resources screen can select any installed
-pack. A running game needs restarting to load updated game code.
+Choose `ultra` in the Resources screen to use the renderer shown in the quality
+previews. The selection is stored in `shaderpacks/active.txt`; each installed pack
+can be selected there. A running game needs restarting to load updated game code.
 
 Ultra and Ray Traced share linear HDR surface lighting and a single filmic display conversion. Clear days use neutral sunlight and blue skylight; low sun brings amber light and distance haze; nights use blue moonlight, stars and warm torches. Both draw eroded cumulus volumes with self-shadowing, darken in storms, and respond to lightning. Water combines depth absorption, refraction, fine ripples, Fresnel reflections and a broken sun or moon highlight. Level water captures the mirrored terrain and characters at half resolution, including objects outside the main view. Mipmapped colour and cutout coverage filter distant leaves without filling their holes. Flowing water uses refined screen reflections with a cloudy sky fallback.
 
@@ -19,6 +19,9 @@ crests become smaller than a few pixels. The underside uses absorbed reflection
 instead of mirroring sharp floor texels overhead. Shadow filtering keeps full
 penumbra samples at soft edges and skips them for lit or contact-shadow pixels;
 volumetric shadow rays skip directions with no visible shaft contribution.
+The engine also caches unchanged scalar and sampler uniform values per linked
+program. This reduces driver calls without reducing resolution or shader samples;
+the gameplay render test compares the cached and uncached output pixel for pixel.
 
 Terrain supplies its compatibility face shade separately in `gl_MultiTexCoord1.z`; HDR packs remove it before lighting, retaining the material's albedo and biome tint. Water uses that coordinate for its shore wave weight instead. Leaf canopies retain one interior layer behind their cutouts; fully buried faces stay culled. This gives ordinary generated trees depth in direct views and reflections rather than rendering a hollow shell. [Luanti's node drawtypes](https://api.luanti.org/nodes/#node-drawtypes) describe the related distinction between external-only and interior-visible foliage.
 

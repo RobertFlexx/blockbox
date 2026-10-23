@@ -1,6 +1,6 @@
 # Survival in blockbox
 
-Press **J** for the field journal (three pages at normal sizes, with larger readable rows on compact screens). It records eighteen survival, building, exploration and combat objectives, shows recipes,
+Press **J** for the field journal (four pages at normal sizes, with larger readable rows on compact screens). It records nineteen survival, building, exploration and combat objectives, shows recipes,
 and saves progress with the world. Track a goal to pin it to the HUD; completed goals
 have a one-time reward. A full inventory leaves the reward available to collect later. Press **E** for the 3×3 crafting grid.
 Right click an inventory stack to split it; right click a crafting slot to place one item.
@@ -109,7 +109,7 @@ The inventory has a live character preview, nine-column storage, the crafting gr
 and the hotbar. The creative catalog has category tabs and a search field; click an
 item, then a hotbar slot to equip its stack. Right click a catalog hotbar slot to clear it.
 
-Multiplayer uses protocol **8**. All players need this version. The host controls
+Multiplayer uses protocol **9**. All players need this version. The host controls
 zombie movement, spawning, attacks and drops; held tools and blocks are synchronized.
 
 ## Places to explore
@@ -139,3 +139,28 @@ uses 256-frame quanta, flushes every pipe write and drops stale queued impacts;
 block actions trigger audio before mesh work. Output devices add their own latency.
 
 See `FORMATTING.md` for the repeatable formatting command and release checks.
+
+## Dropped items and shared worlds
+
+Breaking a block releases a physical item. Walk close to collect it; a full inventory
+leaves it in the world. Press **Q** to throw one held item, or **Ctrl+Q** to throw the
+whole stack. Other players can collect it. Items spin, bob, merge into stacks and
+float in water; unattended drops disappear after five minutes. The host validates
+and reserves multiplayer pickups so two people cannot collect the same stack.
+
+Guests returning under the same player name resume their last position and facing
+for that hosted world and session. The same running client also retains inventory,
+journal progress and unfinished item transfers for that exact session. A new host
+session starts fresh guest session state.
+
+Nearby footsteps, landings, splashes and accepted block actions are audible in
+multiplayer, with stereo direction, distance falloff and muffling through cover.
+Hold **Shift** to crouch: the camera lowers, the body bends and other players see
+the pose. Crouching reduces collision height and prevents standing into a low roof.
+Combat knockback applies in PvP and against zombies, with a short recovery indicator
+under the crosshair. The field-of-view slider supports 50–120 degrees.
+
+Ruins in newly generated terrain can contain sealed **Supply Crates**. Break a crate
+to recover planks, useful supplies, gold and occasional diamonds. The journal's
+“Salvage the old world” goal rewards finding three caches. Each generated cache can
+be salvaged once; the broken block is saved like other world edits.

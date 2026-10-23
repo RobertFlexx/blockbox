@@ -45,9 +45,11 @@ object BlockboxRaycast:
         return Some(
           RayHit((x, y, z), (x + normal._1, y + normal._2, z + normal._3), normal, distance)
         )
-      if block == Block.Torch || FloraModel.contains(block) then
+      val padBelowCell = block == Block.Water && blockAt(x, y + 1, z) == Block.LilyPad
+      if block == Block.Torch || FloraModel.contains(block) || padBelowCell then
+        val modelY = if padBelowCell then y + 1 else y
         val box = if block == Block.Torch then TorchModel.bounds(torchMountAt(x, y, z))
-        else FloraModel.bounds(block)
+        else FloraModel.bounds(if padBelowCell then Block.LilyPad else block)
         var entry = 0f; var exit = maxDistance; var face = normal; var valid = true
         def slab(
             origin: Float,
@@ -67,10 +69,12 @@ object BlockboxRaycast:
             exit = exit.min(far)
             if entry > exit then valid = false
         slab(camera.x, dir.x, x + box.x0, x + box.x1, (-1, 0, 0))
-        slab(camera.y, dir.y, y + box.y0, y + box.y1, (0, -1, 0))
+        slab(camera.y, dir.y, modelY + box.y0, modelY + box.y1, (0, -1, 0))
         slab(camera.z, dir.z, z + box.z0, z + box.z1, (0, 0, -1))
         if valid && exit >= distance && entry <= tMaxX.min(tMaxY).min(tMaxZ) then
-          return Some(RayHit((x, y, z), (x + face._1, y + face._2, z + face._3), face, entry))
+          return Some(
+            RayHit((x, modelY, z), (x + face._1, modelY + face._2, z + face._3), face, entry)
+          )
       if tMaxX <= tMaxY && tMaxX <= tMaxZ then
         x += stepX; distance = tMaxX; tMaxX += tDeltaX; normal = (-stepX, 0, 0)
       else if tMaxY <= tMaxZ then

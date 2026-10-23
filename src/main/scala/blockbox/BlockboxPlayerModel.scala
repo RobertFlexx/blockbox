@@ -102,14 +102,22 @@ object BlockboxPlayerModel:
       zombieStyle: Int = 0
   ): Unit =
     val stride = player.stride
+    val crouch = if zombie then 0f else player.crouch.max(0).min(1)
     val swim = if zombie then swimming.max(0f).min(1f) else 0f
-    val walk = sin(player.gait).toFloat * (if zombie then 25f - 16f * swim else 32f) * stride
+    val walk =
+      sin(player.gait).toFloat * (if zombie then 25f - 16f * swim else 32f - crouch * 12f) * stride
     val mine = sin((1f - player.swing) * Pi).toFloat * (if player.swing > 0f then 1f else 0f)
     val headYaw = ((player.yaw - player.bodyYaw + 540f) % 360f - 180f).max(-70f).min(70f)
     val idle = 1f - stride.max(0f).min(1f)
     val breath = sin(time * 1.9f).toFloat * 0.006f * idle
     val legLength = 12 * px
     val shoulder = 24 * px
+    val hipHeight = legLength * cos(toRadians(30f * crouch)).toFloat
+    val torsoLength = (shoulder - legLength) * (1f - crouch * 0.20f)
+    val hipBack = 0.12f * crouch
+    def upperBodyFrame(): Unit =
+      glTranslatef(0, hipHeight, hipBack)
+      glRotatef(-28f * crouch, 1, 0, 0)
     bindSkin(color, light, zombie, hurt, zombieStyle)
     glPushMatrix()
     glTranslatef(
@@ -126,27 +134,30 @@ object BlockboxPlayerModel:
       glTranslatef(0, legLength, 0); glRotatef(-3f * stride - 9f * swim, 1, 0, 0);
       glTranslatef(0, -legLength, 0)
     // Torso: shirt, collar, pocket, belt and buckle are all painted on one 8x12x4 box.
-    skinBox(-4 * px, legLength, -2 * px, 4 * px, shoulder + breath, 2 * px, 16, 16, 8, 12, 4)
+    glPushMatrix(); upperBodyFrame()
+    skinBox(-4 * px, 0, -2 * px, 4 * px, torsoLength + breath, 2 * px, 16, 16, 8, 12, 4)
     // Head turns around the neck, independently of the body's trailing yaw. The hair
     // layer sits half a pixel outside the head, like Minecraft's hat layer.
-    glPushMatrix(); glTranslatef(0f, shoulder + breath, 0f)
+    glPushMatrix(); glTranslatef(0f, torsoLength + breath, 0f)
+    glRotatef(28f * crouch, 1, 0, 0)
     glRotatef(-headYaw, 0f, 1f, 0f); glRotatef(-player.pitch.max(-85f).min(85f), 1f, 0f, 0f)
     skinBox(-4 * px, 0f, -4 * px, 4 * px, 8 * px, 4 * px, 0, 0, 8, 8, 8)
     val o = 0.5f * px
     glEnable(GL_ALPHA_TEST); glAlphaFunc(GL_GREATER, 0.5f)
     skinBox(-4 * px - o, -o, -4 * px - o, 4 * px + o, 8 * px + o, 4 * px + o, 32, 0, 8, 8, 8)
     glDisable(GL_ALPHA_TEST)
-    glPopMatrix()
+    glPopMatrix(); glPopMatrix()
     var side = -1
     while side <= 1 do
       val leg = walk * side
       val (lu, lv) = if side > 0 then (0, 16) else (16, 48)
-      glPushMatrix(); glTranslatef(side * 2 * px, legLength, 0f); glRotatef(leg, 1f, 0f, 0f)
+      glPushMatrix(); glTranslatef(side * 2 * px, hipHeight, hipBack);
+      glRotatef(leg + crouch * 30f, 1f, 0f, 0f)
       skinBox(-2 * px, -legLength * 0.5f, -2 * px, 2 * px, 0f, 2 * px, lu, lv, 4, 12, 4, 0f, 0.5f)
       glTranslatef(0f, -legLength * 0.5f, 0f);
       glRotatef(
         if zombie then -pow((1f + sin(player.gait * side).toFloat) * 0.5f, 2).toFloat * 8f * stride
-        else -leg.max(0f) * 0.35f,
+        else -leg.max(0f) * 0.35f - crouch * 60f,
         1f,
         0f,
         0f
@@ -155,16 +166,18 @@ object BlockboxPlayerModel:
       glPopMatrix()
       val action = if side == 1 then mine else 0f
       val sway = sin(time * 1.3f + side).toFloat * 2.2f * idle
-      glPushMatrix(); glTranslatef(side * (6 * px + 0.003f), shoulder - 0.04f + breath, 0f)
+      glPushMatrix(); upperBodyFrame()
+      glTranslatef(side * (6 * px + 0.003f), torsoLength - 0.04f + breath, 0f)
       glRotatef(side * (3f + sway * 0.5f) + action * 12f, 0f, 0f, 1f)
       val holding = side == 1 && heldItem.isDefined
       val paddle = sin(player.gait + side * Pi.toFloat * 0.5f).toFloat
-      val zombieArm = 81f + sway - leg * 0.20f + swim * (-17f + paddle * 26f) + action * 32f
+      val zombieArm = 90f + sway - leg * 0.20f + swim * (-17f + paddle * 26f) + action * 32f
       glRotatef(
         if zombie then zombieArm
         else
-          -leg * (if holding then 0.18f else 0.85f) + action * 65f + sway + (if holding then 24f
-                                                                             else 0f)
+          -leg * (if holding then 0.18f
+                  else 0.85f) + action * 65f + sway + crouch * 23f + (if holding then 12f
+                                                                      else 0f)
         ,
         1f,
         0f,
@@ -172,9 +185,9 @@ object BlockboxPlayerModel:
       )
       armGeometry(
         side,
-        if zombie then 5f + swim * (18f + paddle * 9f)
-        else if holding then 12f + action * 16f
-        else -abs(leg) * 0.18f + action * 22f,
+        if zombie then swim * (18f + paddle * 9f)
+        else if holding then action * 10f
+        else action * 12f,
         (if holding then 0.9f else 0.15f) + action * 0.75f,
         if holding then heldItem else None
       )

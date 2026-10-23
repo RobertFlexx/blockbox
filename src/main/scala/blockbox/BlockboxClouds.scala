@@ -19,7 +19,6 @@ object BlockboxClouds:
   private var cachedRadius = 0
   private var cachedCover = -1
   private var cachedSeed = 0L
-  private var cachedTimeBand = Int.MinValue
   private val starts = new Array[Int](12)
   private val counts = new Array[Int](12)
 
@@ -39,7 +38,6 @@ object BlockboxClouds:
   private def rebuild(gx: Int, gz: Int, radius: Int, cover: Int, seed: Long, time: Float): Unit =
     originX = gx; originZ = gz; cachedRadius = radius; cachedCover = cover; cachedSeed = seed
     val span = radius * 2 + 3
-    cachedTimeBand = (time / 20f).toInt
     val heights = new Array[Float](span * span)
     val stormy = new Array[Boolean](span * span)
     val (driftX, driftZ) = WeatherField.cloudOffset(time)
@@ -136,7 +134,7 @@ object BlockboxClouds:
     val cover = (storm.max(0f).min(1f) * 5f).toInt
     if vbo == 0 || abs(gx.toLong - originX) > 4 || abs(
         gz.toLong - originZ
-      ) > 4 || cachedRadius != radius || cachedCover != cover || cachedSeed != seed || cachedTimeBand != (time / 20f).toInt
+      ) > 4 || cachedRadius != radius || cachedCover != cover || cachedSeed != seed
     then rebuild(gx, gz, radius, cover, seed, time)
     BlockboxRender2D.resetGlArraysAndBuffers()
     glDisable(GL_TEXTURE_2D); glDisable(GL_BLEND); glDisable(GL_CULL_FACE)

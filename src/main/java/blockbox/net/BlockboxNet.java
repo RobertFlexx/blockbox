@@ -6,7 +6,7 @@ import java.util.Arrays;
 import java.util.Locale;
 
 public final class BlockboxNet {
-  public static final int PROTOCOL_VERSION = 8;
+  public static final int PROTOCOL_VERSION = 9;
   public static final int MAX_LINE_LENGTH = 8192;
   public static final int MAX_PACKET_PARTS = 64;
   public static final int MAX_FIELD_LENGTH = MAX_LINE_LENGTH;
@@ -141,9 +141,10 @@ public final class BlockboxNet {
     public final float pitch;
     public final int color;
     public final int heldBlock;
+    public final boolean crouching;
 
-    private PositionPacket(
-        String name, float x, float y, float z, float yaw, float pitch, int color, int heldBlock) {
+    private PositionPacket(String name, float x, float y, float z, float yaw, float pitch,
+        int color, int heldBlock, boolean crouching) {
       this.name = name;
       this.x = x;
       this.y = y;
@@ -152,6 +153,7 @@ public final class BlockboxNet {
       this.pitch = pitch;
       this.color = color;
       this.heldBlock = heldBlock;
+      this.crouching = crouching;
     }
   }
 
@@ -435,7 +437,8 @@ public final class BlockboxNet {
         ? Math.floorMod(parseInt(packet.part(7), Integer.MIN_VALUE, Integer.MAX_VALUE), colors)
         : 0;
     int heldBlock = packet.size() >= 9 ? parseInt(packet.part(8), 0, 255) : 0;
-    return new PositionPacket(name, x, y, z, yaw, pitch, color, heldBlock);
+    boolean crouching = packet.size() >= 10 && parseInt(packet.part(9), 0, 1) == 1;
+    return new PositionPacket(name, x, y, z, yaw, pitch, color, heldBlock, crouching);
   }
 
   public static String playerToken(String name, int color, int colorCount) {
@@ -449,9 +452,14 @@ public final class BlockboxNet {
 
   public static String pos(String name, float x, float y, float z, float yaw, float pitch,
       int color, int colorCount, int heldBlock) {
+    return pos(name, x, y, z, yaw, pitch, color, colorCount, heldBlock, false);
+  }
+
+  public static String pos(String name, float x, float y, float z, float yaw, float pitch,
+      int color, int colorCount, int heldBlock, boolean crouching) {
     return line(POS, safeName(name), floatText(x), floatText(y), floatText(z), floatText(yaw),
         floatText(pitch), Integer.toString(Math.floorMod(color, Math.max(1, colorCount))),
-        Integer.toString(Math.max(0, Math.min(255, heldBlock))));
+        Integer.toString(Math.max(0, Math.min(255, heldBlock))), crouching ? "1" : "0");
   }
 
   public static String block(int x, int y, int z, int blockId) {

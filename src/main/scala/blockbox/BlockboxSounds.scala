@@ -27,7 +27,8 @@ object BlockboxSounds:
 
   def material(block: Block): Material = block match
     case Block.Wood | Block.BirchWood | Block.PineWood | Block.AcaciaWood | Block.Planks |
-        Block.BirchPlanks | Block.PinePlanks | Block.AcaciaPlanks | Block.Torch =>
+        Block.BirchPlanks | Block.PinePlanks | Block.AcaciaPlanks | Block.Torch |
+        Block.SupplyCrate =>
       Wood
     case Block.Grass             => Grass
     case Block.Dirt | Block.Clay => Dirt

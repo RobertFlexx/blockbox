@@ -1675,6 +1675,8 @@ final class TerrainGenerator(
       if hash(x + dx, y, z + dz, 7315) > 0.52f then
         setIfOpen(x + dx, y, z + dz, masonry(x + dx, y, z + dz))
     }
+    setIfOpen(x, y, z, Block.Stone)
+    setIfOpen(x, y + 1, z, Block.SupplyCrate)
 
   private def placeTree(blocks: Array[Byte], lx: Int, y: Int, lz: Int, height: Int): Unit =
     val baseX = 0; val baseZ = 0

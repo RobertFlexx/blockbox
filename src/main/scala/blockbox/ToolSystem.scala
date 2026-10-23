@@ -42,7 +42,7 @@ object ToolSystem:
     case Block.Stone | Block.Coal | Block.Copper | Block.IronOre | Block.GoldOre | Block.Diamond |
         Block.Brick | Block.Furnace | Block.FurnaceLit =>
       Some(Kind.Pickaxe)
-    case b if Block.isLog(b) || isPlanks(b)                              => Some(Kind.Axe)
+    case b if Block.isLog(b) || isPlanks(b) || b == Block.SupplyCrate    => Some(Kind.Axe)
     case Block.Dirt | Block.Grass | Block.Sand | Block.Snow | Block.Clay => Some(Kind.Shovel)
     case Block.Leaves | Block.BirchLeaves | Block.PineLeaves | Block.AcaciaLeaves =>
       Some(Kind.Sword)
@@ -65,11 +65,12 @@ object ToolSystem:
 
   def damage(item: Block): Float = spec(item).map(_.damage).getOrElse(1f)
   def drop(block: Block): (Block, Int) = block match
-    case Block.Coal       => (Block.CoalLump, 1)
-    case Block.Diamond    => (Block.DiamondGem, 1)
-    case Block.FurnaceLit => (Block.Furnace, 1)
-    case Block.Glass      => (Block.Air, 0)
-    case _                => (block, 1)
+    case Block.SupplyCrate => (Block.Planks, 4)
+    case Block.Coal        => (Block.CoalLump, 1)
+    case Block.Diamond     => (Block.DiamondGem, 1)
+    case Block.FurnaceLit  => (Block.Furnace, 1)
+    case Block.Glass       => (Block.Air, 0)
+    case _                 => (block, 1)
 
 /** Breathing is simulation state, so pausing or drawing extra frames cannot consume air. */
 final class AirSupply:

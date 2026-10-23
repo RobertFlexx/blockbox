@@ -18,7 +18,15 @@ object FloraModel:
   private val meshes = blocks.map(block => block -> build(block)).toMap
   def vertices(block: Block): Vector[Vertex] = meshes.getOrElse(block, Vector.empty)
   def bounds(block: Block): TorchModel.Bounds =
-    TorchModel.Bounds(0.05f, 0f, 0.05f, 0.95f, if block == Block.Reeds then 1f else 0.04f, 0.95f)
+    val offset = if block == Block.LilyPad then WaterSurface.fullHeight - 1f else 0f
+    TorchModel.Bounds(
+      0.05f,
+      offset,
+      0.05f,
+      0.95f,
+      offset + (if block == Block.Reeds then 1f else 0.04f),
+      0.95f
+    )
 
   def supported(block: Block, x: Int, y: Int, z: Int, at: (Int, Int, Int) => Block): Boolean =
     if !contains(block) then true
@@ -52,7 +60,7 @@ object FloraModel:
         // triangles would fight each other with opposite lighting normals.
         quad(p, uv)
     else
-      val y = if block == Block.LilyPad then 0.012f else 0.03125f
+      val y = if block == Block.LilyPad then WaterSurface.fullHeight - 1f + 0.012f else 0.03125f
       val p = Vector(Vec3(0, y, 1), Vec3(1, y, 1), Vec3(1, y, 0), Vec3(0, y, 0))
       quad(p, uv)
     result.result()

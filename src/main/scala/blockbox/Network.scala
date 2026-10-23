@@ -25,7 +25,8 @@ final class GameServer(
     requiredModList: String,
     environmentSnapshot: () => String,
     rulesSnapshot: () => String = () => "",
-    hostHeld: () => Int = () => 0
+    hostHeld: () => Int = () => 0,
+    hostCrouching: () => Boolean = () => false
 ):
   import GameServer.*
   // Keep this explicitly IPv4 for local/LAN testing. 0.0.0.0 accepts 127.0.0.1, LAN, and ZeroTier IPv4.
@@ -43,6 +44,28 @@ final class GameServer(
   initialSnapshot.foreach { edit => worldEdits.put((edit._1, edit._2, edit._3), edit) }
   private val running = java.util.concurrent.atomic.AtomicBoolean(true)
   private val sessionId = UUID.randomUUID().toString
+  private final case class SessionPose(
+      pos: Vec3,
+      yaw: Float,
+      pitch: Float,
+      held: Int,
+      crouching: Boolean
+  )
+  private val returningPlayers = new ConcurrentHashMap[String, SessionPose]()
+  private val tossReplies =
+    collection.mutable.Map.empty[String, collection.mutable.LinkedHashMap[Long, Boolean]]
+  def tossResult(name: String, id: Long): Option[Boolean] = tossReplies.synchronized {
+    tossReplies.get(playerKey(name)).flatMap(_.get(id))
+  }
+  def finishToss(name: String, id: Long, accepted: Boolean): Unit =
+    tossReplies.synchronized {
+      val history =
+        tossReplies.getOrElseUpdate(playerKey(name), collection.mutable.LinkedHashMap.empty)
+      history(id) = accepted
+      while history.size > 128 do history.remove(history.head._1)
+    }
+    sendTo(name, s"TOSSACK|$id|${if accepted then 1 else 0}")
+  private def playerKey(name: String): String = name.toLowerCase(java.util.Locale.ROOT)
   private val acceptThread = BlockboxSockets.daemonThread(
     "blockbox-server-accept",
     () =>
@@ -120,9 +143,21 @@ final class GameServer(
       yaw: Float,
       pitch: Float,
       colorId: Int,
-      heldBlock: Int = 0
+      heldBlock: Int = 0,
+      crouching: Boolean = false
   ): String =
-    BlockboxNet.pos(name, pos.x, pos.y, pos.z, yaw, pitch, colorId, colorCount, heldBlock)
+    BlockboxNet.pos(
+      name,
+      pos.x,
+      pos.y,
+      pos.z,
+      yaw,
+      pitch,
+      colorId,
+      colorCount,
+      heldBlock,
+      crouching
+    )
 
   private def blockMessage(
       x: Int,
@@ -140,12 +175,28 @@ final class GameServer(
 
   private def sendCurrentPositionsTo(client: ClientHandler): Unit =
     client.send(
-      posMessage(safeHostName, hostPosition(), hostYaw(), hostPitch(), safeHostColor, hostHeld())
+      posMessage(
+        safeHostName,
+        hostPosition(),
+        hostYaw(),
+        hostPitch(),
+        safeHostColor,
+        hostHeld(),
+        hostCrouching()
+      )
     )
     clients.synchronized {
       clients.filter(c => (c ne client) && c.active && c.registered && c.hasPosition).foreach { c =>
         client.send(
-          posMessage(c.onlineName, c.lastPos, c.lastYaw, c.lastPitch, c.colorId, c.lastHeld)
+          posMessage(
+            c.onlineName,
+            c.lastPos,
+            c.lastYaw,
+            c.lastPitch,
+            c.colorId,
+            c.lastHeld,
+            c.lastCrouching
+          )
         )
       }
     }
@@ -198,6 +249,7 @@ final class GameServer(
     private val packetBudget = PacketBudget(100, 200, System.nanoTime())
     private val editBudget = PacketBudget(24, 48, System.nanoTime())
     private val chatBudget = PacketBudget(3, 6, System.nanoTime())
+    private val soundBudget = PacketBudget(12, 16, System.nanoTime())
     @volatile var active = true
     @volatile var registered = false
     @volatile var readyForBroadcast = false
@@ -205,6 +257,7 @@ final class GameServer(
     @volatile var colorId = 0
     @volatile var hasPosition = false
     @volatile var lastPos: Vec3 = spawn
+    @volatile var lastCrouching = false
     @volatile var lastYaw: Float = 0f
     @volatile var lastPitch: Float = 0f
     @volatile var lastHeld: Int = 0
@@ -279,17 +332,22 @@ final class GameServer(
                 colorId = assignColor()
                 registered = true
               }
+              Option(returningPlayers.get(playerKey(onlineName))).foreach { saved =>
+                lastPos = saved.pos; lastYaw = saved.yaw; lastPitch = saved.pitch
+                lastHeld = saved.held; lastCrouching = saved.crouching; hasPosition = true
+              }
               val worldMsg = BlockboxNet.world(
                 worldSeed,
-                spawn.x,
-                spawn.y,
-                spawn.z,
+                lastPos.x,
+                lastPos.y,
+                lastPos.z,
                 colorId,
                 safeHostName,
                 safeHostColor,
                 sessionId
               )
               send(worldMsg)
+              send(s"RESUME|$lastYaw|$lastPitch|${if lastCrouching then 1 else 0}")
               readyForBroadcast = true
               send(environmentSnapshot())
               val rules = rulesSnapshot()
@@ -305,7 +363,17 @@ final class GameServer(
               if !serverEvents.offer(joinMsg) then throw IOException("Server queue full")
               broadcast(joinMsg)
               sendCurrentPositionsTo(this)
-              broadcast(posMessage(onlineName, spawn, 0f, 0f, colorId))
+              broadcast(
+                posMessage(
+                  onlineName,
+                  lastPos,
+                  lastYaw,
+                  lastPitch,
+                  colorId,
+                  lastHeld,
+                  lastCrouching
+                )
+              )
               val snapshot =
                 try
                   import scala.jdk.CollectionConverters.*
@@ -352,7 +420,8 @@ final class GameServer(
               val target = Vec3(bp.x + 0.5f, bp.y + 0.5f, bp.z + 0.5f)
               val validBlock = bp.blockId < Block.values.length && CustomBlocks.registered(
                 block
-              ) && (block == Block.Air || block.solid || block == Block.Water || block == Block.Torch || CustomBlocks
+              ) && (block == Block.Air || block.solid || block == Block.Water || block == Block.Torch || FloraModel
+                .contains(block) || CustomBlocks
                 .isSlot(block)) && block != Block.Bedrock
               if !validBlock || bp.y == 0 || (target - lastPos).lengthSquared > 100f || !editBudget
                   .allow(System.nanoTime())
@@ -417,10 +486,69 @@ final class GameServer(
               lastPos = Vec3(pp.x, pp.y, pp.z)
               hasPosition = true
               lastYaw = pp.yaw; lastPitch = pp.pitch; lastHeld = pp.heldBlock
-              val clean = posMessage(onlineName, lastPos, pp.yaw, pp.pitch, colorId, pp.heldBlock)
+              lastCrouching = pp.crouching
+              val key = playerKey(onlineName)
+              if returningPlayers.size() < 512 || returningPlayers.containsKey(key) then
+                returningPlayers.put(
+                  key,
+                  SessionPose(lastPos, lastYaw, lastPitch, lastHeld, lastCrouching)
+                )
+              val clean = posMessage(
+                onlineName,
+                lastPos,
+                pp.yaw,
+                pp.pitch,
+                colorId,
+                pp.heldBlock,
+                pp.crouching
+              )
               if !serverEvents.offer(clean) then throw IOException("Server queue full")
               broadcast(clean)
             catch case e: Exception => noteBadPacket("POS", e)
+          else if registered && packet.is("SFX") then
+            try
+              packet.requireExact(4)
+              val action = BlockboxNet.parseInt(packet.part(1), 0, 4)
+              val block = BlockboxNet.parseInt(packet.part(2), 0, Block.values.length - 1)
+              val variant = BlockboxNet.parseInt(packet.part(3), 0, 63)
+              if Set(0, 3, 4).contains(action) && soundBudget.allow(System.nanoTime()) then
+                serverEvents.offer(s"AUDIO|$onlineName|$action|$block|$variant")
+            catch case e: Exception => noteBadPacket("SFX", e)
+          else if registered && packet.is("TOSS") then
+            try
+              packet.requireExact(4)
+              val request = packet.part(1).toLong
+              val item = BlockboxNet.parseInt(packet.part(2), 0, Block.values.length - 1)
+              val count = BlockboxNet.parseInt(packet.part(3), 1, 64)
+              if tossResult(onlineName, request).nonEmpty then
+                send(s"TOSSACK|$request|${
+                    if tossResult(onlineName, request).contains(true) then 1 else 0
+                  }")
+              else if request <= 0 || !DroppedItems.valid(
+                  Block.fromOrdinal(item)
+                ) || item != lastHeld
+              then finishToss(onlineName, request, accepted = false)
+              else if !editBudget.allow(System.nanoTime()) || !serverEvents.offer(
+                  s"TOSS|$onlineName|$request|$item|$count"
+                )
+              then finishToss(onlineName, request, accepted = false)
+            catch case e: Exception => noteBadPacket("TOSS", e)
+          else if registered && packet.is("PICK") then
+            try
+              packet.requireExact(3)
+              val entity = BlockboxNet.parseInt(packet.part(1), 1, Int.MaxValue)
+              val count = BlockboxNet.parseInt(packet.part(2), 1, 64)
+              if editBudget.allow(System.nanoTime()) then
+                serverEvents.offer(s"PICK|$onlineName|$entity|$count")
+            catch case e: Exception => noteBadPacket("PICK", e)
+          else if registered && packet.is("ITEMACK") then
+            try
+              packet.requireExact(3)
+              val offer = packet.part(1).toLong
+              val accepted = BlockboxNet.parseInt(packet.part(2), 0, 1)
+              if offer > 0 && editBudget.allow(System.nanoTime()) then
+                serverEvents.offer(s"ITEMACK|$onlineName|$offer|$accepted")
+            catch case e: Exception => noteBadPacket("ITEMACK", e)
           else if registered && packet.is(BlockboxNet.SWING) then
             packet.requireExact(2)
             val clean = "SWING|" + onlineName

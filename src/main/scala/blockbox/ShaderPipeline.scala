@@ -48,6 +48,7 @@ final class BlockboxShaderPipeline(
       val mipmapBuffers: Array[Int]
   ):
     private val uniformCache = mutable.HashMap.empty[String, Int]
+    val scalarValues = mutable.LongMap.empty[Long]
     var customVersion = -1L
     def uniform(name: String): Int =
       uniformCache.getOrElseUpdate(name, glGetUniformLocation(id, name))
@@ -55,6 +56,12 @@ final class BlockboxShaderPipeline(
   private val fallbackVertexFile = File(rootDir, "assets/shaders/world.vert")
   private val fallbackFragmentFile = File(rootDir, "assets/shaders/world.frag")
   private val shaderpacksRoot = File(rootDir, "shaderpacks")
+  private[blockbox] var cacheUniformValues = true
+  private[blockbox] var scalarUploads = 0L
+  private def scalarChanged(p: Program, location: Int, bits: Long): Boolean =
+    val changed = !p.scalarValues.get(location.toLong).contains(bits)
+    p.scalarValues(location.toLong) = bits
+    !cacheUniformValues || changed
 
   private var worldPrograms = Map.empty[Int, Program]
   private var postPrograms = Vector.empty[Program]
@@ -1123,13 +1130,19 @@ final class BlockboxShaderPipeline(
       glActiveTexture(GL_TEXTURE0 + unit)
       glEnable(GL_TEXTURE_2D)
       glBindTexture(GL_TEXTURE_2D, tex)
-      glUniform1i(u, unit)
+      if scalarChanged(p, u, unit.toLong) then { glUniform1i(u, unit); scalarUploads += 1 }
 
   private def set1i(p: Program, name: String, value: Int): Unit =
-    val u = p.uniform(name); if u >= 0 then glUniform1i(u, value)
+    val u = p.uniform(name)
+    if u >= 0 && scalarChanged(p, u, value.toLong) then {
+      glUniform1i(u, value); scalarUploads += 1
+    }
 
   private def set1f(p: Program, name: String, value: Float): Unit =
-    val u = p.uniform(name); if u >= 0 then glUniform1f(u, value)
+    val u = p.uniform(name)
+    if u >= 0 && scalarChanged(p, u, java.lang.Float.floatToRawIntBits(value).toLong) then {
+      glUniform1f(u, value); scalarUploads += 1
+    }
 
   private def set2f(p: Program, name: String, a: Float, b: Float): Unit =
     val u = p.uniform(name); if u >= 0 then glUniform2f(u, a, b)
