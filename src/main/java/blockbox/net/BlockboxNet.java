@@ -6,7 +6,7 @@ import java.util.Arrays;
 import java.util.Locale;
 
 public final class BlockboxNet {
-  public static final int PROTOCOL_VERSION = 9;
+  public static final int PROTOCOL_VERSION = 10;
   public static final int MAX_LINE_LENGTH = 8192;
   public static final int MAX_PACKET_PARTS = 64;
   public static final int MAX_FIELD_LENGTH = MAX_LINE_LENGTH;

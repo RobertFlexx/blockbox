@@ -25,6 +25,14 @@ the gameplay render test compares the cached and uncached output pixel for pixel
 
 Terrain supplies its compatibility face shade separately in `gl_MultiTexCoord1.z`; HDR packs remove it before lighting, retaining the material's albedo and biome tint. Water uses that coordinate for its shore wave weight instead. Leaf canopies retain one interior layer behind their cutouts; fully buried faces stay culled. This gives ordinary generated trees depth in direct views and reflections rather than rendering a hollow shell. [Luanti's node drawtypes](https://api.luanti.org/nodes/#node-drawtypes) describe the related distinction between external-only and interior-visible foliage.
 
+Plant meshes encode `-(rootY + 1)` in `gl_MultiTexCoord1.z`. Ultra and Ray Traced
+use that marker to anchor grass and fern roots while their tips move. Wind phases
+use world coordinates, so matching leaf edges stay together across chunk borders.
+Canopy exposure treats opaque neighbors as occluders: fully enclosed core faces
+are removed while exposed cutouts and their shallow inner layer remain visible.
+Block debris uses opaque alpha-tested billboards with depth writes and the same
+linear lighting as entities, avoiding translucent holes over the scene.
+
 Visual tests include the normal gameplay frame, with HUD and first-person rendering. For a read-only GPU review of a saved position with the current user preferences, set `BLOCKBOX_REVIEW_WORLD` to the saved world directory when running `blockbox.runShaderPipelineTests`. It renders both packs at 1920×1080 and writes previews to the supplied artifact directory. Shader selections are isolated in a temporary directory. Constructed lake scenes remain lighting regression fixtures; their water depth, terrain and field of view differ from generated worlds.
 
 ## drop a pack in

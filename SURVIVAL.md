@@ -11,16 +11,19 @@ Right click an inventory stack to split it; right click a crafting slot to place
 2. Stack two planks vertically to make four sticks. Any wood species works for tools.
 3. Make a wooden pickaxe. Mine stone, then make stone tools and a furnace.
 4. Put eight stone around an empty center to craft the furnace. Place it and right click it.
-5. Mine iron with a stone pickaxe. Select iron ore in the furnace, supply coal or wood,
-   and choose **Smelt One** or **Smelt All**. Each item takes four seconds. Take the output.
+5. Mine iron with a stone pickaxe. Put ore into the furnace input and coal or wood into
+   the fuel slot. Smelting starts automatically. Each item takes four seconds. Take the output.
 6. Make an iron pickaxe, explore below Y 20, and look for small diamond deposits.
    Diamond gems make the fastest tools.
 
-Furnaces draw input and fuel from your inventory. Coal smelts eight items, a log two,
+Furnaces have separate input and fuel stacks. Coal smelts eight items, a log two,
 a plank one and a half, and two sticks one. Smelt a log to make charcoal (the coal item).
-The furnace uses the same nine-column inventory slots as the backpack. Click a smeltable
-stack to select it; shift-click to queue the whole stack. Output is collected by clicking
-the output slot. Stop cancels the pending batch without spending unprocessed input.
+The furnace uses the same nine-column inventory slots as the backpack. Left click moves
+a stack; right click splits a stack or places one item. Shift-click ore or fuel to move it
+into the appropriate furnace slot. Shift-click other materials to move between storage
+and hotbar. Click the output to carry it, or shift-click to collect it directly. Pause
+preserves unsmelted input and fuel; Resume continues. Take input/fuel returns the buffered
+stacks as far as inventory space allows. Furnace stacks and the cursor stack are saved.
 A running furnace changes its placed texture, emits warm light and small flame/smoke
 particles, and plays a quiet positional fire loop. It keeps working when you walk away;
 its chunk stays loaded until it finishes. Breaking it stops the batch. Multiplayer
@@ -107,9 +110,12 @@ reach, view direction, obstruction and weapon damage.
 
 The inventory has a live character preview, nine-column storage, the crafting grid
 and the hotbar. The creative catalog has category tabs and a search field; click an
-item, then a hotbar slot to equip its stack. Right click a catalog hotbar slot to clear it.
+item, then a hotbar slot to equip its stack. The Inventory tab opens physical storage,
+including in Creative. Creative players also collect dropped items. Existing inventory
+stacks have the same move/split/merge behavior in both modes. Delete in the creative
+catalog discards the cursor stack or clears the selected hotbar slot when search is unfocused.
 
-Multiplayer uses protocol **9**. All players need this version. The host controls
+Multiplayer uses protocol **10**. All players need this version. The host controls
 zombie movement, spawning, attacks and drops; held tools and blocks are synchronized.
 
 ## Places to explore
@@ -164,3 +170,29 @@ Ruins in newly generated terrain can contain sealed **Supply Crates**. Break a c
 to recover planks, useful supplies, gold and occasional diamonds. The journal's
 “Salvage the old world” goal rewards finding three caches. Each generated cache can
 be salvaged once; the broken block is saved like other world edits.
+
+## Editing text and the living world
+
+Chat, search, player names, server addresses, world names and seeds support normal line
+editing: Left/Right, Home/End, Shift to select, Ctrl+A, Ctrl+C/X/V, Ctrl+Z and Ctrl+Y
+(or Ctrl+Shift+Z). Command works for clipboard shortcuts on macOS. Ctrl/Alt+Left/Right
+move by words; Ctrl/Alt+Backspace/Delete remove words. Holding Backspace/Delete repeats.
+Click to place the cursor, drag to select, or Shift-click to extend a selection. Long
+lines scroll with the cursor. Pasting stays on one line and respects each field's limits.
+
+Grass spreads to nearby uncovered dirt in adequate light; covered grass dies back to
+dirt. Mining a grass block drops dirt. New terrain has seeded, biome-tinted grass clumps,
+ferns, meadow flowers and sparse desert shrubs alongside marsh reeds and autumn litter.
+Plants have no collision box, and their roots remain anchored while their tips sway.
+
+Removing logs starts gradual leaf decay. Nearby logs support connected leaves; placed
+leaves persist, and unloaded neighbors never trigger destruction. Pending decay survives
+saving. Hidden canopy core faces are culled while a shallow inner leaf layer preserves
+the cutout appearance. Cold-biome leaves collect snow during sustained precipitation
+and thaw slowly afterward; snow cover is saved and synchronized with the host.
+
+Mining plays quiet material-specific taps throughout the breaking animation. Nearby
+players hear validated, directional mining taps as well as the final break. Grass
+footsteps use softer CC0 recordings by Ashe Kirk / OwlStorm; source details are in the
+audio credits. Block debris is opaque cutout geometry with depth testing, rather than
+translucent patches through which the scenery shows.

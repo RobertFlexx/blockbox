@@ -66,3 +66,20 @@ is quiet, fades in/out, and attenuates with distance; it does not stack without 
 referenced at the creator's request. Mono conversion, gentle compression,
 low/high-pass filtering and boundary fades keep water entry soft and natural.
 Sand walking now alternates the six recorded Fantozzi takes listed above.
+
+## Soft grass footsteps and mining taps
+
+`foley/grass_step_000.ogg`–`002.ogg` are three separate performances by **Ashe Kirk
+(OwlStorm / Owlish Media)**, licensed CC0 by the creator:
+[Grassy Footstep 1](https://freesound.org/people/OwlStorm/sounds/151230/),
+[Grassy Footstep 2](https://freesound.org/people/OwlStorm/sounds/151229/), and
+[Grassy Footstep 3](https://freesound.org/people/OwlStorm/sounds/151228/).
+The publicly available high-quality MP3 previews were converted to mono 44.1 kHz
+Vorbis, de-clicked (including the transient noted on take 2), gently compressed,
+filtered at 70 Hz / 3.2 kHz and given short boundary fades. The manifest records
+each downloaded source URL and the final asset's SHA-256.
+
+Continuous mining taps are short, cached low-pass edits of the corresponding
+credited material placement recordings, with smooth onset/tail envelopes and a
+lower playback gain. Materials without recordings use the game's original foley.
+No Minecraft recordings are used.

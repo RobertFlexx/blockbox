@@ -273,8 +273,22 @@ object ShaderPipelineTest:
         }
         .toMap
     finally recorded.close()
-    assert(clips.size == 63)
+    assert(clips.size == 66)
     import BlockboxSounds.{Action, Material}
+    for i <- 0 until 3 do
+      assert(
+        RecordedAudio.effect(Action.Step, Material.Grass, i).get eq clips(
+          f"foley/grass_step_$i%03d.ogg"
+        )
+      )
+    for material <- Material.values; variant <- 0 until BlockboxSounds.variants do
+      val tap = RecordedAudio.effect(Action.Dig, material, variant).get
+      assert(tap.nonEmpty && tap.forall(_.isFinite) && tap.head == 0f && tap.last == 0f)
+      assert(tap.length <= (BlockboxSounds.sampleRate * 0.12f).toInt)
+      assert(
+        tap eq RecordedAudio.effect(Action.Dig, material, variant).get,
+        "mining taps are cached"
+      )
     for i <- 0 until 4 do
       assert(
         RecordedAudio.effect(Action.Step, Material.Snow, i).get eq clips(
@@ -497,7 +511,7 @@ object ShaderPipelineTest:
       finally
         chunks.values.foreach(_.dispose()); atlas.destroy()
       println(
-        "[polish-render] 63 recordings, loop continuity, HDR sun/moon and distant storm passed"
+        "[polish-render] 66 recordings, soft mining taps, loop continuity, HDR sun/moon and distant storm passed"
       )
     finally pipeline.destroy();
     BlockboxSky.destroy(); blockbox.io.BlockboxFiles.deleteRecursive(temporary)
@@ -855,6 +869,8 @@ object ShaderPipelineTest:
       materialLightingFrames(game, atlas, pipeline, chunks, output, width, height)
       survivalFrames(game, atlas, pipeline, chunks, output, width, height)
       inventoryFrames(game, output, width, height)
+      polishedUiFrames(game, output, width, height)
+      fontAndHeartFrames(output, width, height)
       cinematicFrames(game, atlas, pipeline, chunks, output, width, height)
     finally
       chunks.values.foreach(_.dispose()); atlas.destroy(); pipeline.destroy(); fovea.release()
@@ -862,6 +878,80 @@ object ShaderPipelineTest:
       TorchEffects.destroy(); BlockboxSkin.dispose()
       RainRenderer.destroy(); UnderwaterEffect.destroy()
       blockbox.io.BlockboxFiles.deleteRecursive(temporary)
+
+  private def polishedUiFrames(game: Blockbox, output: Path, width: Int, height: Int): Unit =
+    def show(name: String, screen: Screen, method: String): Unit =
+      set(game, "screen", screen)
+      glUseProgram(0); glBindFramebuffer(GL_FRAMEBUFFER, 0); glViewport(0, 0, width, height)
+      glClearColor(0.12f, 0.16f, 0.18f, 1); glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
+      val render = game.getClass.getDeclaredMethod(method); render.setAccessible(true);
+      render.invoke(game)
+      capture(output.resolve(name + ".png"), width, height); noError(name)
+    show("classic-title", Screen.MainMenu, "renderMainMenu")
+    set(game, "worldNameInput", "A quiet valley to explore with friends")
+    set(game, "createWorldNameFocused", true)
+    set(game, "screen", Screen.CreateWorld)
+    InteractionSystemsTest.call(
+      game,
+      "handleTextKey",
+      Int.box(org.lwjgl.glfw.GLFW.GLFW_KEY_A),
+      Int.box(org.lwjgl.glfw.GLFW.GLFW_MOD_CONTROL)
+    )
+    show("classic-create-text-selection", Screen.CreateWorld, "renderCreateWorld")
+    set(game, "joinNameFocused", false); set(game, "joinIpInput", "my-friends-server.example:25565")
+    show("classic-join-text", Screen.JoinGame, "renderJoinGame")
+    set(game, "journalPage", 0)
+    show("classic-journal", Screen.Journal, "renderJournal")
+    set(game, "catalogQuery", ""); set(game, "catalogCategory", 0)
+    show("classic-catalog-inventory-tab", Screen.Catalog, "renderCatalog")
+    set(game, "screen", Screen.Playing)
+
+  private def fontAndHeartFrames(output: Path, width: Int, height: Int): Unit =
+    glUseProgram(0); glBindFramebuffer(GL_FRAMEBUFFER, 0); glViewport(0, 0, width, height)
+    glClearColor(0.12f, 0.16f, 0.18f, 1f); glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
+    BlockboxRender2D.setupOrtho(width, height)
+    BlockboxRender2D.renderText(
+      40,
+      30,
+      "Readable pixel font - full ASCII",
+      1,
+      1,
+      1,
+      2f,
+      width,
+      height
+    )
+    for code <- 32 to 126 do
+      val index = code - 32
+      BlockboxRender2D.renderText(
+        40 + (index % 16) * 34,
+        80 + (index / 16) * 34,
+        code.toChar.toString,
+        1,
+        1,
+        1,
+        3f,
+        width,
+        height
+      )
+    for (fill, i) <- Vector(1f, 0.5f, 0f).zipWithIndex do
+      BlockboxRender2D.drawHeartIcon(40 + i * 70, 340, 36, fill, 0.46f)
+    def red(x: Int, y: Int): Float =
+      val pixel = BufferUtils.createFloatBuffer(4)
+      glReadPixels(x, height - y - 1, 1, 1, GL_RGBA, GL_FLOAT, pixel)
+      pixel.get(0)
+    assert(
+      math.abs(red(40, 340) - 0.12f) < 0.006f,
+      "heart corners preserve the scene instead of drawing a square backdrop"
+    )
+    assert(red(40 + 6 * 4 + 2, 342 + 3 * 4 + 2) > 0.7f)
+    assert(
+      red(110 + 3 * 4 + 2, 342 + 3 * 4 + 2) > 0.7f &&
+        red(110 + 6 * 4 + 2, 342 + 3 * 4 + 2) < 0.3f,
+      "half hearts show a full left half and empty right half"
+    )
+    capture(output.resolve("pixel-font-and-hearts.png"), width, height);
+    noError("pixel font and hearts")
 
   private def materialLightingFrames(
       game: Blockbox,
@@ -912,6 +1002,24 @@ object ShaderPipelineTest:
     capture(output.resolve("material-directional-lighting.png"), width, height);
     noError("material face shading")
     println("[material-render] three cube faces retain the same albedo before directional lighting")
+    val canopy = new Array[Byte](16 * 16 * Terrain.worldHeight)
+    for x <- 1 to 7; y <- 39 to 45; z <- 1 to 7 do
+      val inner = x >= 2 && x <= 6 && y >= 40 && y <= 44 && z >= 2 && z <= 6
+      canopy((y * 16 + z) * 16 + x) = (if inner then Block.Leaves else Block.Stone).id
+    val hidden = Chunk(0, 0, atlas, TerrainGenerator(42), canopy)
+    try
+      assert(hidden.forceBuildNowAndUpload())
+      assert(
+        get[Int](hidden, "cutoutCount") == 0,
+        "fully enclosed canopy cores have no internal leaf faces"
+      )
+      for x <- 2 to 6; y <- 40 to 44 do hidden.setBlock(x, y, 1, Block.Air)
+      assert(hidden.forceBuildNowAndUpload())
+      assert(
+        get[Int](hidden, "cutoutCount") > 0,
+        "opening a canopy restores the visible cutout and inner layer"
+      )
+    finally hidden.dispose()
 
   /** One lakeshore across lighting/weather changes, with real shadow casters, transparent water,
     * torch sources and a roof. This catches palette regressions that isolated shader compilation or
@@ -1232,6 +1340,9 @@ object ShaderPipelineTest:
         if !(math.abs(dx) == 2 && math.abs(dz) == 2) && (dx != 0 || dz != 0 || y > 45)
       do put(x + dx, y, z + dz, Block.Leaves)
     put(-2, 40, 4, Block.Furnace)
+    for x <- -8 to 0 by 2; z <- 6 to 10 by 2 do
+      val plant = Vector(Block.GrassTuft, Block.Fern, Block.Wildflower)(Math.floorMod(x + z, 3))
+      put(x, 40, z, plant)
     chunks.values.foreach { c =>
       for dx <- -1 to 1; dz <- -1 to 1 if dx != 0 || dz != 0 do
         chunks.get((c.cx + dx, c.cz + dz)).foreach(c.setNeighbor(dx, dz, _))
@@ -1661,6 +1772,8 @@ object ShaderPipelineTest:
     val furnace = game.getClass.getDeclaredMethod("renderFurnaceUI"); furnace.setAccessible(true)
     val journal = game.getClass.getDeclaredMethod("renderJournal"); journal.setAccessible(true)
     set(game, "furnaceInput", Block.IronOre); set(game, "furnaceProgress", 2.2f);
+    set(game, "furnaceSlots", true); set(game, "furnaceInputCount", 8)
+    set(game, "furnaceFuel", Block.CoalLump); set(game, "furnaceFuelCount", 3)
     set(game, "furnaceRequested", 8)
     set(game, "furnaceOutput", Block.IronIngot); set(game, "furnaceOutputCount", 3)
     val goals = get[FieldJournal](game, "fieldJournal"); goals.collected(Block.Wood, 8)

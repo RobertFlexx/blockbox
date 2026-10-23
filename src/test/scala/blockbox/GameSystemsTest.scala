@@ -7,6 +7,9 @@ import scala.collection.mutable.ArrayBuffer
 
 @main def runGameSystemsTests(): Unit =
   InteractionSystemsTest.run()
+  TextEditingTest.run()
+  PixelFontTest.run()
+  WorldPolishTest.run()
   GameSystemsTest.layouts()
   GameSystemsTest.journal()
   GameSystemsTest.terrain()
@@ -539,6 +542,10 @@ object GameSystemsTest:
         assert(awaitValue("directional sound event") {
           server.pollMessage().filter(_.startsWith("AUDIO|"))
         } == "AUDIO|Alice|0|1|2")
+        returning.send("DIG|14|65|-9|2")
+        assert(awaitValue("authenticated mining sound") {
+          server.pollMessage().filter(_.startsWith("DIG|"))
+        } == "DIG|Alice|14|65|-9|2")
         returning.send(s"TOSS|123|${Block.Stone.ordinal}|3")
         assert(awaitValue("authenticated toss") {
           server.pollMessage().filter(_.startsWith("TOSS|"))

@@ -505,6 +505,20 @@ final class GameServer(
               if !serverEvents.offer(clean) then throw IOException("Server queue full")
               broadcast(clean)
             catch case e: Exception => noteBadPacket("POS", e)
+          else if registered && packet.is("DIG") then
+            try
+              packet.requireExact(5)
+              val x = BlockboxNet.parseInt(packet.part(1), -30000000, 30000000)
+              val y = BlockboxNet.parseInt(packet.part(2), 1, Terrain.worldHeight - 1)
+              val z = BlockboxNet.parseInt(packet.part(3), -30000000, 30000000)
+              val variant = BlockboxNet.parseInt(packet.part(4), 0, 63)
+              if hasPosition && (Vec3(
+                  x + 0.5f,
+                  y + 0.5f,
+                  z + 0.5f
+                ) - lastPos).lengthSquared < 64 && soundBudget.allow(System.nanoTime())
+              then serverEvents.offer(s"DIG|$onlineName|$x|$y|$z|$variant")
+            catch case e: Exception => noteBadPacket("DIG", e)
           else if registered && packet.is("SFX") then
             try
               packet.requireExact(4)

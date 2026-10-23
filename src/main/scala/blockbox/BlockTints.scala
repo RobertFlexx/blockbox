@@ -24,5 +24,6 @@ object BlockTints:
 
   def item(block: Block, face: FaceKind): (Float, Float, Float) =
     if isFoliage(block) then foliage(block, plainsGrass)
+    else if FloraModel.grassTinted(block) then plainsGrass
     else if block == Block.Grass && face == FaceKind.Top then plainsGrass
     else (1f, 1f, 1f)

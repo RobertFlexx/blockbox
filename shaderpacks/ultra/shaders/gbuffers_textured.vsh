@@ -15,17 +15,23 @@ varying vec3 vNormalView;
 varying float vFogDepth;
 varying vec3 vWorldPos;
 varying vec3 vViewPos;
+varying float vPlant;
 void main() {
   vec4 vertex = gl_Vertex;
   // Leaves and other cutout geometry get a small wind so canopies aren't frozen.
-  float wind = sin(uTime * 1.35 + gl_Vertex.x * 0.71 + gl_Vertex.z * 0.53);
-  if (bbEntityPass == 0) vertex.x += wind * 0.032;
+  vec3 restWorld = (gbufferModelViewInverse * (gl_ModelViewMatrix * vertex)).xyz +
+                   vec3(cameraPosition.x, 0.0, cameraPosition.z);
+  float bend =
+      gl_MultiTexCoord1.z < 0.0 ? clamp(vertex.y + gl_MultiTexCoord1.z + 1.0, 0.0, 1.0) : 1.0;
+  float wind = sin(uTime * 1.35 + restWorld.x * 0.71 + restWorld.z * 0.53);
+  if (bbEntityPass == 0) vertex.x += wind * 0.032 * bend;
   if (bbEntityPass == 0)
-    vertex.z += cos(uTime * 1.05 + gl_Vertex.z * 0.64 + gl_Vertex.y * 0.4) * 0.028;
+    vertex.z += cos(uTime * 1.05 + restWorld.z * 0.64 + restWorld.y * 0.4) * 0.028 * bend;
   vec4 eye = gl_ModelViewMatrix * vertex;
   gl_Position = gl_ProjectionMatrix * eye;
   gl_ClipVertex = eye;
   vViewPos = eye.xyz;
+  vPlant = gl_MultiTexCoord1.z < 0.0 ? 1.0 : 0.0;
   vColor = gl_Color;
   if (bbEntityPass == 0 && gl_MultiTexCoord1.z > 0.0) vColor.rgb /= max(gl_MultiTexCoord1.z, 0.1);
   vec2 lm = gl_MultiTexCoord1.xy;

@@ -65,6 +65,7 @@ object ToolSystem:
 
   def damage(item: Block): Float = spec(item).map(_.damage).getOrElse(1f)
   def drop(block: Block): (Block, Int) = block match
+    case Block.Grass       => (Block.Dirt, 1)
     case Block.SupplyCrate => (Block.Planks, 4)
     case Block.Coal        => (Block.CoalLump, 1)
     case Block.Diamond     => (Block.DiamondGem, 1)

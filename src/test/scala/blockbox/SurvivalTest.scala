@@ -400,18 +400,22 @@ object SurvivalTest:
     hotbar(2) = Block.Sand; counts(2) = 8; hotbar(3) = Block.CoalLump; counts(3) = 2
     val scale = method(game, "uiScale").asInstanceOf[java.lang.Float].floatValue()
     val layout = BlockboxUiLayout.furnace(800, 600, scale)
-    def click(r: UiRect, shift: Boolean = false): Unit =
+    def click(r: UiRect, shift: Boolean = false, right: Boolean = false): Unit =
       method(
         game,
         "handleFurnaceClick",
         Float.box(r.x + r.w / 2),
         Float.box(r.y + r.h / 2),
-        Boolean.box(shift)
+        Boolean.box(shift),
+        Boolean.box(right)
       )
+    click(layout.input, true)
     click(layout.hotbar(2), true)
+    click(layout.hotbar(3), true)
     assert(
-      get[Block](game, "furnaceInput") == Block.Sand && get[Int](game, "furnaceRequested") == 8,
-      "shift-click selects and queues the visible stack using the drawn layout"
+      get[Block](game, "furnaceInput") == Block.Sand && get[Int](game, "furnaceInputCount") == 8 &&
+        get[Int](game, "furnaceFuelCount") == 2 && counts(2) == 0 && counts(3) == 0,
+      "shift-click moves physical input and fuel into the drawn furnace slots"
     )
     method(game, "updateFurnace", Float.box(2f))
     click(layout.hotbar(2))
@@ -421,7 +425,13 @@ object SurvivalTest:
     )
     for _ <- 0 until 15 do method(game, "updateFurnace", Float.box(2f))
     assert(get[Int](game, "furnaceOutputCount") == 8 && counts(2) == 0)
-    click(layout.output)
+    click(layout.output, right = true)
+    assert(
+      get[Int](game, "heldInventoryCount") == 4 && get[Int](game, "furnaceOutputCount") == 4,
+      "right-click takes half of the output onto the cursor"
+    )
+    click(layout.storage(5))
+    click(layout.output, true)
     assert(method(game, "totalItemCount", Block.Glass) == Int.box(8))
     assert(
       get[FieldJournal](game, "fieldJournal").entries(12).completed,
@@ -429,9 +439,13 @@ object SurvivalTest:
     )
     counts(2) = 3; hotbar(2) = Block.Sand
     click(layout.hotbar(2), true); click(layout.stop)
+    method(game, "updateFurnace", Float.box(4f))
     assert(
-      get[Int](game, "furnaceRequested") == 0 && counts(2) == 3,
-      "stop leaves unsmelted items in inventory"
+      get[Int](game, "furnaceRequested") == 0 && counts(2) == 0 && get[Int](
+        game,
+        "furnaceInputCount"
+      ) == 3,
+      "pausing preserves unsmelted items in the input slot"
     )
 
   def adventures(): Unit =

@@ -62,6 +62,16 @@ final class Chunk(
     private var smoothLightingEnabled: Boolean = true
 ):
   @volatile private var atlas = initialAtlas
+  @volatile private var snowCoverStep = 0
+  private val snowClimate = (for x <- Vector(0, 8, 15); z <- Vector(0, 8, 15)
+  yield SnowCover.cold(
+    gen.biomeAt(cx * 16 + x, cz * 16 + z, gen.heightAt(cx * 16 + x, cz * 16 + z))
+  )).exists(identity)
+  def needsSnowCover(amount: Float): Boolean =
+    snowClimate && snowCoverStep != SnowCover.level(amount)
+  def setSnowCover(amount: Float): Unit =
+    val next = SnowCover.level(amount)
+    if snowClimate && next != snowCoverStep then { snowCoverStep = next; markDirtyMesh() }
   private val generated =
     if initialBlocks != null then
       (initialBlocks, scala.collection.immutable.Map.empty[Int, LogAxis])
@@ -470,18 +480,21 @@ final class Chunk(
     def shouldDrawWaterSide(lx: Int, y: Int, lz: Int, nlx: Int, ny: Int, nlz: Int): Boolean =
       isWaterSideVisible(nlx, ny, nlz)
     lazy val foliageExposure = new Array[Byte](region.length)
+    val leafKinds = Block.values
+    val leafOpeningById = Array.tabulate(256) { id =>
+      if id >= leafKinds.length then true
+      else
+        val b = leafKinds(id)
+        !BlockTints.isFoliage(b) && (!b.solid || b.translucent || b.cutout)
+    }
+    def leafOpening(x: Int, y: Int, z: Int): Boolean =
+      leafOpeningById(localBlock(x, y, z).id & 0xff)
     def boundaryLeaf(x: Int, y: Int, z: Int): Boolean =
       val i = cell(x, y, z)
       if foliageExposure(i) == 0 then
-        val boundary = !BlockTints.isFoliage(localBlock(x - 1, y, z)) || !BlockTints.isFoliage(
-          localBlock(x + 1, y, z)
-        ) ||
-          !BlockTints.isFoliage(localBlock(x, y - 1, z)) || !BlockTints.isFoliage(
-            localBlock(x, y + 1, z)
-          ) ||
-          !BlockTints.isFoliage(localBlock(x, y, z - 1)) || !BlockTints.isFoliage(
-            localBlock(x, y, z + 1)
-          )
+        val boundary = leafOpening(x - 1, y, z) || leafOpening(x + 1, y, z) ||
+          leafOpening(x, y - 1, z) || leafOpening(x, y + 1, z) ||
+          leafOpening(x, y, z - 1) || leafOpening(x, y, z + 1)
         foliageExposure(i) = if boundary then 2 else 1
       foliageExposure(i) == 2
     def isVisible(nlx: Int, ny: Int, nlz: Int, block: Block): Boolean =
@@ -603,12 +616,13 @@ final class Chunk(
     // Leaf tops in snowy biomes are frosted white, like Minecraft's snow-dusted spruces.
     // One biome lookup per column: 0 unknown, 1 bare, 2 frosted.
     val frostColumns = new Array[Byte](cs * cs)
+    val settledSnow = snowCoverStep / 8f
     def frostedColumn(lx: Int, lz: Int, y: Int): Boolean =
       val i = lz * cs + lx
       if frostColumns(i) == 0 then
         val biome = gen.biomeAt(baseX + lx, baseZ + lz, gen.heightAt(baseX + lx, baseZ + lz))
         frostColumns(i) =
-          if biome == TerrainBiome.SnowyTaiga || biome == TerrainBiome.SnowyTundra || biome == TerrainBiome.JaggedPeaks
+          if SnowCover.cold(biome)
           then 2
           else 1
       frostColumns(i) == 2
@@ -680,7 +694,9 @@ final class Chunk(
             case Block.Water => if kind == FaceKind.Top then 0.70f else 0.58f
             case Block.Glass => 0.68f
             case _           => 1f
-          val frost = tintMode == 2 && kind == FaceKind.Top && frostedColumn(lx, lz, y)
+          val frost = if tintMode == 2 && frostedColumn(lx, lz, y) && skyAt(lx, y + 1, lz) >= 8 then
+            (0.10f + settledSnow * 0.82f) * (if kind == FaceKind.Top then 1f else 0.35f)
+          else 0f
           def emit(target: FloatMeshBuilder, i: Int, overlay: Boolean): Unit =
             val (cfx, cfy, cfz, tu, tv) = corners(i)
             // Rotate each leaf block's alpha mask in world coordinates. Geometry,
@@ -704,11 +720,11 @@ final class Chunk(
                 case 2 =>
                   val (fr, fg, fb) = foliageCornerTint(cfx, cfz)
                   // Above 1 so the grey leaf mask reads as snow; far below the 1.75 emissive flag.
-                  if frost then
+                  if frost > 0 then
                     (
-                      fr + (1.24f - fr) * 0.82f,
-                      fg + (1.27f - fg) * 0.82f,
-                      fb + (1.32f - fb) * 0.82f
+                      fr + (1.24f - fr) * frost,
+                      fg + (1.27f - fg) * frost,
+                      fb + (1.32f - fb) * frost
                     )
                   else (fr, fg, fb)
                 case _ => (1f, 1f, 1f)
@@ -756,14 +772,19 @@ final class Chunk(
         if FloraModel.contains(block) then
           val glow = blockLight.level(lx, y, lz) / 15f
           val skyHere = skyAt(lx, y, lz) / 15f
-          FloraModel.vertices(block).foreach { vertex =>
+          val plantTint = if FloraModel.grassTinted(block) then
+            gen.grassTintAt(baseX + lx, baseZ + lz, y - 1)
+          else (1f, 1f, 1f)
+          val variant = (TerrainUv.rotation(baseX + lx, baseZ + lz) + ((baseX + lx) & 4)) & 7
+          FloraModel.vertices(block, variant).foreach { vertex =>
             val (u, v) = atlasRef.uv(block, FaceKind.North, vertex.u, vertex.v)
             val shade = if vertex.ny < -0.5f then 0.7f else 1f
             cutoutVerts += fx + vertex.x; cutoutVerts += fy + vertex.y; cutoutVerts += fz + vertex.z
-            cutoutVerts += shade; cutoutVerts += shade; cutoutVerts += shade; cutoutVerts += 1f
+            cutoutVerts += shade * plantTint._1; cutoutVerts += shade * plantTint._2;
+            cutoutVerts += shade * plantTint._3; cutoutVerts += 1f
             cutoutVerts += vertex.nx; cutoutVerts += vertex.ny; cutoutVerts += vertex.nz
             cutoutVerts += u; cutoutVerts += v
-            cutoutVerts += glow * 240f; cutoutVerts += skyHere * 240f; cutoutVerts += shade
+            cutoutVerts += glow * 240f; cutoutVerts += skyHere * 240f; cutoutVerts += -(fy + 1f)
           }
         else if block == Block.Torch then
           val mount = torchMountsSnapshot.getOrElse(localIndex(lx, y, lz), TorchMount.Floor)

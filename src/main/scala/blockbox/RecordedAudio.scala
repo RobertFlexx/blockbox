@@ -10,6 +10,7 @@ import scala.math.*
 /** Bounded, worker-thread Vorbis decoding of the bundled CC0 recordings. */
 object RecordedAudio:
   private val cache = ConcurrentHashMap[String, Option[Array[Float]]]()
+  private val digging = ConcurrentHashMap[(BlockboxSounds.Material, Int), Array[Float]]()
   private val root = Path
     .of(Option(System.getProperty("blockbox.audioRoot")).getOrElse("assets/audio"))
     .toAbsolutePath
@@ -120,6 +121,26 @@ object RecordedAudio:
       variant: Int
   ): Option[Array[Float]] =
     import BlockboxSounds.{Action, Material}
+    if action == Action.Dig then
+      return Some(
+        digging.computeIfAbsent(
+          (material, Math.floorMod(variant, BlockboxSounds.variants)),
+          key =>
+            val source = effect(Action.Place, key._1, key._2).getOrElse(
+              BlockboxSounds.clip(Action.Place, key._1, key._2)
+            )
+            val count = source.length.min((BlockboxSounds.sampleRate * 0.12f).toInt)
+            val result = new Array[Float](count)
+            val coefficient =
+              (1 - math.exp(-2 * math.Pi * 1400 / BlockboxSounds.sampleRate)).toFloat
+            var filtered = 0f
+            for i <- result.indices do
+              filtered += (source(i) - filtered) * coefficient
+              val fade = (i / 176f).min(1f) * ((count - i - 1) / 1323f).max(0).min(1f)
+              result(i) = filtered * fade * 0.7f
+            result
+        )
+      )
     val step = action == Action.Step || action == Action.Land
     val bank = if step then
       material match
@@ -136,7 +157,11 @@ object RecordedAudio:
         case Material.Stone => Some("impactMining")
         case _              => Some("impactSoft_medium")
     else None
-    if action == Action.Splash then load(f"foley/water_splash_${Math.floorMod(variant, 2)}%03d.ogg")
+    if step && (material == Material.Grass || material == Material.Foliage) then
+      load(f"foley/grass_step_${Math.floorMod(variant, 3)}%03d.ogg")
+        .orElse(load(f"kenney/footstep_grass_${Math.floorMod(variant, 5)}%03d.ogg"))
+    else if action == Action.Splash then
+      load(f"foley/water_splash_${Math.floorMod(variant, 2)}%03d.ogg")
     else if step && material == Material.Sand then
       val kind = if Math.floorMod(variant, 2) == 0 then "place" else "break"
       load(f"foley/sand_${kind}_${Math.floorMod(variant / 2, 3)}%03d.ogg")

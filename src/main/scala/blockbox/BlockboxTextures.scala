@@ -80,11 +80,22 @@ object BlockboxTextures:
       case Block.AcaciaLeaves => Some(leaves(x, y, 54, holes = 0.30f, cell = 2))
       case Block.Cactus       =>
         Some(if vertical then cactusTop(x, y, face == FaceKind.Top) else cactusSide(x, y))
-      case Block.Furnace     => Some(furnace(x, y, face, lit = false))
-      case Block.FurnaceLit  => Some(furnace(x, y, face, lit = true))
-      case Block.Reeds       => Some(reeds(x, y))
-      case Block.LilyPad     => Some(lilyPad(x, y))
-      case Block.LeafLitter  => Some(leafLitter(x, y))
+      case Block.Furnace    => Some(furnace(x, y, face, lit = false))
+      case Block.FurnaceLit => Some(furnace(x, y, face, lit = true))
+      case Block.Reeds      => Some(reeds(x, y))
+      case Block.LilyPad    => Some(lilyPad(x, y))
+      case Block.LeafLitter => Some(leafLitter(x, y))
+      case Block.GrassTuft  => Some(grassBlade(x, y, fern = false))
+      case Block.Fern       => Some(grassBlade(x, y, fern = true))
+      case Block.DryShrub   =>
+        val p = grassBlade(x, y, fern = true)
+        Some(if p._4 == 0 then p else (p._1 * 3 / 4, p._2 * 3 / 5, p._3 / 3, 255))
+      case Block.Wildflower =>
+        val flower = (x - 8).abs + (y - 4).abs <= 3
+        Some(if flower then rgb(if x == 8 && y == 4 then 0xd7a23a else 0xf4e8b0)
+        else if (x == 8 && y > 4) || (y >= 10 && y <= 12 && (x - 8).abs == 12 - y) then
+          rgb(0x609b3b)
+        else (0, 0, 0, 0))
       case Block.SupplyCrate =>
         val band = x <= 1 || x >= 14 || y <= 1 || y >= 14
         val brace = abs(x - y) <= 1 || abs(x + y - 15) <= 1
@@ -94,6 +105,18 @@ object BlockboxTextures:
         else if brace then rgb(0x9a713e)
         else rgb(if x % 4 == 0 then 0x4f3726 else 0x704c2c))
       case _ => None
+
+  private def grassBlade(x: Int, y: Int, fern: Boolean): Pixel =
+    val stems = Array((2, 8), (5, 3), (8, 5), (11, 1), (14, 7))
+    val visible = if fern then
+      (x == 8 && y >= 2) || (y >= 4 && y <= 13 && ((y / 2) % 2 == 0) &&
+        (x - 8).abs <= ((15 - y) / 3 + 1))
+    else
+      stems.exists { (root, top) =>
+        val bend = if y < 9 then (9 - y) / 4 * (if root < 8 then -1 else 1) else 0
+        (x == root + bend && y >= top) || (y >= top + 4 && y < 13 && (x - root).abs == 1 && (x < root) == (y % 4 < 2))
+      }
+    if visible then gray((132 + y * 4 + (hash(x, y, 1843) * 28).toInt).min(230)) else (0, 0, 0, 0)
 
   private def reeds(x: Int, y: Int): Pixel =
     val stems = Array((3, 3), (7, 1), (11, 5), (14, 4))

@@ -123,7 +123,9 @@ object PresentationTest:
       val alpha = for x <- 0 until 16; y <- 0 until 16
       yield BlockboxTextures.pixel(block, FaceKind.North, x, y).get._4
       assert(alpha.contains(0) && alpha.contains(255), "authored cutout art has a real silhouette")
-      val floor = if block == Block.LilyPad then Block.Water else Block.Clay
+      val floor = if block == Block.LilyPad then Block.Water
+      else if FloraModel.grassTinted(block) || block == Block.Wildflower then Block.Grass
+      else Block.Clay
       assert(FloraModel.supported(block, 0, 1, 0, (_, y, _) => if y == 0 then floor else Block.Air))
       assert(!FloraModel.supported(block, 0, 1, 0, (_, _, _) => Block.Air))
       val hit = BlockboxRaycast.raycast(

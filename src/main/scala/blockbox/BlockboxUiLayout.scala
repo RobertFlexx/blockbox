@@ -3,6 +3,8 @@ package blockbox
 final case class UiRect(x: Float, y: Float, w: Float, h: Float):
   def contains(mx: Float, my: Float): Boolean = mx >= x && my >= y && mx < x + w && my < y + h
 
+final case class HotbarLayout(panel: UiRect, slots: Vector[UiRect])
+
 final case class MainMenuLayout(panel: UiRect, buttons: Vector[UiRect], scale: Float)
 final case class SettingsLayout(panel: UiRect, tabs: Vector[UiRect], content: UiRect, done: UiRect)
 final case class JournalLayout(
@@ -52,6 +54,17 @@ final case class FurnaceLayout(
 
 /** Drawing and hit testing share these layouts at every GUI scale. */
 object BlockboxUiLayout:
+  def hotbar(w: Float, h: Float, s: Float, count: Int = 9): HotbarLayout =
+    require(count > 0)
+    val gap = (3f * s).max(2f)
+    val slot = (52f * s).min((w - 24f * s - gap * (count - 1)) / count).max(12f)
+    val width = slot * count + gap * (count - 1)
+    val x = (w - width) / 2f; val y = (h - slot - 12f * s).max(8f)
+    HotbarLayout(
+      UiRect(x - 8 * s, y - 8 * s, width + 16 * s, slot + 16 * s),
+      Vector.tabulate(count)(i => UiRect(x + i * (slot + gap), y, slot, slot))
+    )
+
   def journal(w: Float, h: Float, requested: Float): JournalLayout =
     val s = requested.max(0.8f).min((w - 24f) / 680f).min((h - 24f) / 496f).max(0.35f)
     val p = UiRect((w - 680 * s) / 2, (h - 496 * s) / 2, 680 * s, 496 * s)
@@ -113,7 +126,7 @@ object BlockboxUiLayout:
       UiRect(p.x + x * s, p.y + y * s, ww * s, hh * s)
     CatalogLayout(
       p,
-      Vector.tabulate(5)(i => r(8 + i * 42, -23, 36, 25)),
+      Vector.tabulate(6)(i => r(8 + i * 36, -23, 32, 25)),
       r(12, 28, 216, 17),
       Vector.tabulate(54)(i => r(12 + (i % 9) * 24, 54 + (i / 9) * 24, 22, 22)),
       Vector.tabulate(9)(i => r(12 + i * 24, 222, 22, 22)),

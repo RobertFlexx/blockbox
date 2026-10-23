@@ -130,6 +130,10 @@ enum Block(
   case LilyPad extends Block(false, (0.20f, 0.43f, 0.18f), false, false, true)
   case LeafLitter extends Block(false, (0.66f, 0.34f, 0.12f), false, false, true)
   case SupplyCrate extends Block(true, (0.53f, 0.35f, 0.18f))
+  case GrassTuft extends Block(false, (0.52f, 0.76f, 0.34f), false, false, true)
+  case Fern extends Block(false, (0.52f, 0.76f, 0.34f), false, false, true)
+  case Wildflower extends Block(false, (0.91f, 0.82f, 0.39f), false, false, true)
+  case DryShrub extends Block(false, (0.57f, 0.46f, 0.25f), false, false, true)
   def solid: Boolean =
     val d = CustomBlocks.raw(this)
     if d == null then baseSolid else d.solid

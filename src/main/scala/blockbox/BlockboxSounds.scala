@@ -12,7 +12,7 @@ object BlockboxSounds:
   enum Material:
     case Stone, Wood, Dirt, Grass, Sand, Snow, Glass, Foliage, Metal
   enum Action:
-    case Step, Place, Break, Land, Splash, Thunder, Hurt, Ui
+    case Step, Place, Break, Land, Splash, Thunder, Hurt, Ui, Dig
   import Material.*
   import Action.*
   private final case class Key(action: Action, material: Material, variant: Int)
@@ -36,7 +36,8 @@ object BlockboxSounds:
     case Block.Snow              => Snow
     case Block.Glass             => Glass
     case Block.Leaves | Block.BirchLeaves | Block.PineLeaves | Block.AcaciaLeaves | Block.Cactus |
-        Block.Reeds | Block.LilyPad | Block.LeafLitter =>
+        Block.Reeds | Block.LilyPad | Block.LeafLitter | Block.GrassTuft | Block.Fern |
+        Block.Wildflower | Block.DryShrub =>
       Foliage
     case Block.Copper | Block.IronIngot | Block.GoldIngot => Metal
     case _                                                => Stone
@@ -88,6 +89,7 @@ object BlockboxSounds:
       case Thunder => 2.20f
       case Hurt    => 0.22f
       case Ui      => 0.055f
+      case Dig     => 0.12f
     val result = new Array[Float]((duration * sampleRate).toInt)
     val low = LowPass(if action == Thunder then 150 else p.cutoff)
     val bass = LowPass(if action == Thunder then 48 else 260)
@@ -184,6 +186,7 @@ object BlockboxSounds:
       case Ui      => 0.024f
       case Step    => 0.070f
       case Place   => 0.075f
+      case Dig     => 0.035f
       case Break   => 0.105f
       case Thunder => 0.11f
       case _       => 0.095f

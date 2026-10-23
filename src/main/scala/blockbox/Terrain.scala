@@ -1383,6 +1383,20 @@ final class TerrainGenerator(
           1837
         ) > 0.24f
       then placeCover(h + 1, Block.LeafLitter)
+      // Cluster cover with a broad noise field, then vary individual clumps by seed.
+      // All meshes are baked into the chunk: grass needs no per-frame objects.
+      val cover = hash(wx, 0, wz, 1840)
+      val patch = valueNoise2D(wx * 0.085, wz * 0.085, 1841)
+      val floor = blocks(idx(lx, h, lz))
+      if h > Terrain.seaLevel && floor == Block.Grass.id && cover > 0.36f - patch * 0.2f then
+        val plant = if biome == TerrainBiome.Meadow && cover > 0.86f then Block.Wildflower
+        else if (biome == TerrainBiome.Taiga || biome == TerrainBiome.RedwoodForest || biome == TerrainBiome.OldGrowthForest || biome == TerrainBiome.WillowMarsh) && cover > 0.65f
+        then Block.Fern
+        else Block.GrassTuft
+        placeCover(h + 1, plant)
+      else if (biome == TerrainBiome.Badlands || biome == TerrainBiome.Desert || biome == TerrainBiome.DuneDesert) &&
+        (floor == Block.Clay.id || floor == Block.Sand.id) && cover > 0.982f
+      then placeCover(h + 1, Block.DryShrub)
     decorate(cx, cz, blocks)
     (blocks, logAxes.toMap)
 

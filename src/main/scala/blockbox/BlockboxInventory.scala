@@ -4,6 +4,10 @@ import scala.math.*
 
 trait BlockboxInventory:
   protected var furnaceRequested = 0
+  protected var furnaceSlots = false
+  protected var furnaceInputCount = 0
+  protected var furnaceFuelCount = 0
+  protected var furnacePaused = false
   protected val placeableBlocks: Array[Block]
   // Aggregate totals stay as a backward-compatible save/migration surface.
   // Live survival behavior is driven by the physical slot arrays below.
@@ -93,6 +97,7 @@ trait BlockboxInventory:
     furnaceFuelRemaining = 0f
     furnaceOutput = Block.Air; furnaceOutputCount = 0
     furnaceRequested = 0
+    furnaceSlots = false; furnaceInputCount = 0; furnaceFuelCount = 0; furnacePaused = false
     i = 0
     while i < craftGridBlocks.length do
       craftGridBlocks(i) = Block.Air; craftGridCounts(i) = 0; i += 1
@@ -102,7 +107,7 @@ trait BlockboxInventory:
 
   /** Return a detached cursor stack without ever silently deleting it. */
   protected def releaseHeldItem(): Boolean =
-    if gameMode == GameMode.Survival && heldInventoryBlock != Block.Air && heldInventoryCount > 0
+    if (gameMode == GameMode.Survival || heldFromHotbar) && heldInventoryBlock != Block.Air && heldInventoryCount > 0
     then
       val returned = addBackpackItem(heldInventoryBlock, heldInventoryCount)
       var remaining = heldInventoryCount - returned
@@ -142,7 +147,6 @@ trait BlockboxInventory:
 
   protected def inventoryRoomFor(block: Block): Int =
     if !validHotbarBlock(block) then 0
-    else if gameMode == GameMode.Creative then Int.MaxValue / 4
     else
       var room = 0; var i = 0
       while i < hotbarBlocks.length do
@@ -205,9 +209,6 @@ trait BlockboxInventory:
   protected def handleBackpackSlotClick(slot: Int, rightClick: Boolean): Unit =
     if slot < 0 || slot >= backpackBlocks.length then return
     val block = backpackBlocks(slot); val count = backpackCounts(slot).max(0)
-    if gameMode == GameMode.Creative then
-      if validHotbarBlock(block) then setHeldItem(block, maxStackSize)
-      return
     if heldInventoryBlock == Block.Air then
       if validHotbarBlock(block) && count > 0 then
         val take = if rightClick then (count + 1) / 2 else count
@@ -260,7 +261,7 @@ trait BlockboxInventory:
       targets: Seq[SlotRef]
   ): Unit =
     val block = blocks(slot); val count = counts(slot)
-    if gameMode == GameMode.Survival && validHotbarBlock(block) && count > 0 then
+    if validHotbarBlock(block) && count > 0 then
       val moved = moveInto(block, count, targets)
       counts(slot) -= moved
       if counts(slot) <= 0 then
@@ -299,7 +300,6 @@ trait BlockboxInventory:
       if !validHotbarBlock(b) then
         hotbarBlocks(i) = Block.Air
         hotbarCounts(i) = 0
-      else if gameMode == GameMode.Creative then hotbarCounts(i) = maxStackSize
       else if hotbarCounts(i) <= 0 then
         hotbarBlocks(i) = Block.Air
         hotbarCounts(i) = 0
@@ -338,24 +338,18 @@ trait BlockboxInventory:
 
   protected def takeHotbarSlot(slot0: Int, rightClick: Boolean = false): Unit =
     val slot = slot0.max(0).min(hotbarBlocks.length - 1); val block = hotbarBlocks(slot)
-    val count = if gameMode == GameMode.Creative then maxStackSize else hotbarCounts(slot)
+    val count = hotbarCounts(slot)
     if validHotbarBlock(block) && count > 0 then
-      val take = if rightClick && gameMode == GameMode.Survival then (count + 1) / 2 else count
-      setHeldItem(block, take, fromHotbar = gameMode == GameMode.Survival)
-      if gameMode == GameMode.Survival then
-        hotbarCounts(slot) -= take
-        compactHotbarAssignments()
+      val take = if rightClick then (count + 1) / 2 else count
+      setHeldItem(block, take, fromHotbar = true)
+      hotbarCounts(slot) -= take
+      compactHotbarAssignments()
 
   protected def placeHeldItemInHotbar(slot0: Int, rightClick: Boolean = false): Unit =
     if heldInventoryBlock == Block.Air then return
     val slot = slot0.max(0).min(hotbarBlocks.length - 1); val oldBlock = hotbarBlocks(slot);
     val oldCount = hotbarCounts(slot).max(0)
-    if gameMode == GameMode.Creative then
-      hotbarBlocks(slot) = heldInventoryBlock
-      hotbarCounts(slot) = maxStackSize
-      selectedBlock = slot
-      clearHeldItem()
-    else if !validHotbarBlock(oldBlock) || oldCount <= 0 then
+    if !validHotbarBlock(oldBlock) || oldCount <= 0 then
       val put = if rightClick then 1 else heldInventoryCount
       hotbarBlocks(slot) = heldInventoryBlock; hotbarCounts(slot) = put; selectedBlock = slot;
       heldInventoryCount -= put
@@ -441,14 +435,96 @@ trait BlockboxInventory:
   protected def smeltResult(input: Block): Option[(Block, Int)] =
     InventoryModel.smeltResult(input)
 
-  protected def canConsumeFuelFor(input: Block): Boolean =
-    furnaceFuelRemaining + fuelBlocks
-      .map(b =>
-        (totalItemCount(b) - (if b == input then 1 else 0)).max(0) * InventoryModel.fuelBurnTime(b)
+  /** Migrate the old input selector once, without duplicating items already in the backpack. */
+  protected def enableFurnaceSlots(): Unit =
+    if !furnaceSlots then
+      val amount =
+        if furnaceInput != Block.Air then totalItemCount(furnaceInput).min(maxStackSize) else 0
+      if amount > 0 && consumeInventory(furnaceInput, amount) then furnaceInputCount = amount
+      else furnaceInput = Block.Air
+      furnaceFuel = Block.Air; furnaceFuelCount = 0; furnaceSlots = true
+
+  protected def furnaceInputAvailable: Int =
+    if furnaceSlots then furnaceInputCount else totalItemCount(furnaceInput)
+
+  /** Input and fuel slots use the same split/merge/swap rules as ordinary inventory slots. */
+  protected def handleFurnaceSlot(fuel: Boolean, rightClick: Boolean, quick: Boolean): Unit =
+    enableFurnaceSlots()
+    val blocks = Array(if fuel then furnaceFuel else furnaceInput)
+    val counts = Array(if fuel then furnaceFuelCount else furnaceInputCount)
+    val before = blocks(0)
+    if quick then quickMove(blocks, counts, 0, backpackSlots ++ hotbarSlots)
+    else if heldInventoryBlock == Block.Air then
+      if counts(0) > 0 then
+        val take = if rightClick then (counts(0) + 1) / 2 else counts(0)
+        setHeldItem(blocks(0), take, fromHotbar = true); counts(0) -= take
+    else if (
+        if fuel then InventoryModel.fuelBurnTime(heldInventoryBlock) > 0
+        else smeltResult(heldInventoryBlock).nonEmpty
       )
-      .sum >= 1f
+    then
+      if counts(0) <= 0 || blocks(0) == heldInventoryBlock then
+        val amount = (if rightClick then 1 else heldInventoryCount).min(maxStackSize - counts(0))
+        blocks(0) = heldInventoryBlock; counts(0) += amount; heldInventoryCount -= amount
+        if heldInventoryCount <= 0 then clearHeldItem()
+      else if !rightClick then
+        val oldBlock = blocks(0); val oldCount = counts(0)
+        blocks(0) = heldInventoryBlock; counts(0) = heldInventoryCount
+        setHeldItem(oldBlock, oldCount, fromHotbar = true)
+    if counts(0) <= 0 then blocks(0) = Block.Air
+    if fuel then { furnaceFuel = blocks(0); furnaceFuelCount = counts(0) }
+    else
+      furnaceInput = blocks(0); furnaceInputCount = counts(0)
+      if before != furnaceInput then { furnaceRequested = 0; furnaceProgress = 0 }
+    furnacePaused = false
+
+  protected def quickFeedFurnace(blocks: Array[Block], counts: Array[Int], slot: Int): Unit =
+    enableFurnaceSlots()
+    val block = blocks(slot)
+    val fuel = smeltResult(block).isEmpty && InventoryModel.fuelBurnTime(block) > 0
+    if smeltResult(block).nonEmpty || fuel then
+      val target = if fuel then furnaceFuel else furnaceInput
+      val existing = if fuel then furnaceFuelCount else furnaceInputCount
+      if target == block || existing == 0 then
+        val moved = counts(slot).min(maxStackSize - existing)
+        if moved > 0 then
+          counts(slot) -= moved
+          if counts(slot) == 0 then blocks(slot) = Block.Air
+          if fuel then { furnaceFuel = block; furnaceFuelCount += moved }
+          else { furnaceInput = block; furnaceInputCount += moved }
+          syncInventoryTotalsFromBackpack(); compactHotbarAssignments()
+
+  protected def clickFurnaceOutput(rightClick: Boolean, quickMove: Boolean): Unit =
+    if quickMove then takeFurnaceOutput()
+    else if furnaceOutputCount > 0 && (heldInventoryBlock == Block.Air || heldInventoryBlock == furnaceOutput)
+    then
+      val amount = (if rightClick then (furnaceOutputCount + 1) / 2 else furnaceOutputCount)
+        .min(maxStackSize - heldInventoryCount)
+      if amount > 0 then
+        val previous = heldInventoryCount
+        setHeldItem(furnaceOutput, previous + amount, fromHotbar = true)
+        furnaceOutputCount -= amount
+        if furnaceOutputCount == 0 then furnaceOutput = Block.Air
+
+  protected def canConsumeFuelFor(input: Block): Boolean =
+    if furnaceSlots then
+      furnaceFuelRemaining + furnaceFuelCount * InventoryModel.fuelBurnTime(furnaceFuel) >= 1f
+    else
+      furnaceFuelRemaining + fuelBlocks
+        .map(b =>
+          (totalItemCount(b) - (if b == input then 1 else 0)).max(0) * InventoryModel.fuelBurnTime(
+            b
+          )
+        )
+        .sum >= 1f
 
   protected def consumeFuelFor(input: Block): Boolean =
+    if furnaceSlots then
+      while furnaceFuelRemaining < 1f && furnaceFuelCount > 0 do
+        furnaceFuelCount -= 1
+        furnaceFuelRemaining += InventoryModel.fuelBurnTime(furnaceFuel)
+        if furnaceFuelCount == 0 then furnaceFuel = Block.Air
+      return furnaceFuelRemaining >= 1f
     while furnaceFuelRemaining < 1f do
       val picked = fuelBlocks.find(b => totalItemCount(b) > (if b == input then 1 else 0))
       picked match
@@ -476,7 +552,7 @@ trait BlockboxInventory:
     if furnaceInput == Block.Air then
       if showMessages then addChatMessage("Choose an input stack below")
       return false
-    if totalItemCount(furnaceInput) <= 0 then
+    if furnaceInputAvailable <= 0 then
       if showMessages then addChatMessage(s"No ${blockName(furnaceInput)} left")
       furnaceInput = Block.Air
       furnaceProgress = 0f
@@ -495,15 +571,15 @@ trait BlockboxInventory:
     if !consumeFuelFor(furnaceInput) then
       if showMessages then addChatMessage("Need fuel: Coal or Wood")
       return false
-    consumeInventory(furnaceInput, 1)
+    if furnaceSlots then furnaceInputCount -= 1 else consumeInventory(furnaceInput, 1)
     furnaceFuelRemaining = (furnaceFuelRemaining - 1f).max(0f)
     furnaceOutput = out
     furnaceOutputCount += amount
     noteSmelted(out, amount)
-    if totalItemCount(furnaceInput) <= 0 then furnaceInput = Block.Air
+    if furnaceInputAvailable <= 0 then furnaceInput = Block.Air
     if furnaceFuelRemaining <= 0f then
       furnaceFuelRemaining = 0f
-      furnaceFuel = Block.Air
+      if !furnaceSlots then furnaceFuel = Block.Air
     playPlaceSound()
     true
 
@@ -511,11 +587,11 @@ trait BlockboxInventory:
     requestSmelting(1)
 
   protected def smeltAllFurnace(): Unit =
-    requestSmelting(totalItemCount(furnaceInput).min(maxStackSize))
+    requestSmelting(furnaceInputAvailable.min(maxStackSize))
 
   private def requestSmelting(count: Int): Unit =
     if !furnaceAvailable then addChatMessage("Open a placed furnace first")
-    else if furnaceInput == Block.Air || totalItemCount(furnaceInput) <= 0 then
+    else if furnaceInput == Block.Air || furnaceInputAvailable <= 0 then
       addChatMessage("Choose an input first")
     else if !canConsumeFuelFor(furnaceInput) then
       addChatMessage("Need fuel: coal, logs, planks or sticks")
@@ -527,11 +603,17 @@ trait BlockboxInventory:
         furnaceOutputCount + amount > maxStackSize
       )
     then addChatMessage("Take the output to make room")
-    else furnaceRequested = count.max(1).min(maxStackSize)
+    else { furnacePaused = false; furnaceRequested = count.max(1).min(maxStackSize) }
 
   protected def updateFurnace(dt: Float): Unit =
+    if furnaceSlots && !furnacePaused && furnaceRequested <= 0 && furnaceAvailable && furnaceInputAvailable > 0 && canConsumeFuelFor(
+        furnaceInput
+      ) && smeltResult(furnaceInput).exists((out, n) =>
+        (furnaceOutput == Block.Air || furnaceOutput == out) && furnaceOutputCount + n <= maxStackSize
+      )
+    then furnaceRequested = furnaceInputAvailable
     if furnaceRequested > 0 then
-      if !furnaceAvailable || totalItemCount(furnaceInput) <= 0 || (!canConsumeFuelFor(
+      if !furnaceAvailable || furnaceInputAvailable <= 0 || (!canConsumeFuelFor(
           furnaceInput
         ))
       then

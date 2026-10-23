@@ -23,12 +23,15 @@ varying vec3 vNormalView;
 varying float vFogDepth;
 varying vec3 vWorldPos;
 varying vec3 vViewPos;
+varying float vPlant;
 
 void main() {
   vec4 texel = texture2D(uAtlas, vUv);
-  if (texel.a <= 0.45 || (dot(vNormalView, vViewPos) > 0.0 && vEmission < 0.5)) discard;
+  if (texel.a <= 0.45 || (vPlant < 0.5 && dot(vNormalView, vViewPos) > 0.0 && vEmission < 0.5))
+    discard;
   vec3 albedo = linearAlbedo(texel.rgb, vColor.rgb);
-  vec3 n = normalize(vNormalWorld);
+  float facing = vPlant > 0.5 && dot(vNormalView, vViewPos) > 0.0 ? -1.0 : 1.0;
+  vec3 n = normalize(vNormalWorld) * facing;
   vec3 sun = normalize(uSunDir);
   float sky = sat(vSkyLight);
   float block = sat(vBlockLight);
@@ -42,7 +45,7 @@ void main() {
     color = mix(reflectedSurface(ambient, direct, vWorldPos, n, sun, uTime, rainStrength), color,
                 vEmission);
   gl_FragData[0] = vec4(color, 1.0);
-  gl_FragData[1] = vec4(normalize(vNormalView) * 0.5 + 0.5, 1.0);
+  gl_FragData[1] = vec4(normalize(vNormalView) * facing * 0.5 + 0.5, 1.0);
   gl_FragData[2] = vec4(float(renderStage) / 255.0, sky, 0.0, max(block, vEmission));
   gl_FragData[3] = vec4(direct, 1.0);
   gl_FragData[4] = vec4(albedo, 1.0 - vEmission);
