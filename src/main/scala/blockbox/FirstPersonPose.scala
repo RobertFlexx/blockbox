@@ -62,22 +62,20 @@ object FirstPersonPose:
   // recoil cannot change how they sit in the hand.
   def attachment(block: Block): Attachment =
     if block == Block.Torch then Attachment(Vec3(0f, -0.30f, -0.055f), Vec3(-28f, 0f, 0f), 0.72f)
-    // In the resting forearm frame these Euler angles put the broad face in a
-    // vertical plane and the shaft rising ahead of the fist, as in the world model.
-    // The handle's diagonal in the source art is included in this rotation.
+    // Vanilla item/handheld thirdperson_righthand is (0,-90,55), scale .85.
+    // The hand layer first applies X -90, Y 180, giving X -90, Y 90, Z 55 here.
+    // Our mesh origin is already in the handle, so translate to the fist rather
+    // than applying the vanilla sprite-center offset a second time. The .9
+    // factor matches our 1.8-block-tall avatar. No reflection/negative scale:
+    // the blade points along local -Z and its broad face lies beside the arm.
+    // Reference: assets.mcasset.cloud/1.21.1/assets/minecraft/models/item/handheld.json
     else if ToolSystem.isTool(block) then
-      Attachment(Vec3(0f, -0.31f, -0.055f), Vec3(0f, 55f, 15f), 0.80f)
+      Attachment(Vec3(-0.04f, -0.30f, -0.10f), Vec3(-90f, 90f, 55f), 0.85f * 0.9f)
     else if Block.isItem(block) then Attachment(Vec3(0f, -0.31f, -0.07f), Vec3(-70f, 0f, 0f), 0.55f)
     else Attachment(Vec3(0f, -0.30f, -0.32f), Vec3(0f, 20f, 0f), 0.30f)
 
-  /** The raised zombie forearm puts its fist in front of the chest. Cancel that lift at the wrist
-    * so the shaft rises out of the fist, as an upright sword/shovel does, while keeping the
-    * sprite's diagonal handle in the grip.
-    */
-  def zombieAttachment(block: Block): Attachment =
-    if ToolSystem.isTool(block) then
-      Attachment(Vec3(0f, -0.31f, -0.055f), Vec3(-90f, 55f, 15f), 0.80f)
-    else attachment(block)
+  /** The same hand basis works with the zombie's raised arm: tools naturally stand upright. */
+  def zombieAttachment(block: Block): Attachment = attachment(block)
 
   /** Vanilla applyItemArmTransform and applyItemArmAttackTransform, then the held thing's display
     * transform. Item sprites and the torch are centered on (0.5, 0.5) after it, blocks are a

@@ -194,7 +194,7 @@ object PresentationTest:
       val grip = FirstPersonPose.zombieAttachment(item)
       val shaft = rotate(rotate(Vec3(0.707f, 0.707f, 0), grip.rotation), Vec3(90, 0, 0))
       assert(
-        shaft.y > 0.85f && shaft.z < 0.1f,
+        shaft.y > 0.95f && abs(shaft.z) < 0.25f,
         "equipped zombie tools rise upright from an extended fist"
       )
     val cube = FirstPersonPose.attachment(Block.Stone)
@@ -218,15 +218,22 @@ object PresentationTest:
     assert(!insideFist(held(fx, fy, fz)), "the burning end clears the hand")
     for item <- Seq(Block.IronSword, Block.IronPickaxe, Block.StoneAxe, Block.IronShovel) do
       val attachment = FirstPersonPose.attachment(item)
-      val shaft = rotate(rotate(Vec3(0.7f, 0.7f, 0), attachment.rotation), Vec3(12, 0, 0))
-      assert(shaft.z < -0.10f, "third-person tools extend forward from the wrist")
-      assert(shaft.x > 0.20f, "the tool projects ahead and outside the fist, clearing the torso")
+      val shaft = rotate(rotate(Vec3(0.707f, 0.707f, 0), attachment.rotation), Vec3(18, 0, 0))
+      assert(shaft.z < -0.85f, "third-person tools point forward, never backwards across the arm")
+      assert(abs(shaft.x) < 0.01f, "tools lie beside the arm instead of pointing across the body")
       assert(
-        shaft.y > 0.80f,
-        "tools rise from the fist in a readable Minecraft-style grip"
+        shaft.y > 0.4f && shaft.y < 0.6f,
+        "the shaft rises slightly from the fist, matching the vanilla handheld display basis"
       )
-      val normal = rotate(rotate(Vec3(0, 0, 1), attachment.rotation), Vec3(12, 0, 0))
-      assert(abs(normal.y) < 0.16f, "the tool's broad face stays vertical in the resting hand")
+      val normal = rotate(rotate(Vec3(0, 0, 1), attachment.rotation), Vec3(18, 0, 0))
+      assert(
+        normal.x > 0.99f && abs(normal.y) < 0.01f,
+        "the broad face is vertical alongside the hand"
+      )
+      assert(
+        attachment.size > 0 && FirstPersonPose.zombieAttachment(item) == attachment,
+        "players and zombies share one unmirrored grip"
+      )
     val pickPose = FirstPersonPose.itemPose(Block.DiamondPickaxe, 0, 0, 1)
     val swordPose = FirstPersonPose.itemPose(Block.DiamondSword, 0, 0, 1)
     assert(swordPose == pickPose, "all tools share the same hand/display basis")

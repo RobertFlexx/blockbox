@@ -11,12 +11,35 @@ object BlockTints:
     block == Block.Leaves || block == Block.BirchLeaves || block == Block.PineLeaves || block == Block.AcaciaLeaves
 
   /** Birch and spruce keep fixed colours like Minecraft; oak and acacia follow the biome. */
-  def foliage(block: Block, grass: (Float, Float, Float)): (Float, Float, Float) = block match
-    case Block.BirchLeaves  => (0.55f, 0.70f, 0.33f)
-    case Block.PineLeaves   => (0.38f, 0.57f, 0.40f)
-    case Block.AcaciaLeaves =>
-      (grass._1 * 0.45f + 0.34f, grass._2 * 0.45f + 0.35f, grass._3 * 0.45f + 0.10f)
-    case _ => (grass._1 * 0.62f + 0.13f, grass._2 * 0.62f + 0.24f, grass._3 * 0.62f + 0.06f)
+  def foliage(block: Block, grass: (Float, Float, Float)): (Float, Float, Float) =
+    val out = foliageScratch.get()
+    writeFoliage(block, grass._1, grass._2, grass._3, out, 0)
+    (out(0), out(1), out(2))
+
+  /** Same colour as `foliage`, written into `out` so chunk meshing does not allocate a tuple per leaf. */
+  def writeFoliage(
+      block: Block,
+      grassR: Float,
+      grassG: Float,
+      grassB: Float,
+      out: Array[Float],
+      offset: Int
+  ): Unit =
+    block match
+      case Block.BirchLeaves =>
+        out(offset) = 0.55f; out(offset + 1) = 0.70f; out(offset + 2) = 0.33f
+      case Block.PineLeaves =>
+        out(offset) = 0.38f; out(offset + 1) = 0.57f; out(offset + 2) = 0.40f
+      case Block.AcaciaLeaves =>
+        out(offset) = grassR * 0.45f + 0.34f
+        out(offset + 1) = grassG * 0.45f + 0.35f
+        out(offset + 2) = grassB * 0.45f + 0.10f
+      case _ =>
+        out(offset) = grassR * 0.62f + 0.13f
+        out(offset + 1) = grassG * 0.62f + 0.24f
+        out(offset + 2) = grassB * 0.62f + 0.06f
+
+  private val foliageScratch = ThreadLocal.withInitial(() => new Array[Float](3))
 
   /** The colour a tint mask was authored against, used to turn coloured art into masks. */
   def reference(block: Block): (Float, Float, Float) =

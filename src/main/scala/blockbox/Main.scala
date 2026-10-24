@@ -75,7 +75,7 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
   private var cameraBobAmount = 0f
   private var cameraRoll = 0f
   private var smoothedHorizontalSpeed = 0f
-  private var footstepTravel = 0f
+  private val walkingGait = WalkingGait()
   private val supportProbeOffsets: Array[(Float, Float)] =
     Array((0f, 0f), (-0.22f, -0.22f), (0.22f, -0.22f), (-0.22f, 0.22f), (0.22f, 0.22f))
   private var wasSubmergedForAudio = false
@@ -476,6 +476,7 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
     new java.util.concurrent.PriorityBlockingQueue[ChunkCreateJob](64, chunkCreateComparator)
   private val chunkReadyQueue = new java.util.concurrent.ConcurrentLinkedQueue[(Int, Chunk)]()
   private val pendingChunkCreates = java.util.concurrent.ConcurrentHashMap.newKeySet[(Int, Int)]()
+  private val chunkUnloadScratch = scala.collection.mutable.ArrayBuffer.empty[(Int, Int)]
   @volatile private var chunkGenRunning = false
   @volatile private var chunkStreamGeneration = 0
   private var chunkGenPool: java.util.concurrent.ExecutorService = null
@@ -1165,31 +1166,8 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
     val dt = lastFrameTime.toFloat.min(0.05f)
     lastTime = now
     completePendingJoin()
-    if activeWorldSession && (screen == Screen.Playing || screen == Screen.FurnaceUI || shouldRunMultiplayerBackgroundTick)
-    then
-      worldClock += lastFrameTime * modManager.rules.get("timeScale")
-      if isClientOnlyMultiplayer && environmentReceived then
-        val correction = (environmentTimeError * 0.9).max(-0.15).min(0.15) * lastFrameTime
-        worldClock += correction; environmentTimeError -= correction
-    publishedEnvironment = environmentMessage
-    publishedRules = modManager.rules.snapshot
-    publishedOps = oppedPlayerNames.toVector
-    if screen == Screen.Playing then
-      updateGame(dt)
-      modManager.fireWorldTick(dt)
-    else
-      // In multiplayer, menu/pause screens are client-side only.
-      // Keep sockets, chat, player positions, and chunk uploads alive so pausing one window
-      // does not freeze/desync everyone else. Singleplayer still fully pauses here.
-      if shouldRunMultiplayerBackgroundTick then updateMultiplayerBackgroundTick(dt)
-      handleMenuMouse()
-    if activeWorldSession && (screen == Screen.Playing || screen == Screen.FurnaceUI || shouldRunMultiplayerBackgroundTick)
-    then updateFurnace(dt)
-    if activeWorldSession && screen == Screen.FurnaceUI && !shouldRunMultiplayerBackgroundTick then
-      updateWeather(dt); updateTorchEffects(dt)
-      processChunkWorkMainThread(0, chunkUploadBudget)
-    if !activeWorldSession || (screen != Screen.Playing && screen != Screen.FurnaceUI && !shouldRunMultiplayerBackgroundTick)
-    then updateFurnaceAmbience(0f)
+    updateWorldSimulation(dt, lastFrameTime)
+    if screen != Screen.Playing then handleMenuMouse()
     updateTextMouse()
     textInputViews.clear()
     render()
@@ -1201,6 +1179,25 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
     // player back in the world; tabbing out is not quitting.
     if !windowFocused && screenBeforeEvents == Screen.Playing && screen == Screen.Paused then
       screen = Screen.Playing
+
+  private def worldSimulationRunning: Boolean =
+    activeWorldSession && (screen == Screen.Playing || shouldRunMultiplayerBackgroundTick)
+
+  private def updateWorldSimulation(dt: Float, elapsed: Double): Unit =
+    if worldSimulationRunning then
+      worldClock += elapsed * modManager.rules.get("timeScale")
+      if isClientOnlyMultiplayer && environmentReceived then
+        val correction = (environmentTimeError * 0.9).max(-0.15).min(0.15) * elapsed
+        worldClock += correction; environmentTimeError -= correction
+    publishedEnvironment = environmentMessage
+    publishedRules = modManager.rules.snapshot
+    publishedOps = oppedPlayerNames.toVector
+    if worldSimulationRunning then
+      if screen == Screen.Playing then updateGame(dt) else updateMultiplayerBackgroundTick(dt)
+      if activeWorldSession then
+        modManager.fireWorldTick(dt)
+        updateFurnace(dt)
+    else updateFurnaceAmbience(0f)
 
   private def onWindowFocus(focused: Boolean): Unit =
     windowFocused = focused
@@ -2310,7 +2307,7 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
     modUiCursorMode = false
     firstMouse = true
     selectedItemLabelTimer = 1.6f
-    footstepTravel = 0f
+    walkingGait.reset()
     cameraBobAmount = 0f
     setCursorCaptured(captured = true)
 
@@ -2522,6 +2519,7 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
       worldSaveExecutor = Executors.newSingleThreadExecutor((job: Runnable) =>
         val t = Thread(job, "blockbox-save-io")
         t.setDaemon(true)
+        t.setPriority(Thread.NORM_PRIORITY - 1)
         t
       )
 
@@ -2960,6 +2958,7 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
     updateZombies(dt)
     updatePlayerKnockback(dt)
     if chatOpen || modUiCursorMode then
+      updatePassivePlayerPhysics(dt)
       updateWeather(dt)
       updateBlockParticles(dt)
       updateTorchEffects(dt)
@@ -2974,6 +2973,7 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
       return
     if !windowFocused then
       firstMouse = true
+      updatePassivePlayerPhysics(dt)
       updateWeather(dt)
       updateBlockParticles(dt)
       updateTorchEffects(dt)
@@ -3109,7 +3109,7 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
 
   override protected def onFlightChanged(): Unit =
     onGround = false
-    smoothedHorizontalSpeed = 0f; footstepTravel = 0f; cameraBobAmount = 0f
+    smoothedHorizontalSpeed = 0f; walkingGait.reset(); cameraBobAmount = 0f
     cameraRoll = 0f; viewFovOffset = 0f
 
   private def updateGameFeel(
@@ -3138,9 +3138,6 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
       if groundedMotion then (smoothedHorizontalSpeed / 5.5f).max(0f).min(1.15f) else 0f
     cameraBobAmount =
       approachExp(cameraBobAmount, bobTarget, if groundedMotion then 14f else 9f, dt)
-    // Drive bob by distance, not frame rate. One gentle cycle per footfall keeps
-    // motion readable without the old rapid seasick oscillation.
-    if groundedMotion then cameraBobPhase += horizontalDistance * (Pi.toFloat * 0.6f)
     val fovTarget =
       if submerged then 1.5f else if sprinting && moving && !crouching then 7.5f else 0f
     viewFovOffset = approachExp(viewFovOffset, fovTarget, 8.5f, dt)
@@ -3149,12 +3146,10 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
       if moving && !submerged then -strafe * (if sprinting then 0.38f else 0.24f) else 0f
     cameraRoll = approachExp(cameraRoll, rollTarget, 12f, dt)
     if groundedMotion then
-      footstepTravel += horizontalDistance
       val stepDistance = if crouching then 1.90f else if sprinting then 1.30f else 1.58f
-      if footstepTravel >= stepDistance then
-        footstepTravel %= stepDistance
-        playFootstepSound(blockUnderPlayer, sprinting)
-    else if !onGround then footstepTravel = footstepTravel.min(0.6f)
+      val contact = walkingGait.advance(horizontalDistance, stepDistance)
+      cameraBobPhase = walkingGait.phase
+      if contact then playFootstepSound(blockUnderPlayer, sprinting)
     if submerged && !wasSubmergedForAudio then playSplashSound()
     wasSubmergedForAudio = submerged
     hurtOverlay = (hurtOverlay - dt * 2.8f).max(0f)
@@ -3195,7 +3190,8 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
 
   private def updateMultiplayerBackgroundTick(dt: Float): Unit =
     if handleLostConnection() then return
-    // Do NOT run local movement/physics here. This is only the live multiplayer heartbeat for UI screens.
+    // Menus release input, not gravity, buoyancy or combat. The host must keep
+    // simulating the world for guests even while its own inventory is open.
     processNetworkMessages()
     updateWeather(dt)
     smoothRemotePlayers(dt)
@@ -3208,30 +3204,54 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
       chatMessages(i) = (msg, t - dt)
     chatMessages.filterInPlace((_, t) => t > -2f)
     cleanupRemotePlayers()
+    updateGrassGrowth(dt)
+    updateLeafDecay(dt)
     updateBreathing(dt)
     updateEnvironmentalDamage(dt)
+    updateHealthRegen(dt)
     updateZombies(dt)
     updatePlayerKnockback(dt)
+    val before = camera
+    updatePassivePlayerPhysics(dt)
+    updateGameFeel(dt, before, false, false, playerCrouching)
+    updateWater(dt)
+    updateSandFalling()
+    updateBubbles(dt)
+    updateBlockParticles(dt)
+    updateSandParticles(dt)
+    updateTorchEffects(dt)
     // Keep chunk meshes alive while multiplayer menus are open, but cap work so UI remains responsive.
     processChunkWorkMainThread(0, 8)
     flushDirtyChunks()
     sendPlayerPositionNetwork()
+
+  private def updatePassivePlayerPhysics(dt: Float): Unit =
+    crouchAmount = PlayerStance.approach(crouchAmount, playerCrouching, dt)
+    if flyEnabled then return
+    val submerged = waterSubmersion
+    val headInWater = blockAt(camera) == Block.Water
+    val bodyInWater = blockAt(camera - Vec3(0, 0.8f, 0)) == Block.Water
+    val swimming = headInWater || bodyInWater || submerged > 0
+    updateSwimming(dt, swimming, headInWater, bodyInWater, submerged, allowInput = false)
+    moveVertical(velocity.y * dt)
+    if swimming then onGround = false
 
   private def updateSwimming(
       dt: Float,
       swimming: Boolean,
       headInWater: Boolean,
       bodyInWater: Boolean,
-      submerged: Float
+      submerged: Float,
+      allowInput: Boolean = true
   ): Unit =
     if !swimming then
-      if onGround && down(GLFW_KEY_SPACE) then
+      if allowInput && onGround && down(GLFW_KEY_SPACE) then
         velocity = Vec3(0f, modManager.rules.get("jumpSpeed"), 0f)
         onGround = false
       else velocity = Vec3(0f, (velocity.y - modManager.rules.get("gravity") * dt).max(-78f), 0f)
       return
-    val swimUp = down(GLFW_KEY_SPACE)
-    val swimDown = down(GLFW_KEY_LEFT_SHIFT) || down(GLFW_KEY_RIGHT_SHIFT)
+    val swimUp = allowInput && down(GLFW_KEY_SPACE)
+    val swimDown = allowInput && (down(GLFW_KEY_LEFT_SHIFT) || down(GLFW_KEY_RIGHT_SHIFT))
     if headInWater && submerged >= 0.3f then
       val buoyancy = 8f
       val gravity = -4f
@@ -4732,9 +4752,8 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
     val (fogR, fogG, fogB) = clearColor
     val isUnder = isUnderwater
     val visibleDist = renderDistanceBlocks.toFloat
-    val fogStart =
-      if isUnder then 0.6f else visibleDist * (0.65f * 1.6f / fogDensity).max(0.25f).min(0.85f)
-    val fogEnd = if isUnder then 25f else visibleDist * (0.95f - localRain * 0.22f)
+    val fog = WorldFog.range(visibleDist, fogDensity, localRain, isUnder)
+    val fogStart = fog.start; val fogEnd = fog.end
     applyTerrainFog(isUnder)
     setFogColor(fogR, fogG, fogB)
     glMatrixMode(GL_PROJECTION); glLoadIdentity()
@@ -4743,7 +4762,7 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
     // Fit its corners within the eye's collision clearance, including ultrawide.
     val farBlocks = if cloudsEnabled then renderDistanceBlocks.max(cloudRenderDistanceBlocks)
     else renderDistanceBlocks
-    val dynamicFov = if screen == Screen.Playing then viewFovOffset else 0f
+    val dynamicFov = viewFovOffset
     val near = CameraProjection.nearPlane(fov + dynamicFov, aspect)
     // Render distance is horizontal. Flight above the world must not push the
     // terrain past the far plane, including when clouds are disabled.
@@ -5022,14 +5041,7 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
         localLightning,
         worldSeed
       )
-    BlockboxWeather.render(
-      camera,
-      gameTime,
-      daylightFactor,
-      weatherCells,
-      weatherStrikes,
-      cloudRenderDistanceBlocks
-    )
+    BlockboxWeather.render(camera, weatherStrikes)
     applyTerrainFog(isUnder)
     renderWeatherRain()
     renderBlockParticles()
@@ -5127,13 +5139,10 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
     // vertical view component so flight cannot fog the entire ground to sky color.
     val lift = if underwater || shader then 0f
     else (camera.y - Terrain.seaLevel).max(0f) * sin(toRadians(pitch)).toFloat.max(0f)
+    val fog = WorldFog.range(distance, fogDensity, localRain, underwater)
     glFogi(GL_FOG_MODE, GL_LINEAR)
-    glFogf(
-      GL_FOG_START,
-      if underwater then 0.6f
-      else distance * (0.65f * 1.6f / fogDensity).max(0.25f).min(0.85f) + lift
-    )
-    glFogf(GL_FOG_END, if underwater then 25f else distance * (0.95f - localRain * 0.22f) + lift)
+    glFogf(GL_FOG_START, fog.start + lift)
+    glFogf(GL_FOG_END, fog.end + lift)
 
   private def skyOpenAt(x: Int, y: Int, z: Int): Boolean =
     var h = y.max(0)
@@ -5780,7 +5789,7 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
     val z2 = sp * rel.y + cp * z1
     if z2 >= -0.12f then return None
     val aspect = framebufferWidth.toFloat / framebufferHeight.toFloat.max(1f)
-    val dynamicFov = if screen == Screen.Playing then viewFovOffset else 0f
+    val dynamicFov = viewFovOffset
     val tanHalf = tan(toRadians((fov + dynamicFov).max(45f).min(130f)) / 2.0).toFloat
     val ndcX = (x1 / -z2) / (tanHalf * aspect)
     val ndcY = (y2 / -z2) / tanHalf
@@ -6285,12 +6294,11 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
     if block == Block.Air then return
     val alpha = (selectedItemLabelTimer / 0.35f).min(1f).max(0f)
     val s = uiScale
-    val hotbarSlot = (46f * s)
-      .min(((framebufferWidth.toFloat - 36f * s) / hotbarBlocks.length.toFloat - 5f * s).max(24f))
-      .max(30f)
+    val hotbar =
+      BlockboxUiLayout.hotbar(framebufferWidth, framebufferHeight, s, hotbarBlocks.length)
     // Reserve independent HUD lanes: hotbar at the bottom, hearts above it, then
     // transient item labels. This prevents the old item-name/health overlap.
-    val healthLaneY = framebufferHeight.toFloat - hotbarSlot - 42f * s
+    val healthLaneY = hotbar.slots.head.y - (18f * s).max(14f).min(22f) - 8f * s
     val y = if gameMode == GameMode.Survival then
       healthLaneY - (if isUnderwater || airSupply.remaining < airSupply.capacity then 54f
                      else 26f) * s
@@ -6627,48 +6635,43 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
     val s = uiScale
     val layout =
       BlockboxUiLayout.hotbar(framebufferWidth, framebufferHeight, s, hotbarBlocks.length)
-    val panel = layout.panel
-    rect(
-      panel.x,
-      panel.y,
-      panel.w,
-      panel.h,
-      0.01f,
-      0.015f,
-      0.025f,
-      0.34f
-    )
+    BlockboxRender2D.voxelPanel(layout.panel, s)
     for (slot, i) <- layout.slots.zipWithIndex do
       val sx = slot.x; val y = slot.y; val slotSize = slot.w
-      val selected = i == selectedBlock
       val block = hotbarBlocks(i)
       val hasItem = block != Block.Air && (gameMode == GameMode.Creative || hotbarCounts(i) > 0)
-      BlockboxRender2D.drawSlotFrame(sx, y, slotSize, selected, hover = false, s)
+      BlockboxRender2D.drawSlotFrame(sx, y, slotSize, selected = false, hover = false, s)
       if hasItem then
-        val icon = (slotSize * 0.50f).min(24f * s).max(16f)
-        val iconY = y + (slotSize - icon) / 2f + 5f * s
+        val icon = slotSize * 0.76f
+        val iconY = y + (slotSize - icon) / 2f
         renderBlockIcon(block, sx + (slotSize - icon) / 2f, iconY, icon)
-        if gameMode == GameMode.Survival then
-          val count = hotbarCounts(i)
-          if count > 0 then
-            val ns = count.toString
-            val cell = (2.35f * s).max(2f).min(slotSize / 16f)
-            val tw = compactNumberWidth(ns, cell)
-            val nx = sx + slotSize - tw - 5f * s
-            val ny = y + slotSize - 5f * cell - 4f * s
-            rect(nx - 2f * s, ny - 1f * s, tw + 4f * s, 5f * cell + 3f * s, 0f, 0f, 0f, 0.58f)
-            drawCompactNumber(nx, ny, ns, cell, 1f, 1f, 1f)
-      val label = hotbarLabel(i)
-      val labelCell = (2.1f * s).max(1.8f).min(slotSize / 17f)
-      drawCompactNumber(
-        sx + slotSize / 2f - compactNumberWidth(label, labelCell) / 2f,
-        y + 7f * s,
-        label,
-        labelCell,
-        0.97f,
-        0.97f,
-        0.99f
-      )
+        val count = hotbarCounts(i)
+        if count > 1 then
+          val label = count.toString
+          val scale = (1.8f * s).min(slotSize / 18f)
+          renderTextShadow(
+            sx + slotSize - textWidth(label, scale) - 2f * s,
+            y + slotSize - PixelFont.height * scale - 3f * s,
+            label,
+            1,
+            1,
+            1,
+            scale
+          )
+      else
+        // Empty-slot hotkeys stay available without competing with item silhouettes.
+        renderTextShadow(
+          sx + 5f * s,
+          y + 4f * s,
+          hotbarLabel(i),
+          0.85f,
+          0.85f,
+          0.85f,
+          (0.9f * s).min(slotSize / 28f)
+        )
+    layout.slots.lift(selectedBlock).foreach { slot =>
+      BlockboxRender2D.drawSlotSelection(slot.x, slot.y, slot.w, s)
+    }
 
   private def hotbarLabel(index: Int): String = (index + 1).toString
 
@@ -6749,7 +6752,7 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
       glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
       quad(
         1f,
-        (1f, 1f, 1f),
+        BlockTints.item(block, FaceKind.North),
         (x, y),
         (x + size, y),
         (x + size, y + size),
@@ -7005,6 +7008,7 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
         weatherCells,
         worldSeed,
         activeBlockAt,
+        waterLevelAt,
         (x, z) => loadedChunkForBlock(x, z).nonEmpty
       )
 
@@ -8891,7 +8895,8 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
     val retainRadiusSq = retainRadius * retainRadius
     val cameraBlockX = ccx * Terrain.chunkSize
     val cameraBlockZ = ccz * Terrain.chunkSize
-    val toRemove = chunks.keys.filter { case (cx, cz) =>
+    chunkUnloadScratch.clear()
+    chunks.foreach { case (key @ (cx, cz), _) =>
       val wx = cx * Terrain.chunkSize + Terrain.chunkSize / 2
       val wz = cz * Terrain.chunkSize + Terrain.chunkSize / 2
       val dx = wx - cameraBlockX; val dz = wz - cameraBlockZ
@@ -8901,8 +8906,9 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
         remoteFurnaces.valuesIterator.exists(p =>
           chunkCoordBlock(p._1) == cx && chunkCoordBlock(p._3) == cz
         )
-      !furnacePinned && dx * dx + dz * dz > retainRadiusSq
-    }.toList
+      if !furnacePinned && dx * dx + dz * dz > retainRadiusSq then chunkUnloadScratch += key
+    }
+    val toRemove = chunkUnloadScratch
     val preparedForUnload =
       if toRemove.nonEmpty && canUseLocalChunkSaves then
         try Some(BlockboxSaveFiles.prepareWorldForSave(currentWorldDir.toPath))
@@ -8943,10 +8949,20 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
     chunkGenRunning = true
     val cores = Runtime.getRuntime.availableProcessors().max(1)
     val threads = (cores - 2).max(1).min(6)
-    chunkGenPool = java.util.concurrent.Executors.newFixedThreadPool(threads)
+    val chunkThreads = new java.util.concurrent.ThreadFactory:
+      private val ids = new java.util.concurrent.atomic.AtomicInteger(0)
+      override def newThread(job: Runnable): Thread =
+        val t = new Thread(job, s"blockbox-chunk-${ids.incrementAndGet()}")
+        t.setDaemon(true)
+        // Below the audio mixer and the desktop audio process. Meshing stays
+        // correct; it just yields the core when a sample is due.
+        t.setPriority(Thread.NORM_PRIORITY - 2)
+        t
+    chunkGenPool = java.util.concurrent.Executors.newFixedThreadPool(threads, chunkThreads)
     for i <- 0 until threads do
       chunkGenPool.submit(new Runnable:
         override def run(): Unit =
+          Thread.currentThread.setPriority(Thread.NORM_PRIORITY - 2)
           var preferCreate = i % 2 == 0
           def processCreate(): Boolean =
             val createKey = chunkCreateQueue.poll()

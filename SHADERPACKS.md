@@ -12,6 +12,15 @@ Ultra and Ray Traced share linear HDR surface lighting and a single filmic displ
 
 `blockbox.linearLighting=true` puts characters and held tools through the terrain's linear surface lighting and deferred shadows. Animated players and zombies also cast into the shared shadow map. Inventory previews and the first-person layer retain their own display lighting.
 
+Terrain and compatibility entities share one validated linear fog interval. Heavy rain
+shortens both fog endpoints while retaining a gradual transition, including at the
+lightest horizon-fog setting. Rain uses roof-occluded textured streaks with transparent
+edges and height fades; broad untextured sheets beneath clouds have been removed.
+Third-person tools follow the vanilla `item/handheld` right-hand display basis
+(`0, -90, 55` before the hand layer), anchored at the handle and scaled to the avatar.
+See the [vanilla handheld model](https://assets.mcasset.cloud/1.21.1/assets/minecraft/models/item/handheld.json)
+and [Mojang's player holding animation](https://github.com/Mojang/bedrock-samples/blob/main/resource_pack/animations/player.animation.json).
+
 Underwater absorption and scattering cover the wet part of the view ray. Airborne scenery stays visible through a gently distorted surface without a hard critical-angle mask. A near-plane crossing is reconstructed when the camera sits just below the surface; it cannot turn the sky into deep-water fog. Shore vertices stay pinned to their banks, exposed sides and bottoms close the water volume, and a separate water depth target selects the nearest interface while preserving opaque depth for refraction.
 
 Water depth uses R32F rather than half precision. Optical waves fade before their

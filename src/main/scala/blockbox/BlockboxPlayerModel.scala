@@ -175,8 +175,8 @@ object BlockboxPlayerModel:
       glRotatef(
         if zombie then zombieArm
         else
-          -leg * (if holding then 0.18f
-                  else 0.85f) + action * 65f + sway + crouch * 23f + (if holding then 12f
+          -leg * (if holding then 0.5f
+                  else 0.85f) + action * 65f + sway + crouch * 23f + (if holding then 18f
                                                                       else 0f)
         ,
         1f,

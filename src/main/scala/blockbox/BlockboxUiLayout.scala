@@ -56,12 +56,13 @@ final case class FurnaceLayout(
 object BlockboxUiLayout:
   def hotbar(w: Float, h: Float, s: Float, count: Int = 9): HotbarLayout =
     require(count > 0)
-    val gap = (3f * s).max(2f)
-    val slot = (52f * s).min((w - 24f * s - gap * (count - 1)) / count).max(12f)
+    val gap = (3f * s).max(2f).round.toFloat
+    val slot = math.floor((48f * s).min((w - 24f * s - gap * (count - 1)) / count).max(12f)).toFloat
     val width = slot * count + gap * (count - 1)
-    val x = (w - width) / 2f; val y = (h - slot - 12f * s).max(8f)
+    val x = ((w - width) / 2f).round.toFloat; val y = (h - slot - 10f * s).max(8f).round.toFloat
+    val edge = (4f * s).max(3f).round.toFloat
     HotbarLayout(
-      UiRect(x - 8 * s, y - 8 * s, width + 16 * s, slot + 16 * s),
+      UiRect(x - edge, y - edge, width + edge * 2, slot + edge * 2),
       Vector.tabulate(count)(i => UiRect(x + i * (slot + gap), y, slot, slot))
     )
 

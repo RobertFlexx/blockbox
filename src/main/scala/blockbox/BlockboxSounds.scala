@@ -46,6 +46,9 @@ object BlockboxSounds:
     val key = Key(action, material, Math.floorMod(variant, variants))
     cache.computeIfAbsent(key, k => synthesize(k.action, k.material, k.variant))
 
+  def cachedClip(action: Action, material: Material, variant: Int): Option[Array[Float]] =
+    Option(cache.get(Key(action, material, Math.floorMod(variant, variants))))
+
   private def profile(material: Material): Profile = material match
     case Stone   => Profile(185, 2800, 0.72f, 0.09f, 0.030f)
     case Wood    => Profile(125, 1900, 0.34f, 0.24f, 0.045f)

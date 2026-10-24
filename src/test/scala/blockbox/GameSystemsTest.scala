@@ -10,6 +10,8 @@ import scala.collection.mutable.ArrayBuffer
   TextEditingTest.run()
   PixelFontTest.run()
   WorldPolishTest.run()
+  WeatherPolishTest.run()
+  GameSystemsTest.audioCushion()
   GameSystemsTest.layouts()
   GameSystemsTest.journal()
   GameSystemsTest.terrain()
@@ -27,6 +29,13 @@ import scala.collection.mutable.ArrayBuffer
   println("GameSystemsTest: all enabled tests passed")
 
 object GameSystemsTest:
+  def audioCushion(): Unit =
+    val bytes = BlockboxAudioTiming.deviceBytes(44100)
+    val quanta = BlockboxAudioTiming.primeQuanta(44100)
+    assert(bytes >= 44100 * 4 * 60 / 1000, "output buffer covers a chunk-mesh GC pause")
+    assert(quanta * BlockboxAudioTiming.mixerFrames >= 44100 * 60 / 1000, "mixer primes that same cushion")
+    assert(BlockboxAudioTiming.latencyMillis >= 60, "device latency stays ahead of meshing")
+
   def appearance(): Unit =
     var used = Set.empty[Int]
     for _ <- 0 until BlockboxNet.MAX_PLAYERS do

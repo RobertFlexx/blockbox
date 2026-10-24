@@ -293,12 +293,15 @@ object BlockboxRender2D:
     rect(x, y, e, size, 0.17f, 0.17f, 0.17f, 0.98f)
     rect(x, y + size - e, size, e, 0.60f, 0.60f, 0.60f, 0.92f)
     rect(x + size - e, y, e, size, 0.56f, 0.56f, 0.56f, 0.92f)
-    if selected then
-      val s = (2f * scale).max(1f)
-      rect(x - s * 2f, y - s * 2f, size + s * 4f, s, 0.98f, 0.98f, 0.98f, 1f)
-      rect(x - s * 2f, y + size + s, size + s * 4f, s, 0.98f, 0.98f, 0.98f, 1f)
-      rect(x - s * 2f, y - s * 2f, s, size + s * 4f, 0.98f, 0.98f, 0.98f, 1f)
-      rect(x + size + s, y - s * 2f, s, size + s * 4f, 0.98f, 0.98f, 0.98f, 1f)
+    if selected then drawSlotSelection(x, y, size, scale)
+
+  /** Draw after adjacent slots and icons, so no neighboring bevel erases the selection. */
+  def drawSlotSelection(x: Float, y: Float, size: Float, scale: Float): Unit =
+    val s = (2f * scale).max(1f).round.toFloat
+    rect(x - s * 2f, y - s * 2f, size + s * 4f, s, 0.98f, 0.98f, 0.98f, 1f)
+    rect(x - s * 2f, y + size + s, size + s * 4f, s, 0.98f, 0.98f, 0.98f, 1f)
+    rect(x - s * 2f, y - s * 2f, s, size + s * 4f, 0.98f, 0.98f, 0.98f, 1f)
+    rect(x + size + s, y - s * 2f, s, size + s * 4f, 0.98f, 0.98f, 0.98f, 1f)
 
   def slider(x: Float, y: Float, w: Float, value: Float, scale: Float): Unit =
     val v = value.max(0f).min(1f)

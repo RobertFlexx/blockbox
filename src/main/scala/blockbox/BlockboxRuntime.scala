@@ -46,6 +46,19 @@ object BlockboxPlatform:
           s"Blockbox: no GLFW_PLATFORM set, GLFW will auto-detect on $xdg session (WAYLAND_DISPLAY=$hasWaylandDisplay DISPLAY=$hasDisplay)"
         )
 
+/** Device cushion for the mixer. Chunk meshing can pause the JVM for tens of milliseconds;
+  * the output buffer has to be deeper than that pause or the stream crackles.
+  */
+private[blockbox] object BlockboxAudioTiming:
+  val latencyMillis = 80
+  val mixerFrames = 256
+  def deviceBytes(sampleRate: Int): Int =
+    val frames = (sampleRate.toLong * latencyMillis / 1000L).toInt.max(mixerFrames)
+    frames * 4
+  def primeQuanta(sampleRate: Int): Int =
+    val frames = (sampleRate.toLong * latencyMillis / 1000L).toInt.max(mixerFrames)
+    (frames + mixerFrames - 1) / mixerFrames
+
 private object BlockboxProceduralAudioEngine:
   private final case class Request(
       samples: () => Array[Float],
@@ -86,7 +99,9 @@ private object BlockboxProceduralAudioEngine:
 
   def prepare(): Unit =
     if prepared.compareAndSet(false, true) then
-      enqueue(Request(() => { RecordedAudio.preload(); Array.emptyFloatArray }, 0f, 1f, 0f))
+      enqueue(Request(() => Array.emptyFloatArray, 0f, 1f, 0f))
+      val preload = new Thread(() => RecordedAudio.preload(), "blockbox-audio-preload")
+      preload.setDaemon(true); preload.start()
 
   private trait AudioSink:
     def backendName: String
@@ -166,7 +181,7 @@ private object BlockboxProceduralAudioEngine:
         "--rate=44100",
         "--channels=2",
         "--channel-map=FL,FR",
-        "--latency=16ms",
+        s"--latency=${BlockboxAudioTiming.latencyMillis}ms",
         "--format=s16",
         "-"
       )
@@ -176,14 +191,27 @@ private object BlockboxProceduralAudioEngine:
 
     try
       val line = AudioSystem.getSourceDataLine(format)
-      line.open(format, 4096)
+      line.open(format, BlockboxAudioTiming.deviceBytes(format.getSampleRate.toInt))
       line.start()
       return new JavaSoundSink(line)
     catch case e: Throwable => failures ::= Option(e.getMessage).getOrElse(e.getClass.getSimpleName)
 
     val alsa = executableOnPath("aplay").flatMap { exe =>
       processSink(
-        Seq(exe, "-q", "-t", "raw", "-f", "S16_LE", "-r", "44100", "-c", "2"),
+        Seq(
+          exe,
+          "-q",
+          "-t",
+          "raw",
+          "-f",
+          "S16_LE",
+          "-r",
+          "44100",
+          "-c",
+          "2",
+          s"--buffer-time=${BlockboxAudioTiming.latencyMillis * 1000}",
+          "--period-time=20000"
+        ),
         "ALSA aplay"
       )
     }
@@ -203,17 +231,27 @@ private object BlockboxProceduralAudioEngine:
       pitch: Float,
       pan: Float
   ): Unit =
-    enqueue(
-      Request(
-        () =>
-          RecordedAudio
-            .effect(action, material, variant)
-            .getOrElse(BlockboxSounds.clip(action, material, variant)),
-        gain.max(0f).min(2f),
-        pitch.max(0.7f).min(1.4f),
-        pan.max(-1f).min(1f)
+    val volume = gain.max(0f).min(2f)
+    val speed = pitch.max(0.7f).min(1.4f)
+    val balance = pan.max(-1f).min(1f)
+    val ready = RecordedAudio
+      .cachedEffect(action, material, variant)
+      .orElse(BlockboxSounds.cachedClip(action, material, variant))
+    if ready.nonEmpty then
+      startWorkers()
+      queuePlayback(Playback(ready.get, volume, speed, balance, System.nanoTime()))
+    else
+      enqueue(
+        Request(
+          () =>
+            RecordedAudio
+              .effect(action, material, variant)
+              .getOrElse(BlockboxSounds.clip(action, material, variant)),
+          volume,
+          speed,
+          balance
+        )
       )
-    )
 
   def rain(intensity: Float): Unit =
     rainTarget = intensity.max(0f).min(1f) * 0.72f
@@ -281,14 +319,20 @@ private object BlockboxProceduralAudioEngine:
     )
 
   private def enqueue(request: Request): Unit =
+    if requests.offer(request) then startWorkers()
+
+  private def startWorkers(): Unit =
     running = true
-    if requests.offer(request) then
-      if synthStarted.compareAndSet(false, true) then
-        synthThread = new Thread(() => synthesisLoop(), "blockbox-audio-synth")
-        synthThread.setDaemon(true); synthThread.start()
-      if System.nanoTime() >= retryAfter.get() && mixerStarted.compareAndSet(false, true) then
-        mixerThread = new Thread(() => audioLoop(), "blockbox-audio-mixer")
-        mixerThread.setDaemon(true); mixerThread.start()
+    if synthStarted.compareAndSet(false, true) then
+      synthThread = new Thread(() => synthesisLoop(), "blockbox-audio-synth")
+      synthThread.setDaemon(true); synthThread.start()
+    if System.nanoTime() >= retryAfter.get() && mixerStarted.compareAndSet(false, true) then
+      mixerThread = new Thread(() => audioLoop(), "blockbox-audio-mixer")
+      mixerThread.setDaemon(true)
+      // Best-effort: on Linux this asks for a higher nice. Chunk workers sit below
+      // normal so they lose the CPU to this thread even when the nice change is denied.
+      mixerThread.setPriority(Thread.MAX_PRIORITY)
+      mixerThread.start()
 
   private def synthesisLoop(): Unit =
     try
@@ -297,7 +341,7 @@ private object BlockboxProceduralAudioEngine:
         if request.gain == 0f || System.nanoTime() - request.createdAt < 150_000_000L then
           val samples = request.samples()
           if samples.nonEmpty && request.gain > 0f then
-            pending.offer(
+            queuePlayback(
               Playback(samples, request.gain, request.pitch, request.pan, request.createdAt)
             )
     catch
@@ -305,30 +349,36 @@ private object BlockboxProceduralAudioEngine:
       case e: Exception            => System.err.println("Sound synthesis failed: " + e.getMessage)
     finally synthStarted.set(false)
 
+  private def queuePlayback(clip: Playback): Unit =
+    if !pending.offer(clip) then
+      pending.poll()
+      pending.offer(clip)
+
   private def audioLoop(): Unit =
     var sink: AudioSink = null
     try
+      Thread.currentThread.setPriority(Thread.MAX_PRIORITY)
       sink = openAudioSink(new AudioFormat(rate, 16, 2, true, false))
       currentSink = sink
       System.err.println(s"Blockbox audio: ${sink.backendName}, stereo 44.1 kHz")
       val active = scala.collection.mutable.ArrayBuffer.empty[Voice]
-      val frames = 256
+      val frames = BlockboxAudioTiming.mixerFrames
       val bytes = new Array[Byte](frames * 4)
-      val frameNanos = (frames * 1_000_000_000.0 / rate).toLong
-      var deadline = System.nanoTime()
       var rainCursor = 0
       var rainVolume = 0f
       var furnaceCursor = 0
       var furnaceVolume = 0f
       var firePan = 0f
-      while running do
-        var collecting = active.length < 32
+      def pcm(value: Float): Int = (tanh(value.toDouble) * 0.95 * Short.MaxValue).toInt
+      def mixQuantum(): Unit =
+        var collecting = true
         while collecting do
           val next = pending.poll()
           if next == null then collecting = false
           else if System.nanoTime() - next.createdAt < 150_000_000L then
+            // A fresh contact must not wait for a full mixer to finish old tails.
+            if active.length >= 32 then active.remove(0)
             active += Voice(next)
-            if active.length >= 32 then collecting = false
         var frame = 0
         while frame < frames do
           var left = 0f; var right = 0f; var v = 0
@@ -359,22 +409,43 @@ private object BlockboxProceduralAudioEngine:
               voice.cursor += clip.pitch
             else voice.cursor = clip.samples.length
             v += 1
-          def pcm(value: Float): Int = (tanh(value.toDouble) * 0.95 * Short.MaxValue).toInt
           val l = pcm(left); val r = pcm(right); val offset = frame * 4
           bytes(offset) = l.toByte; bytes(offset + 1) = (l >>> 8).toByte
           bytes(offset + 2) = r.toByte; bytes(offset + 3) = (r >>> 8).toByte
           frame += 1
-        var v = active.length - 1
-        while v >= 0 do
-          if active(v).cursor >= active(v).clip.samples.length - 1 then active.remove(v)
-          v -= 1
-        // Clock silence too: a running desktop stream avoids device underruns and
-        // the first-impact delay. Pacing prevents filling an OS pipe far in advance.
+        var done = active.length - 1
+        while done >= 0 do
+          if active(done).cursor >= active(done).clip.samples.length - 1 then active.remove(done)
+          done -= 1
+      // Fill the device before pacing. A later scheduling stall then drains this
+      // cushion instead of playing silence. The sample math above is unchanged.
+      val leadFrames = BlockboxAudioTiming.primeQuanta(rate.toInt).toLong * frames
+      var primed = 0
+      while running && primed < BlockboxAudioTiming.primeQuanta(rate.toInt) do
+        mixQuantum()
         sink.write(bytes, bytes.length)
-        deadline += frameNanos
+        primed += 1
+      var origin = System.nanoTime()
+      var written = leadFrames
+      while running do
+        mixQuantum()
+        sink.write(bytes, bytes.length)
+        written += frames
         val now = System.nanoTime()
-        if deadline > now then java.util.concurrent.locks.LockSupport.parkNanos(deadline - now)
-        else if now - deadline > 50_000_000L then deadline = now
+        val played = ((now - origin).toDouble * (rate / 1.0e9)).toLong
+        var buffered = written - played
+        if buffered < 0 then
+          // The device already underran. Drop the missed interval instead of
+          // synthesizing it; catching up that gap would add lasting latency.
+          origin = now
+          written = frames.toLong
+          buffered = frames.toLong
+        val surplus = buffered - leadFrames
+        if surplus > 0 then
+          val maxSleep = (leadFrames * 1.0e9 / rate).toLong
+          val sleepNanos = (surplus * 1.0e9 / rate).toLong
+          if sleepNanos > 0 then
+            java.util.concurrent.locks.LockSupport.parkNanos(sleepNanos.min(maxSleep))
     catch
       case _: InterruptedException => Thread.currentThread().interrupt()
       case e: Exception            =>
@@ -424,18 +495,20 @@ trait BlockboxAudio:
       speed: Float = 1f,
       pan: Float = 0f
   ): Unit =
+    val sequence = soundSequence.getAndIncrement()
+    val variant = Math.floorMod(sequence, BlockboxSounds.variants)
     if soundEnabled then
-      val sequence = soundSequence.getAndIncrement()
       val pitch = speed * (0.97f + Math.floorMod(sequence * 13, 11) * 0.006f)
       BlockboxProceduralAudioEngine.play(
         action,
         BlockboxSounds.material(block),
-        sequence,
+        variant,
         gain,
         pitch,
         pan
       )
-      soundEvent(action, block, Math.floorMod(sequence, 64))
+    // Muting one's own speakers must not silence footsteps for everyone else.
+    soundEvent(action, block, variant)
 
   protected def playPlaceSound(): Unit = effect(BlockboxSounds.Action.Ui, Block.Wood, 0.75f)
   protected def playPlaceSound(block: Block): Unit =

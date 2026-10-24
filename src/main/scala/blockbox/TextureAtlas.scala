@@ -45,15 +45,29 @@ final class TextureAtlas(texturePack: TexturePack, anisotropicFiltering: Boolean
     textureId = 0
 
   def uv(block: Block, face: FaceKind, u: Float, v: Float): (Float, Float) =
-    tileUv(block.ordinal * faceCount + face.ordinal, u, v)
+    val out = uvScratch.get()
+    writeTileUv(block.ordinal * faceCount + face.ordinal, u, v, out, 0)
+    (out(0), out(1))
+
+  /** Writes the same atlas coordinate as `uv` without allocating a tuple per vertex. */
+  def writeUv(block: Block, face: FaceKind, u: Float, v: Float, out: Array[Float], offset: Int): Unit =
+    writeTileUv(block.ordinal * faceCount + face.ordinal, u, v, out, offset)
 
   /** The biome-tinted grass fringe, drawn as a cutout over the untouched grass side. */
-  def grassOverlayUv(u: Float, v: Float): (Float, Float) = tileUv(grassOverlayTile, u, v)
+  def grassOverlayUv(u: Float, v: Float): (Float, Float) =
+    val out = uvScratch.get()
+    writeTileUv(grassOverlayTile, u, v, out, 0)
+    (out(0), out(1))
+
+  def writeGrassOverlayUv(u: Float, v: Float, out: Array[Float], offset: Int): Unit =
+    writeTileUv(grassOverlayTile, u, v, out, offset)
 
   @volatile private var grassOverlayPresent = false
   def hasGrassOverlay: Boolean = grassOverlayPresent
 
-  private def tileUv(tile: Int, u: Float, v: Float): (Float, Float) =
+  private val uvScratch = ThreadLocal.withInitial(() => new Array[Float](2))
+
+  private def writeTileUv(tile: Int, u: Float, v: Float, out: Array[Float], offset: Int): Unit =
     val tx = tile % columns
     val ty = tile / columns
     val x0 = tx * tileStep + tileBorder
@@ -62,7 +76,8 @@ final class TextureAtlas(texturePack: TexturePack, anisotropicFiltering: Boolean
     val v0 = y0.toFloat / textureHeight.toFloat
     val u1 = (x0 + tileSize).toFloat / textureWidth.toFloat
     val v1 = (y0 + tileSize).toFloat / textureHeight.toFloat
-    (u0 + (u1 - u0) * u, v0 + (v1 - v0) * v)
+    out(offset) = u0 + (u1 - u0) * u
+    out(offset + 1) = v0 + (v1 - v0) * v
 
   private def detectPackTileSize(): Int =
     def candidateDirs(root: File): List[File] = List(

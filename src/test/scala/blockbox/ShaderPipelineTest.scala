@@ -250,6 +250,18 @@ object ShaderPipelineTest:
       blockbox.io.BlockboxFiles.deleteRecursive(temporary)
 
   def polishFrames(root: Path, output: Path, width: Int, height: Int): Unit =
+    RecordedAudio.preload()
+    for material <- BlockboxSounds.Material.values; variant <- 0 until BlockboxSounds.variants do
+      val samples = RecordedAudio
+        .cachedEffect(BlockboxSounds.Action.Step, material, variant)
+        .orElse(BlockboxSounds.cachedClip(BlockboxSounds.Action.Step, material, variant))
+        .get
+      val peak = samples.iterator.map(math.abs).max
+      val onset = samples.indexWhere(v => math.abs(v) > peak * 0.08f)
+      assert(
+        onset >= 0 && onset < BlockboxSounds.sampleRate / 50,
+        s"$material step $variant has an immediate audible attack: $onset samples"
+      )
     val recorded = Files.walk(root.resolve("assets/audio"))
     val clips = try
       import scala.jdk.CollectionConverters.*
@@ -437,7 +449,7 @@ object ShaderPipelineTest:
         0
       )
       BlockboxSky.renderClouds(camera, time, 900, phase, daylight, 1f, 0, 8765)
-      BlockboxWeather.render(camera, time, daylight, cells, Seq.empty, 900)
+      BlockboxWeather.render(camera, Seq.empty)
       capture(output.resolve("localized-storm.png"), width, height); noError("localized storm")
       val atlas = TextureAtlas(
         TexturePack("review", "Review", "Blockbox", Some(root.resolve("assets/textures").toFile))
@@ -1556,6 +1568,51 @@ object ShaderPipelineTest:
         println(
           "[ray-trace] " + BlockboxRayTrace.status + "; completed world frame=" + BlockboxRayTrace.frameReady
         )
+    // Light horizon fog + heavy rain used to reverse the fixed-function fog
+    // interval. Terrain stayed colored while players/zombies became grey silhouettes.
+    val stormMob = ZombieSystem.Zombie(11, Vec3(-5f, 40, 4))
+    stormMob.yaw = 160; stormMob.bodyYaw = 160; mobs += stormMob
+    dry.pos = Vec3(-2, 41.62f, 5)
+    set(game, "fogDensity", 0.6f)
+    for (pack, shaders) <- Seq(
+        ("ultra", true),
+        ("ray-traced", true),
+        ("default", true),
+        ("default", false)
+      )
+    do
+      assert(pipeline.selectPack(pack))
+      for repeat <- 0 until 2 do
+        frame(
+          s"rain-entities-$pack-$shaders-$repeat",
+          Vec3(0, 41.9f, 13),
+          0,
+          5,
+          1,
+          shaders = shaders
+        )
+        val shot = pixels()
+        def coloredNear(position: Vec3, isBlue: Boolean): Int =
+          val (sx, sy, _) =
+            project.invoke(game, position).asInstanceOf[Option[(Float, Float, Float)]].get
+          (for y <- sy.toInt - 8 to sy.toInt + 8; x <- sx.toInt - 8 to sx.toInt + 8 yield
+            val i = ((height - 1 - y) * width + x) * 4
+            val r = shot(i); val g = shot(i + 1); val b = shot(i + 2)
+            if isBlue then b > r * 1.5f && b > g * 1.2f && b > 35
+            else g > r * 1.05f && g > b * 1.15f && g > 20
+          ).count(identity)
+        val blue = coloredNear(dry.pos - Vec3(0, 0.55f, 0), true)
+        val green = coloredNear(stormMob.pos + Vec3(0, 1.65f, 0), false)
+        assert(
+          blue > 25 && green > 10,
+          s"$pack shaders=$shaders preserves colored player clothes and zombie skin in rain: $blue / $green"
+        )
+        assert(
+          glGetFloat(GL_FOG_END) > glGetFloat(GL_FOG_START),
+          "weather never leaves a reversed fog interval"
+        )
+    mobs.remove(mobs.indexOf(stormMob)); dry.pos = originalPosition
+    set(game, "fogDensity", 1.6f)
     assert(pipeline.selectPack("ultra"))
     get[AirSupply](game, "airSupply").remaining = 7f
     frame("survival-underwater", Vec3(8, 38.2f, 4), 0, 3, 0, true)
@@ -1718,6 +1775,28 @@ object ShaderPipelineTest:
     noError("solid tools and UI icons")
 
   private def inventoryFrames(game: Blockbox, output: Path, width: Int, height: Int): Unit =
+    val icon = game.getClass.getDeclaredMethod(
+      "renderBlockIcon",
+      classOf[Block],
+      java.lang.Float.TYPE,
+      java.lang.Float.TYPE,
+      java.lang.Float.TYPE
+    )
+    icon.setAccessible(true)
+    glBindFramebuffer(GL_FRAMEBUFFER, 0); glViewport(0, 0, width, height); glUseProgram(0)
+    glClearColor(0.12f, 0.12f, 0.12f, 1); glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
+    BlockboxRender2D.setupOrtho(width, height)
+    for (block, index) <- Seq(Block.GrassTuft, Block.Fern).zipWithIndex do
+      val x = 100f + index * 140f
+      icon.invoke(game, block, Float.box(x), Float.box(100), Float.box(100))
+      val pixels = BufferUtils.createFloatBuffer(100 * 100 * 4)
+      glReadPixels(x.toInt, height - 200, 100, 100, GL_RGBA, GL_FLOAT, pixels)
+      val green = (0 until 100 * 100).count { i =>
+        pixels.get(i * 4 + 1) > pixels.get(i * 4) * 1.25f &&
+        pixels.get(i * 4 + 1) > pixels.get(i * 4 + 2) * 1.25f
+      }
+      assert(green > 300, s"$block inventory icon uses its grass tint mask: $green colored pixels")
+    capture(output.resolve("inventory-grass-icons.png"), width, height)
     val hotbar = get[Array[Block]](game, "hotbarBlocks");
     val hotCounts = get[Array[Int]](game, "hotbarCounts")
     val storage = get[Array[Block]](game, "backpackBlocks");
@@ -1792,6 +1871,15 @@ object ShaderPipelineTest:
       noError("furnace and journal UI")
     set(game, "framebufferWidth", width); set(game, "framebufferHeight", height)
     glViewport(0, 0, width, height)
+    hotbar(4) = Block.GrassTuft; hotbar(5) = Block.Fern
+    val hud = game.getClass.getDeclaredMethod("renderHotbar"); hud.setAccessible(true)
+    for (w, h) <- Seq((320, 240), (640, 360), (width, height)) do
+      glViewport(0, 0, w, h); set(game, "framebufferWidth", w); set(game, "framebufferHeight", h)
+      glClearColor(0.18f, 0.26f, 0.20f, 1); glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
+      hud.invoke(game)
+      capture(output.resolve(s"classic-hotbar-${w}x$h.png"), w, h); noError("hotbar fit")
+    set(game, "framebufferWidth", width); set(game, "framebufferHeight", height)
+    glViewport(0, 0, width, height)
     val player = game.getClass.getDeclaredMethod(
       "renderInventoryPlayer",
       classOf[UiRect],
@@ -1826,6 +1914,10 @@ object ShaderPipelineTest:
         ("front", 180f, false, false),
         ("three-quarter", 220f, false, false),
         ("side", 270f, false, false),
+        ("rear", 0f, false, false),
+        ("rear-three-quarter", 40f, false, false),
+        ("walking", 220f, false, false),
+        ("attack", 220f, false, false),
         ("crouch-front", 180f, true, false),
         ("crouch-side", 270f, true, false),
         ("zombie", 220f, false, true)
@@ -1859,6 +1951,8 @@ object ShaderPipelineTest:
           item
         )
         player.crouch = if crouched then 1f else 0f; player.crouching = crouched
+        if name == "walking" then { player.gait = 0.9f; player.stride = 1f }
+        if name == "attack" then player.swing = 0.5f
         val held = Some(() => { grip.invoke(game, item, (1f, 1f, 1f), Boolean.box(zombie)); () })
         BlockboxPlayerModel.render(
           player,

@@ -67,6 +67,11 @@ ripples follow the weather. Roofs and tree canopies stop the local rain. Underwa
 vision has distance absorption, subtle refraction and moving light on the bottom;
 the submerged portion of a character takes the water's color.
 
+Singleplayer menus pause the complete simulation, including furnaces and falling.
+Multiplayer menus release mouse and movement input while the world keeps running:
+players still fall, float, take damage and land normally. Opening chat also releases
+input without suspending physics. Creative flight continues to hover.
+
 Zombies spawn in small groups 24–80 blocks from players, in unlit caves and outside
 at night. Every member checks ground support, available space, zero block light,
 and distance from every player. Place torches
@@ -196,3 +201,9 @@ players hear validated, directional mining taps as well as the final break. Gras
 footsteps use softer CC0 recordings by Ashe Kirk / OwlStorm; source details are in the
 audio credits. Block debris is opaque cutout geometry with depth testing, rather than
 translucent patches through which the scenery shows.
+
+Footsteps and walking sway use one distance-driven contact phase, with walk, sprint
+and crouch stride lengths. Ready sounds bypass the decoding queue; output is paced
+without catch-up bursts, with short device buffers. Muting local audio does not mute
+the player's footsteps for other players. The hotbar uses larger centered icons,
+readable stack counts and a selection frame drawn over adjacent slot borders.

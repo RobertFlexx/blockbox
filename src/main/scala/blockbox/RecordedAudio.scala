@@ -9,7 +9,13 @@ import scala.math.*
 
 /** Bounded, worker-thread Vorbis decoding of the bundled CC0 recordings. */
 object RecordedAudio:
+  private final case class Effect(
+      action: BlockboxSounds.Action,
+      material: BlockboxSounds.Material,
+      variant: Int
+  )
   private val cache = ConcurrentHashMap[String, Option[Array[Float]]]()
+  private val effects = ConcurrentHashMap[Effect, Option[Array[Float]]]()
   private val digging = ConcurrentHashMap[(BlockboxSounds.Material, Int), Array[Float]]()
   private val root = Path
     .of(Option(System.getProperty("blockbox.audioRoot")).getOrElse("assets/audio"))
@@ -18,6 +24,22 @@ object RecordedAudio:
 
   /** Decode during the title screen, rather than behind the first block impact. */
   def preload(): Unit =
+    import BlockboxSounds.{Action, Material}
+    // Foot contacts come first. Playbacks can read these immutable arrays directly
+    // instead of joining the decode/synthesis queue behind ambience or other assets.
+    for
+      action <- Seq(
+        Action.Step,
+        Action.Land,
+        Action.Place,
+        Action.Break,
+        Action.Dig,
+        Action.Splash,
+        Action.Hurt,
+        Action.Ui
+      )
+      material <- Material.values; variant <- 0 until BlockboxSounds.variants
+    do effect(action, material, variant).getOrElse(BlockboxSounds.clip(action, material, variant))
     if Files.isDirectory(root) then
       val files = Files.walk(root, 3)
       try
@@ -119,6 +141,24 @@ object RecordedAudio:
       action: BlockboxSounds.Action,
       material: BlockboxSounds.Material,
       variant: Int
+  ): Option[Array[Float]] = effects.computeIfAbsent(
+    Effect(action, material, Math.floorMod(variant, BlockboxSounds.variants)),
+    key => selectEffect(key.action, key.material, key.variant)
+  )
+
+  def cachedEffect(
+      action: BlockboxSounds.Action,
+      material: BlockboxSounds.Material,
+      variant: Int
+  ): Option[Array[Float]] =
+    Option(
+      effects.get(Effect(action, material, Math.floorMod(variant, BlockboxSounds.variants)))
+    ).flatten
+
+  private def selectEffect(
+      action: BlockboxSounds.Action,
+      material: BlockboxSounds.Material,
+      variant: Int
   ): Option[Array[Float]] =
     import BlockboxSounds.{Action, Material}
     if action == Action.Dig then
@@ -126,7 +166,7 @@ object RecordedAudio:
         digging.computeIfAbsent(
           (material, Math.floorMod(variant, BlockboxSounds.variants)),
           key =>
-            val source = effect(Action.Place, key._1, key._2).getOrElse(
+            val source = selectEffect(Action.Place, key._1, key._2).getOrElse(
               BlockboxSounds.clip(Action.Place, key._1, key._2)
             )
             val count = source.length.min((BlockboxSounds.sampleRate * 0.12f).toInt)
