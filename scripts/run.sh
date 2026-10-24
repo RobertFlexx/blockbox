@@ -34,6 +34,18 @@ die() {
   exit 1
 }
 
+# ./scripts/run.sh --no-build
+#   Keep the existing Java helper jar and use Scala's incremental compilation
+#   server. Unchanged sources are not rebuilt. A normal launch still does a
+#   clean Java build and an in-process Scala compile.
+SKIP_BUILD=0
+for arg in "$@"; do
+  case "${arg}" in
+    --no-build) SKIP_BUILD=1 ;;
+    *) die "unknown argument: ${arg} (supported: --no-build)" ;;
+  esac
+done
+
 path_has_slash() {
   [[ "$1" == */* ]]
 }
@@ -520,25 +532,32 @@ PY_DOWNLOAD
   done
 fi
 
-rm -rf "${JAVA_CLASSES}"
-mkdir -p "${JAVA_CLASSES}"
-rm -f "${JAVA_HELPERS_JAR}"
+scala_server_args=(--server=false)
+if [[ "${SKIP_BUILD}" == "1" ]]; then
+  [[ -s "${JAVA_HELPERS_JAR}" ]] || die "--no-build needs an existing ${JAVA_HELPERS_JAR}. Run once without --no-build."
+  log "skipping rebuild (--no-build); reusing ${JAVA_HELPERS_JAR}"
+  scala_server_args=()
+else
+  rm -rf "${JAVA_CLASSES}"
+  mkdir -p "${JAVA_CLASSES}"
+  rm -f "${JAVA_HELPERS_JAR}"
 
-if [[ -d "${JAVA_SOURCE}" ]]; then
-  mapfile -t java_sources < <(find "${JAVA_SOURCE}" -name '*.java' -type f | sort)
-  if [[ "${#java_sources[@]}" -gt 0 ]]; then
-    "${JAVAC_CMD}" --release 21 -encoding UTF-8 -d "${JAVA_CLASSES}" "${java_sources[@]}"
+  if [[ -d "${JAVA_SOURCE}" ]]; then
+    mapfile -t java_sources < <(find "${JAVA_SOURCE}" -name '*.java' -type f | sort)
+    if [[ "${#java_sources[@]}" -gt 0 ]]; then
+      "${JAVAC_CMD}" --release 21 -encoding UTF-8 -d "${JAVA_CLASSES}" "${java_sources[@]}"
+    fi
   fi
+
+  JAR_CMD="${JAVA_HOME_RESOLVED}/bin/jar"
+  if [[ ! -x "${JAR_CMD}" ]]; then JAR_CMD="$(command -v jar || true)"; fi
+  [[ -n "${JAR_CMD}" && -x "${JAR_CMD}" ]] || die "JDK jar tool was not found"
+  "${JAR_CMD}" --create --file "${JAVA_HELPERS_JAR}" -C "${JAVA_CLASSES}" .
+  [[ -s "${JAVA_HELPERS_JAR}" ]] || die "failed to build Java helper jar"
 fi
 
-JAR_CMD="${JAVA_HOME_RESOLVED}/bin/jar"
-if [[ ! -x "${JAR_CMD}" ]]; then JAR_CMD="$(command -v jar || true)"; fi
-[[ -n "${JAR_CMD}" && -x "${JAR_CMD}" ]] || die "JDK jar tool was not found"
-"${JAR_CMD}" --create --file "${JAVA_HELPERS_JAR}" -C "${JAVA_CLASSES}" .
-[[ -s "${JAVA_HELPERS_JAR}" ]] || die "failed to build Java helper jar"
-
 scala-cli run "${SCALA_SOURCE}" \
-  --server=false \
+  ${scala_server_args[@]+"${scala_server_args[@]}"} \
   --java-home "${JAVA_HOME_RESOLVED}" \
   "${BLOCKBOX_JVM_ARGS_ARRAY[@]/#/--java-opt=}" \
   --java-opt "--enable-native-access=ALL-UNNAMED" \
