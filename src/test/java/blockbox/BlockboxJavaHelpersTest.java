@@ -235,6 +235,18 @@ public final class BlockboxJavaHelpersTest {
         (x, y, z) -> y == 0 || (x == 2 && y == 1) ? VoxelNavigation.SOLID : 0;
     check(VoxelNavigation.find(stairs, 0, 1, 0, 4, 1, 0, 8, 128).stream().anyMatch(p -> p.y() == 2),
         "route climbs a one-block step");
+    // Water through y=3, a solid lip through y=4 beside it, stand height y=5.
+    VoxelNavigation.Cells pool = (x, y, z) -> {
+      if (y <= 0) return VoxelNavigation.SOLID;
+      if (x >= 1 && y <= 4) return VoxelNavigation.SOLID;
+      if (x <= 0 && y >= 1 && y <= 3) return VoxelNavigation.WATER;
+      return 0;
+    };
+    var swim = VoxelNavigation.find(pool, 0, 1, 0, 2, 5, 0, 8, 512);
+    check(swim.stream().anyMatch(p -> p.x() == 0 && p.y() >= 4),
+        "zombies swim up a water column toward a higher bank");
+    check(swim.stream().anyMatch(p -> p.x() >= 1 && p.y() == 5),
+        "the swim route steps out onto the bank");
     check(VoxelNavigation.find(wall, 0, 1, 0, 0, 1, -7, 16, 1).size() <= 1,
         "path search honors its work budget");
   }

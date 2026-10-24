@@ -80,6 +80,22 @@ object InteractionSystemsTest:
       s"items float at the connected water surface: ${buoy.pos}"
     )
     val serialized = DroppedItems.messages(drops.snapshot, 3)
+    val aging = DroppedItems()
+    val sitting = aging.spawn(Block.Dirt, 1, Vec3(0.5f, 1.2f, 0.5f)).get
+    aging.update(299f, world, _ => true)
+    assert(aging.entities.contains(sitting.id), "an unpicked item lasts until five minutes")
+    aging.update(1f, world, _ => true)
+    assert(aging.entities.isEmpty, "an unpicked item despawns at five minutes")
+    val pile = DroppedItems()
+    val older = pile.spawn(Block.Sand, 1, Vec3(0.5f, 1.2f, 0.5f)).get
+    val newer = pile.spawn(Block.Sand, 1, Vec3(6f, 1.2f, 6f)).get
+    pile.update(40f, world, _ => true)
+    older.pos = Vec3(2f, 1f, 2f); newer.pos = Vec3(2.4f, 1f, 2f); newer.age = 4f
+    pile.update(0.05f, world, _ => true)
+    assert(
+      pile.entities.size == 1 && pile.entities.values.head.count == 2 && pile.entities.values.head.age < 10f,
+      "nearby stacks merge and keep the younger despawn timer"
+    )
     assert(serialized.head.startsWith("ITEMBEGIN|3|") && serialized.last == "ITEMEND|3")
     assert(serialized.forall(_.length < blockbox.net.BlockboxNet.MAX_LINE_LENGTH))
 

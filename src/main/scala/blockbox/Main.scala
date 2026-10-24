@@ -3031,7 +3031,12 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
           val swimming = headInWater || bodyInWater || submerged > 0f
           val speed = MovementSpeeds.ground(swimming, sprinting, crouching, fastMove)
           val hMove = move.normalized * speed * modManager.rules.get("moveSpeed") * dt
-          movePlayer(hMove.x, 0f, hMove.z)
+          // Sneaking on the ground stops at edges in either game mode, as in Minecraft.
+          if crouching && onGround && !swimming then
+            val hx = if hasGroundBelow(camera + Vec3(hMove.x, 0f, 0f)) then hMove.x else 0f
+            val hz = if hasGroundBelow(camera + Vec3(0f, 0f, hMove.z)) then hMove.z else 0f
+            movePlayer(hx, 0f, hz)
+          else movePlayer(hMove.x, 0f, hMove.z)
           if swimming then
             updateSwimming(dt, swimming, headInWater, bodyInWater, submerged)
             moveVertical(velocity.y * dt)
@@ -5388,6 +5393,7 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
         e.pos += (e.target - e.pos) * (1f - exp(-dt * 18f).toFloat)
         e.age += dt; e.delay = (e.delay - dt).max(0)
       }
+      droppedItems.entities.filterInPlace((_, e) => e.age < DroppedItems.lifetime && e.pos.y > -16)
       pickupRequestTimer -= dt
       if pickupRequestTimer <= 0f then
         droppedItems.entities.valuesIterator
@@ -5430,9 +5436,14 @@ final class Blockbox extends BlockboxInventory with BlockboxAudio with BlockboxC
           .foreach(gameServer.broadcast)
         itemSyncTimer = 0.15f
 
+  /** Items blink through their last twenty seconds, then the five-minute timer removes them. */
+  private def itemStillShown(age: Float): Boolean =
+    if age < DroppedItems.lifetime - 20f then true
+    else (age * 6f).toInt % 2 == 0
+
   private def renderDroppedItems(): Unit =
     val visible = droppedItems.entities.valuesIterator
-      .filter(e => (e.pos - camera).lengthSquared < 48f * 48f)
+      .filter(e => (e.pos - camera).lengthSquared < 48f * 48f && itemStillShown(e.age))
       .toVector
     if visible.isEmpty then return
     resetGlArraysAndBuffers()

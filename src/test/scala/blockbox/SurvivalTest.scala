@@ -269,6 +269,24 @@ object SurvivalTest:
       climber.pos.z < -6f && climber.pos.y >= 4.99f,
       s"swimmers climb a one-block shore: ${climber.pos}"
     )
+    // The bank is a full block above the water column, the case that used to pin
+    // swimmers against the wall at the buoyant waterline.
+    def highBank(x: Int, y: Int, z: Int): Block =
+      if y <= 0 then Block.Stone
+      else if z < -2 && y <= 5 then Block.Stone
+      else if z >= -2 && y <= 4 then Block.Water
+      else Block.Air
+    val highClimber = ZombieSystem.Zombie(44, Vec3(0.5f, 3.8f, 0.5f))
+    val highTarget = ZombieSystem.Target("HighBank", Vec3(0.5f, 7.62f, -8))
+    for _ <- 0 until 800 do
+      ZombieSystem.update(highClimber, 0.02f, Seq(highTarget), false, false, highBank)
+    assert(
+      highClimber.pos.z < -3f && highClimber.pos.y >= 5.9f && !ZombieSystem.collides(
+        highClimber.pos,
+        highBank
+      ),
+      s"swimmers climb a bank above the water: ${highClimber.pos}"
+    )
     def roof(x: Int, y: Int, z: Int): Block = if y == 4 then Block.Stone else lake(x, y, z)
     val enclosed = ZombieSystem.Zombie(43, Vec3(0.5f, 1, 0.5f))
     for _ <- 0 until 300 do

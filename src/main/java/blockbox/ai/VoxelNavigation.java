@@ -30,6 +30,16 @@ public final class VoxelNavigation {
   private static boolean clear(Cells cells, int x, int y, int z) {
     return ((cells.at(x, y, z) | cells.at(x, y + 1, z)) & (SOLID | HAZARD)) == 0;
   }
+  /** Feet in water can rise one block into more water, or breach one block of air. */
+  private static boolean canSwimUp(Cells cells, int x, int y, int z) {
+    int above = y + 1;
+    if (!clear(cells, x, above, z))
+      return false;
+    int flags = cells.at(x, above, z);
+    if ((flags & HAZARD) != 0)
+      return false;
+    return (flags & WATER) != 0 || (flags & SOLID) == 0;
+  }
   private static boolean supported(Cells cells, int x, int y, int z) {
     int below = cells.at(x, y - 1, z), here = cells.at(x, y, z);
     return (below & HAZARD) == 0 && ((below & SOLID) != 0 || (here & WATER) != 0);
@@ -83,6 +93,21 @@ public final class VoxelNavigation {
       if (c.x == tx && c.z == tz && Math.abs(c.y - ty) <= 1) {
         best = current;
         break;
+      }
+      // A stroke straight up through water, including one block of air above the
+      // surface. Without this, a bank higher than the water column is unreachable
+      // and the mob treads water against the wall.
+      if ((cells.at(c.x, c.y, c.z) & WATER) != 0) {
+        int up = c.y + 1;
+        if (up <= 509 && Math.abs(up - sy) <= 12 && canSwimUp(cells, c.x, c.y, c.z)) {
+          Step next = new Step(c.x, up, c.z);
+          float cost = 1.2f + ((cells.at(c.x, up, c.z) & WATER) != 0 ? 3f : 0f);
+          float g = current.g + cost;
+          if (g < scores.getOrDefault(next, Float.POSITIVE_INFINITY)) {
+            scores.put(next, g);
+            open.add(new Node(next, current, g, g + heuristic(next, tx, ty, tz)));
+          }
+        }
       }
       for (int dx = -1; dx <= 1; dx++)
         for (int dz = -1; dz <= 1; dz++) {

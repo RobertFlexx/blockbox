@@ -82,7 +82,7 @@ you for six seconds. They acquire players only with unobstructed sight within 32
 blocks, and cannot track a player's changing position through walls. They spread out when
 crowded and search again when a route is blocked.
 Without a target they pause, look for safe nearby destinations and wander at a
-slower pace. They float with their heads above water, keep pursuing while swimming,
+slower pace. They float with their heads above water, stroke up onto higher banks, keep pursuing while swimming,
 and climb accessible banks. Perception runs at staggered intervals; path searches
 share a bounded work budget while collision and smooth steering update every tick.
 This is deterministic perception and navigation, rather than a neural network.
@@ -156,7 +156,7 @@ See `FORMATTING.md` for the repeatable formatting command and release checks.
 Breaking a block releases a physical item. Walk close to collect it; a full inventory
 leaves it in the world. Press **Q** to throw one held item, or **Ctrl+Q** to throw the
 whole stack. Other players can collect it. Items spin, bob, merge into stacks and
-float in water; unattended drops disappear after five minutes. The host validates
+float in water; unattended drops disappear after five minutes and blink for the last twenty seconds. The host validates
 and reserves multiplayer pickups so two people cannot collect the same stack.
 
 Guests returning under the same player name resume their last position and facing
@@ -167,7 +167,7 @@ session starts fresh guest session state.
 Nearby footsteps, landings, splashes and accepted block actions are audible in
 multiplayer, with stereo direction, distance falloff and muffling through cover.
 Hold **Shift** to crouch: the camera lowers, the body bends and other players see
-the pose. Crouching reduces collision height and prevents standing into a low roof.
+the pose. Crouching reduces collision height, stops you walking off edges, and prevents standing into a low roof.
 Combat knockback applies in PvP and against zombies, with a short recovery indicator
 under the crosshair. The field-of-view slider supports 50–120 degrees.
 

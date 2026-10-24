@@ -63,11 +63,15 @@ final class DroppedItems:
 
   def update(dt: Float, at: (Int, Int, Int) => Block, loaded: Vec3 => Boolean): Unit =
     require(dt.isFinite && dt >= 0, "Invalid item tick")
+    // Five minutes from the drop, whether or not this frame's physics is capped.
+    // Merging keeps the younger age, matching Minecraft, so a fresh drop into a pile restarts it.
+    entities.valuesIterator.foreach { e =>
+      e.age += dt; e.delay = (e.delay - dt).max(0)
+    }
     var remaining = dt.min(0.5f)
     while remaining > 0 do
       val step = remaining.min(0.025f); remaining -= step
       entities.valuesIterator.foreach { e =>
-        e.age += step; e.delay = (e.delay - step).max(0)
         val resting =
           e.grounded && e.velocity.x * e.velocity.x + e.velocity.z * e.velocity.z < 0.0001f && at(
             math.floor(e.pos.x).toInt,
@@ -116,7 +120,28 @@ final class DroppedItems:
             e.grounded = e.velocity.y < 0
             e.velocity = Vec3(e.velocity.x, 0, e.velocity.z)
       }
-    entities.filterInPlace((_, e) => e.age < 300f && e.pos.y > -16)
+    mergeNearby()
+    entities.filterInPlace((_, e) => e.age < DroppedItems.lifetime && e.pos.y > -16)
+
+  /** Same-item stacks within a block combine. The pile keeps the shorter time-to-live. */
+  private def mergeNearby(): Unit =
+    val live = entities.valuesIterator.toArray
+    var i = 0
+    while i < live.length do
+      val a = live(i)
+      if entities.contains(a.id) && a.count < 64 then
+        var j = i + 1
+        while j < live.length && a.count < 64 do
+          val b = live(j)
+          if entities.contains(b.id) && a.block == b.block && (a.pos - b.pos).lengthSquared < 0.64f then
+            val amount = (64 - a.count).min(b.count)
+            a.count += amount
+            b.count -= amount
+            a.age = a.age.min(b.age)
+            a.delay = a.delay.max(b.delay)
+            if b.count <= 0 then entities.remove(b.id)
+          j += 1
+      i += 1
 
   def reserve(player: String, id: Int, maximum: Int, feet: Vec3): Option[Offer] =
     offers.valuesIterator.find(_.player.equalsIgnoreCase(player)).orElse {
@@ -175,7 +200,7 @@ final class DroppedItems:
       require(
         finite(pos) && math.abs(pos.x) <= 30000000 && math.abs(
           pos.z
-        ) <= 30000000 && age >= 0 && age <= 300 && delay >= 0 && delay <= 2
+        ) <= 30000000 && age >= 0 && age <= DroppedItems.lifetime && delay >= 0 && delay <= 2
       )
       Entity(id, block, count, pos, pos, Vec3(0, 0, 0), age, delay)
     }
@@ -192,6 +217,8 @@ final class DroppedItems:
 
 object DroppedItems:
   val maxEntities = 512
+  /** Five minutes. Minecraft uses 6000 ticks at 20 Hz. */
+  val lifetime = 300f
   def messages(snapshot: String, sequence: Long): Vector[String] =
     val rows = snapshot.stripPrefix("ITEMS|").split(';').filter(_.nonEmpty).toVector
     Vector(s"ITEMBEGIN|$sequence|${rows.length}") ++ rows

@@ -100,6 +100,17 @@ object ZombieSystem:
       )
       .isEmpty
 
+  /** Water in this column or the two blocks under the feet, so a stroke can finish above the surface. */
+  private def columnHasWater(pos: Vec3, at: (Int, Int, Int) => Block): Boolean =
+    val x = floor(pos.x).toInt
+    val zz = floor(pos.z).toInt
+    val y = floor(pos.y).toInt
+    var drop = 0
+    while drop <= 2 do
+      if at(x, y - drop, zz) == Block.Water then return true
+      drop += 1
+    false
+
   /** The feet settle below the actual top of this connected water column. A bounded scan also
     * handles deep lakes and water beneath a solid ceiling.
     */
@@ -226,6 +237,7 @@ object ZombieSystem:
         z.roaming = false; z.route = Vector.empty; z.roamTimer = 2f + z.random() * 3f
       if !z.roaming && z.roamTimer <= 0f then chooseRoam(z, at)
     var desired = Vec3(0, 0, 0)
+    var climbing = false
     if z.memory > 0f || z.roaming then
       val targetDelta = z.lastKnown - z.pos
       val distance = sqrt(targetDelta.x * targetDelta.x + targetDelta.z * targetDelta.z).toFloat
@@ -290,11 +302,23 @@ object ZombieSystem:
         val pace = (if wet then 1.20f else 1.65f) * (if z.roaming then 0.55f else 1f)
         desired = direction * (pace * (distance - 0.75f).max(0f).min(1f))
         z.targetYaw = toDegrees(atan2(direction.x, -direction.z)).toFloat
-        if waypoint.y > z.pos.y + 0.45f && (z.grounded || wet && z.swimExit <= 0f) &&
-          !collides(z.pos + Vec3(0, 1.05f, 0), at)
+        val climbReach = Vec3(waypoint.x - z.pos.x, 0, waypoint.z - z.pos.z).lengthSquared
+        val goalAbove = waypoint.y - z.pos.y
+        // A flat swim sits ~0.3 below its water-cell node, so that gap must not
+        // count as a stroke. Once a real step starts, finish it up to the node.
+        val stroke =
+          (wet || columnHasWater(z.pos, at)) && climbReach <= 2.25f && !collides(
+            z.pos + Vec3(0, 0.35f, 0),
+            at
+          ) && (goalAbove > 0.5f || (z.swimExit > 0f && goalAbove > 0.02f))
+        climbing = stroke
+        if climbing then z.swimExit = 0.35f
+        else if !wet && z.grounded && waypoint.y > z.pos.y + 0.45f && !collides(
+            z.pos + Vec3(0, 1.05f, 0),
+            at
+          )
         then
           z.velocity = Vec3(z.velocity.x, 6.7f, z.velocity.z); z.grounded = false
-          if wet then z.swimExit = 0.65f
     else z.route = Vector.empty
     val response = 1f - exp(-dt * (if wet then 4.5f else 8f)).toFloat
     z.moveVelocity += (desired - z.moveVelocity) * response
@@ -325,15 +349,21 @@ object ZombieSystem:
     if z.stuck > 0.45f then { z.routeTimer = 0f; z.stuck = 0f }
     // Damped buoyancy converges to a stable waterline. A constant upward impulse
     // used to make zombies repeatedly breach the surface and fall back down.
-    val ay = surface match
-      case Some(height) if z.swimExit <= 0f =>
-        ((height - 1.25f - z.pos.y) * 14f - z.velocity.y * 7.5f).max(-16f).min(16f)
-      case _ => if wet then -8f else -20f
+    // While a nearby step is above the water, hold a swim stroke instead of the
+    // waterline spring. The spring is what pinned mobs against a higher bank.
+    val ay =
+      if climbing then 0f
+      else
+        surface match
+          case Some(height) if z.swimExit <= 0f =>
+            ((height - 1.25f - z.pos.y) * 14f - z.velocity.y * 7.5f).max(-16f).min(16f)
+          case _ => if wet then -8f else -20f
     z.velocity = Vec3(
       z.velocity.x * exp(-dt * 7).toFloat,
       (z.velocity.y + ay * dt).max(-20f).min(8f),
       z.velocity.z * exp(-dt * 7).toFloat
     )
+    if climbing && z.velocity.y < 3.6f then z.velocity = Vec3(z.velocity.x, 3.6f, z.velocity.z)
     val shove = Vec3(z.velocity.x * dt, 0, z.velocity.z * dt)
     if !collides(z.pos + shove, at) then z.pos += shove
     var remaining = z.velocity.y * dt
